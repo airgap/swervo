@@ -13,7 +13,6 @@ use read_fonts::TableProvider;
 use read_fonts::types::{BigEndian, GlyphId};
 
 use super::{GlyphShapingResult, unicode_script_to_iso15924_tag};
-use crate::shapers::compute_used_font_features;
 use crate::{
     Font, FontBaseline, FontData, ShapedGlyph, ShapedText, ShapingFlags, ShapingOptions,
     fixed_to_float, float_to_fixed,

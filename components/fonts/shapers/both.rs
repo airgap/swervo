@@ -4,6 +4,8 @@
 
 use std::io::Write as _;
 
+use skrifa::Tag;
+
 use super::harfbuzz::HarfbuzzGlyphShapingResult;
 use super::harfrust::HarfrustGlyphShapingResult;
 use super::{GlyphShapingResult, HarfBuzzShaper, HarfRustShaper};
