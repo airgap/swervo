@@ -18,8 +18,8 @@
 //!   `SeccompAction::Errno(EPERM)` (`SECCOMP_RET_ERRNO`, enforce). The allow-list is
 //!   the §4.2 baseline plus the harvested + completeness syscalls; every un-listed
 //!   syscall now fails with `-EPERM` (observable, not killed). This is enforce ramp
-//!   step 1; the `Kill` tail (plus ioctl/socket-family arg-filtering + clone-flag
-//!   hardening) is a later step.
+//!   step 1; the `Kill` tail (plus ioctl arg-filtering + clone-flag hardening) is a
+//!   later step. (socket() is already AF_UNIX-restricted; see apply_seccomp.)
 //!
 //! Every fallible step logs and continues -- this module **never panics** (the
 //! anti-gaol requirement). [`apply_sandbox`] returns a [`SandboxOutcome`] that the
@@ -312,14 +312,17 @@ fn apply_seccomp() -> bool {
     use std::collections::BTreeMap;
     use std::convert::TryInto;
 
-    use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, SeccompRule, TargetArch};
+    use seccompiler::{
+        BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
+        SeccompRule, TargetArch,
+    };
 
-    // Allow-list (§4.2). Empty rule vec == "allow regardless of args". `socket`
-    // is allowed unconditionally here in Log mode (arg-restriction to AF_UNIX is
-    // a later, enforce-mode tightening); Landlock already denies TCP bind/connect.
+    // Allow-list (§4.2). Empty rule vec == "allow regardless of args". `socket` is
+    // restricted below to AF_UNIX-only (its own conditioned rule, NOT this allow-any-args
+    // slice); every other family EPERMs. Landlock additionally denies TCP bind/connect.
     let allow: &[libc::c_long] = &[
         // --- IPC / shared memory (ipc-channel transport) ---
-        libc::SYS_socket,
+        // NOTE: SYS_socket is NOT here — it gets its own AF_UNIX-only conditioned rule below.
         libc::SYS_socketpair,
         libc::SYS_sendmsg,
         libc::SYS_sendmmsg,
@@ -441,8 +444,28 @@ fn apply_seccomp() -> bool {
         libc::SYS_getrusage,
     ];
 
-    let rules: BTreeMap<i64, Vec<SeccompRule>> =
+    let mut rules: BTreeMap<i64, Vec<SeccompRule>> =
         allow.iter().map(|&nr| (nr as i64, Vec::new())).collect();
+
+    // socket() is NOT allow-any-args: restrict its domain (arg0, an int -> directly
+    // filterable, unlike connect()'s sockaddr-pointer family) to AF_UNIX(=1). AF_UNIX
+    // matches -> match_action Allow; any other family (AF_INET/INET6/NETLINK/PACKET) falls
+    // through this syscall's rule chain to the filter mismatch action Errno(EPERM). This
+    // also denies UDP/raw/netlink socket CREATION (Landlock AccessNet is TCP-only). Content's
+    // net is brokered to the parent (fetch is IPC over AF_UNIX), so AF_UNIX is the only family
+    // content legitimately needs; here-verified on kernel 6.8 (render OK). Dword/Eq compares
+    // the low 32 bits (the `int domain`) of arg0, the robust standard form.
+    match SeccompCondition::new(0, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, libc::AF_UNIX as u64)
+        .and_then(|cond| SeccompRule::new(vec![cond]))
+    {
+        Ok(rule) => {
+            rules.insert(libc::SYS_socket as i64, vec![rule]);
+        },
+        Err(e) => {
+            log::warn!("seccomp: failed to build socket(AF_UNIX) rule (continuing): {e}");
+            return false;
+        },
+    }
 
     let target_arch: TargetArch = match std::env::consts::ARCH.try_into() {
         Ok(a) => a,
@@ -499,7 +522,7 @@ fn apply_seccomp() -> bool {
     // apply_filter sets PR_SET_NO_NEW_PRIVS then seccomp(SECCOMP_SET_MODE_FILTER).
     match seccompiler::apply_filter(&program) {
         Ok(()) => {
-            log::info!("seccomp: filter installed in Log (audit) mode");
+            log::info!("seccomp: filter installed (Errno(EPERM) enforce; socket()=AF_UNIX-only)");
             true
         },
         Err(e) => {
