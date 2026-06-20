@@ -15,9 +15,11 @@
 //!   parent). `CompatLevel::BestEffort` means old kernels silently downgrade
 //!   instead of erroring.
 //! * **seccomp** (seccompiler 0.5.0) installed with a DEFAULT (mismatch) action of
-//!   `SeccompAction::Log` (`SECCOMP_RET_LOG`, audit-not-kill). A reasonable
-//!   allow-list is built, but because nothing is killed yet this is bring-up /
-//!   harvest posture; the Errno/Kill ramp is a later, out-of-scope tail.
+//!   `SeccompAction::Errno(EPERM)` (`SECCOMP_RET_ERRNO`, enforce). The allow-list is
+//!   the §4.2 baseline plus the harvested + completeness syscalls; every un-listed
+//!   syscall now fails with `-EPERM` (observable, not killed). This is enforce ramp
+//!   step 1; the `Kill` tail (plus ioctl/socket-family arg-filtering + clone-flag
+//!   hardening) is a later step.
 //!
 //! Every fallible step logs and continues -- this module **never panics** (the
 //! anti-gaol requirement). [`apply_sandbox`] returns a [`SandboxOutcome`] that the
@@ -119,6 +121,13 @@ pub fn content_process_policy() -> Policy {
 
     // GStreamer plugin dir (media-gstreamer is ON in NavGator's build): plugin
     // `.so` dlopen. Needs execute.
+    // The gst-plugin-scanner binary lives one level deeper than the plugin .so dir
+    // on Debian/Ubuntu multiarch: /usr/lib/<triple>/gstreamer1.0/gstreamer-1.0/. The
+    // plain gstreamer-1.0 entries cover the plugin .so dlopen dir; this explicit entry
+    // covers the scanner so exec(scanner) survives if the broad /usr/lib root is narrowed.
+    fs_exec.push(PathBuf::from(
+        "/usr/lib/x86_64-linux-gnu/gstreamer1.0/gstreamer-1.0",
+    ));
     fs_exec.push(PathBuf::from("/usr/lib/x86_64-linux-gnu/gstreamer-1.0"));
     fs_exec.push(PathBuf::from("/usr/lib/gstreamer-1.0"));
     fs_exec.push(PathBuf::from("/usr/lib64/gstreamer-1.0"));
@@ -216,43 +225,44 @@ fn apply_landlock(policy: &Policy) -> (Option<LandlockStatus>, bool) {
         },
     };
 
-    // 3. Read-only rules (file read + dir listing).
-    for path in &policy.fs_read {
-        let fd = match PathFd::new(path) {
-            Ok(fd) => fd,
-            // Absent/unreadable path: skip gracefully, do not fail the sandbox.
+    // 3. Read-only rules. Use `path_beneath_rules`, which masks each path's access
+    //    by ACCESS_FILE (keeping ReadFile, dropping ReadDir on regular files; the
+    //    full set on dirs), so every rule yields CompatResult::Full and the host
+    //    reaches FullyEnforced. (Adding a *file* like /dev/urandom or the literal
+    //    embedder-resource files with ReadDir set was the sticky-Partial cause.)
+    //    Absent paths are silently filtered (PathFd::new fails inside the helper).
+    for rule in landlock::path_beneath_rules(&policy.fs_read, read_access) {
+        let rule = match rule {
+            Ok(r) => r,
             Err(_) => continue,
         };
-        created = match created.add_rule(PathBeneath::new(fd, read_access)) {
+        created = match created.add_rule(rule) {
             Ok(c) => c,
             Err(e) => {
-                log::warn!("Landlock: failed to add read rule for {}: {e}", path.display());
-                degraded = true;
-                // `add_rule` consumes `self`; recreate the ruleset cheaply by
-                // restarting is not worth it. Best-effort: abandon and enforce
-                // what we have so far via a fresh restrict on the empty handled
-                // set is impossible here, so just stop adding and proceed.
-                // (We cannot recover `created`; bail to restrict_self below is
-                // not reachable, so return degraded with no status.)
+                log::warn!("Landlock: failed to add read rule: {e}");
                 return (None, true);
             },
         };
     }
 
-    // 4. Read + execute rules (self-exe dir, lib dirs, gstreamer plugin dir).
-    //    `from_read(abi)` already includes Execute, so the same access set
-    //    grants read+exec; keeping the lists separate is documentation of
-    //    intent (and lets a future tightening drop ReadDir from exec dirs).
+    // 4. Read + execute rules (self-exe dir/binary, lib dirs, gstreamer plugin +
+    //    scanner dirs). `from_read(abi)` includes Execute; `path_beneath_rules`
+    //    applies the same file-vs-dir masking as step 3 (Execute survives the
+    //    ACCESS_FILE mask on files, so the binary stays executable). NOTE:
+    //    containment of execve over /usr/lib (which holds set-uid-root helpers:
+    //    polkit-agent-helper-1, dbus-daemon-launch-helper, ssh-keysign, Xorg.wrap,
+    //    *chrome-sandbox, VirtualBox*, utempter) is PR_SET_NO_NEW_PRIVS (set-uid
+    //    bits ignored), NOT this path restriction — see the no_new_privs check below.
     let exec_access = AccessFs::Execute | AccessFs::ReadFile | AccessFs::ReadDir;
-    for path in &policy.fs_exec {
-        let fd = match PathFd::new(path) {
-            Ok(fd) => fd,
+    for rule in landlock::path_beneath_rules(&policy.fs_exec, exec_access) {
+        let rule = match rule {
+            Ok(r) => r,
             Err(_) => continue,
         };
-        created = match created.add_rule(PathBeneath::new(fd, exec_access)) {
+        created = match created.add_rule(rule) {
             Ok(c) => c,
             Err(e) => {
-                log::warn!("Landlock: failed to add exec rule for {}: {e}", path.display());
+                log::warn!("Landlock: failed to add exec rule: {e}");
                 return (None, true);
             },
         };
@@ -293,10 +303,10 @@ fn apply_landlock(policy: &Policy) -> (Option<LandlockStatus>, bool) {
     }
 }
 
-/// Build + install the seccomp filter with DEFAULT (mismatch) action = `Log`.
-/// Allowed syscalls map to an empty rule vec -> they *match* -> `Allow`; every
-/// other syscall hits the mismatch action `Log` (audit-not-kill). Returns
-/// whether the filter was installed.
+/// Build + install the seccomp filter with DEFAULT (mismatch) action =
+/// `Errno(EPERM)`. Allowed syscalls map to an empty rule vec -> they *match* ->
+/// `Allow`; every other syscall hits the mismatch action `Errno(EPERM)` (deny,
+/// not kill). Returns whether the filter was installed.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn apply_seccomp() -> bool {
     use std::collections::BTreeMap;
@@ -398,6 +408,37 @@ fn apply_seccomp() -> bool {
         libc::SYS_pwrite64,
         libc::SYS_fsync,
         libc::SYS_fdatasync,
+        // --- ENFORCE-step additions (default action is now Errno(EPERM)) ---
+        // Harvested under comm=navgator + gst-plugin-scanner on 6.8 (Log mode):
+        libc::SYS_connect, // AF_UNIX ipc-channel; family unfilterable, Landlock denies TCP
+        libc::SYS_execve,  // forks gst-plugin-scanner; contained by Landlock exec-path + NNP
+        libc::SYS_execveat, // same scanner spawn via newer glibc; same Landlock gate
+        libc::SYS_wait4,
+        libc::SYS_waitid,
+        libc::SYS_uname,
+        libc::SYS_prlimit64,
+        libc::SYS_close_range,
+        libc::SYS_statfs,
+        libc::SYS_fstatfs,
+        libc::SYS_set_tid_address,
+        // --- completeness for un-harvested workloads (video/audio, IndexedDB, timers) ---
+        libc::SYS_getcpu,
+        libc::SYS_get_mempolicy,
+        libc::SYS_setsockopt,
+        libc::SYS_getsockopt,
+        libc::SYS_getsockname,
+        libc::SYS_getpeername,
+        libc::SYS_shutdown,
+        libc::SYS_fallocate,
+        libc::SYS_fadvise64,
+        libc::SYS_timerfd_create,
+        libc::SYS_timerfd_settime,
+        libc::SYS_timerfd_gettime,
+        libc::SYS_rt_sigtimedwait,
+        libc::SYS_sched_getparam,
+        libc::SYS_sched_getscheduler,
+        libc::SYS_sched_setscheduler,
+        libc::SYS_getrusage,
     ];
 
     let rules: BTreeMap<i64, Vec<SeccompRule>> =
@@ -411,12 +452,33 @@ fn apply_seccomp() -> bool {
         },
     };
 
-    // DEFAULT (mismatch) action = Log: audit, do NOT kill. Matched (allowed)
-    // syscalls => Allow. Log != Allow, so SeccompFilter::validate() is satisfied.
+    // ENFORCE step 1: DEFAULT (mismatch) action = Errno(EPERM). Un-listed syscalls
+    // now FAIL with -EPERM (observable, recoverable) instead of audit-and-allow.
+    // NOT Kill yet (ramp tail). Matched (allowed) => Allow; Errno != Allow so
+    // SeccompFilter::validate() is satisfied (same invariant the Log path used).
+    // Deny-set assertion: the escape-primitive syscalls below are intentionally
+    // ABSENT from `allow`, so they hit this Errno(EPERM) default. Keep them out.
+    debug_assert!(
+        ![
+            libc::SYS_ptrace, libc::SYS_process_vm_readv, libc::SYS_process_vm_writev,
+            libc::SYS_userfaultfd, libc::SYS_bpf, libc::SYS_keyctl, libc::SYS_add_key,
+            libc::SYS_request_key, libc::SYS_perf_event_open, libc::SYS_kexec_load,
+            libc::SYS_kexec_file_load, libc::SYS_mount, libc::SYS_umount2,
+            libc::SYS_pivot_root, libc::SYS_chroot, libc::SYS_setns, libc::SYS_unshare,
+            libc::SYS_personality, libc::SYS_modify_ldt, libc::SYS_seccomp,
+            libc::SYS_open_by_handle_at, libc::SYS_name_to_handle_at, libc::SYS_iopl,
+            libc::SYS_ioperm, libc::SYS_init_module, libc::SYS_finit_module,
+            libc::SYS_delete_module, libc::SYS_open, libc::SYS_io_uring_setup,
+            libc::SYS_io_uring_enter, libc::SYS_io_uring_register,
+        ]
+        .iter()
+        .any(|denied| allow.contains(denied)),
+        "seccomp allow-list must not contain a denied escape-primitive syscall"
+    );
     let filter = match SeccompFilter::new(
         rules,
-        SeccompAction::Log,   // mismatch_action: default for un-listed syscalls
-        SeccompAction::Allow, // match_action: listed syscalls
+        SeccompAction::Errno(libc::EPERM as u32), // mismatch: deny un-listed with EPERM
+        SeccompAction::Allow,                     // match_action: listed syscalls
         target_arch,
     ) {
         Ok(f) => f,
