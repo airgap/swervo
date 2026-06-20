@@ -566,6 +566,18 @@ impl ServoInner {
                     webview.set_load_status(load_status);
                 }
             },
+            EmbedderMsg::DownloadStarted(webview_id, url, path) => {
+                if let Some(webview) = self.get_webview_handle(webview_id) {
+                    webview.delegate().notify_download_started(webview, url, path);
+                }
+            },
+            EmbedderMsg::DownloadCompleted(webview_id, path, success) => {
+                if let Some(webview) = self.get_webview_handle(webview_id) {
+                    webview
+                        .delegate()
+                        .notify_download_completed(webview, path, success);
+                }
+            },
             EmbedderMsg::NotifyFullscreenStateChanged(webview_id, fullscreen) => {
                 if let Some(webview) = self.get_webview_handle(webview_id) {
                     webview

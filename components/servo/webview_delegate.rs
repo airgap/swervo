@@ -938,6 +938,11 @@ pub trait WebViewDelegate {
     /// The `LoadStatus` of the currently loading or loaded page in this [`WebView`] has changed. The new
     /// status can accessed via [`WebView::load_status`].
     fn notify_load_status_changed(&self, _webview: WebView, _status: LoadStatus) {}
+
+    /// A download started; `path` is where the file is being written.
+    fn notify_download_started(&self, _webview: WebView, _url: String, _path: String) {}
+    /// A download finished; `success` is false if it errored partway.
+    fn notify_download_completed(&self, _webview: WebView, _path: String, _success: bool) {}
     /// The [`Cursor`] of the currently loaded page in this [`WebView`] has changed. The new
     /// cursor can accessed via [`WebView::cursor`].
     fn notify_cursor_changed(&self, _webview: WebView, _cursor: Cursor) {}
