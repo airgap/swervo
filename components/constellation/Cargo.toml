@@ -69,3 +69,8 @@ webxr-api = { workspace = true }
 
 [target.'cfg(any(target_os="macos", all(not(target_os = "windows"), not(target_os = "ios"), not(target_os="android"), not(target_env="ohos"), not(target_arch="arm"), not(target_arch="aarch64"), not(target_arch="riscv32"), not(target_arch="riscv64"))))'.dependencies]
 gaol = { workspace = true }
+
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+landlock = "0.4"
+seccompiler = "0.5"
+libc = { workspace = true }
