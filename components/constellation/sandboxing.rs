@@ -107,7 +107,7 @@ pub fn content_process_sandbox_profile() {
     target_os = "android",
     target_env = "ohos",
     target_arch = "arm",
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(target_os = "macos")),
     target_arch = "riscv32",
     target_arch = "riscv64"
 ))]
