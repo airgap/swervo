@@ -324,8 +324,19 @@ input[type="checkbox"]:disabled::before {
   color: grey;
 }
 
+input[type="checkbox"]:checked {
+  background: #007aff;
+  border-color: #007aff;
+}
+
+input[type="checkbox"]:checked:disabled {
+  background: lightgrey;
+  border-color: lightgrey;
+}
+
 input[type="checkbox"]:checked::before {
   content: "✔";
+  color: white;
 }
 
 input[type="checkbox"]:indeterminate::before {
@@ -385,8 +396,12 @@ input[type="radio"]::after {
   border-radius: 50%;
 }
 
+input[type="radio"]:checked::before {
+  border-color: #007aff;
+}
+
 input[type="radio"]:checked::after {
-  background: black;
+  background: #007aff;
 }
 
 input[type="radio"]:checked:disabled::after {
