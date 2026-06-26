@@ -369,6 +369,39 @@ impl DisplayListBuilder<'_> {
         clip_chain_id
     }
 
+    /// Define a WebRender image-mask clip that clips painted content to the alpha channel of
+    /// `image`, returning a [`ClipId`] (index into `clip_map`) for the resulting clip chain.
+    /// Used to implement CSS `mask-image`. Mirrors [`Self::add_clip_to_display_list`] but uses
+    /// `define_clip_image_mask` instead of a rectangle/rounded-rect clip. Because the mask's
+    /// `ImageKey` is only known here (after rasterization), this is created directly on the
+    /// WebRender builder during box painting rather than via the `StackingContextTreeClipStore`.
+    fn add_image_mask_clip(
+        &mut self,
+        state: &TraversalState,
+        image: wr::ImageKey,
+        rect: units::LayoutRect,
+    ) -> ClipChainId {
+        let spatial_id = self.spatial_id(state.spatial_id);
+        let mask_clip_id = self.wr().define_clip_image_mask(
+            spatial_id,
+            wr::ImageMask { image, rect },
+            &[],
+            wr::FillRule::Nonzero,
+        );
+
+        // See `add_clip_to_display_list`: clip chains want `Option<ClipChainId>`, and passing
+        // `Some(ClipChainId::INVALID)` crashes, so map INVALID to `None`. Unlike the rect/rounded
+        // clips, this chain is NOT pushed into `clip_map` (no `ClipId` is minted): WebRender only
+        // honors an image-mask clip when it is the clip of a *stacking context* surface, so the
+        // caller attaches the returned chain to a `push_stacking_context`, not to leaf primitives.
+        let parent_clip_chain_id = match self.clip_chain_id(state.clip_id) {
+            ClipChainId::INVALID => None,
+            parent => Some(parent),
+        };
+        self.wr()
+            .define_clip_chain(parent_clip_chain_id, [mask_clip_id])
+    }
+
     /// Add a new clip to the WebRender display list being built. This only happens during
     /// WebRender display list building and these clips should be added after all clips
     /// from the `StackingContextTree` have already been processed.
@@ -1445,6 +1478,60 @@ impl<'a> BuilderForBoxFragment<'a> {
         maybe_clip
     }
 
+    /// If this box has a CSS `mask-image`, resolve its first usable layer to a WebRender
+    /// `ImageKey` (reusing the same raster/vector path as `background-image`) and build a mask
+    /// clip chain over the box's border box. Returns the [`ClipChainId`] of that clip chain (to
+    /// be attached to a stacking context), or `None` when there is no mask, the source isn't an
+    /// image (gradient/color are deferred), or the image is still pending/rasterizing (skipped
+    /// this frame, like background images).
+    ///
+    /// MVP scope: a single image-mask layer, alpha mode, clipped to the border box. mask-size,
+    /// mask-position, mask-repeat, multiple layers, luminance mode and compositing are deferred.
+    fn build_mask_clip_chain(
+        &self,
+        builder: &mut DisplayListBuilder,
+        state: &TraversalState,
+    ) -> Option<ClipChainId> {
+        let style = self.fragment.style();
+        let node = self.fragment.base.tag.map(|tag| tag.node);
+        for image in style.get_svg().mask_image.0.iter() {
+            let Ok(ResolvedImage::Image {
+                image: cached,
+                size,
+            }) = builder.image_resolver.resolve_image(node, image)
+            else {
+                // `none`, gradients/colors (deferred), and pending/errored layers are skipped.
+                continue;
+            };
+            let image_key = match cached {
+                CachedImage::Raster(raster_image) => raster_image.id,
+                CachedImage::Vector(vector_image) => {
+                    let scale = builder.device_pixel_ratio.get();
+                    let default_size: DeviceIntSize =
+                        Size2D::new(size.width * scale, size.height * scale).to_i32();
+                    // `for_mask = true`: rasterized so coverage lands in the red channel.
+                    node.and_then(|node| {
+                        builder.image_resolver.rasterize_vector_image(
+                            vector_image.id,
+                            default_size,
+                            node,
+                            vector_image.svg_id,
+                            true,
+                        )
+                    })
+                    .and_then(|rasterized_image| rasterized_image.id)
+                },
+            };
+            let Some(image_key) = image_key else {
+                // Vector image not rasterized yet; reflow will repaint when it is ready.
+                continue;
+            };
+            // mask-clip / mask-origin: border-box (the MVP default).
+            return Some(builder.add_image_mask_clip(state, image_key, self.border_rect));
+        }
+        None
+    }
+
     fn build(&mut self, builder: &mut DisplayListBuilder, state: &TraversalState) {
         if self
             .fragment
@@ -1455,10 +1542,36 @@ impl<'a> BuilderForBoxFragment<'a> {
             return;
         }
 
+        // CSS `mask-image`: WebRender only honors an image-mask clip on a stacking-context
+        // surface (a leaf primitive's image-mask clip is silently dropped — the `cs_clip_image`
+        // path was removed upstream), so if this box has a mask we wrap its own painted content
+        // (background, box-shadow, border) in a stacking context whose clip is the mask's alpha.
+        // Descendant fragments are painted outside this SC and are not yet masked.
+        let mask_clip_chain = self.build_mask_clip_chain(builder, state);
+        if let Some(chain) = mask_clip_chain {
+            let spatial_id = builder.spatial_id(state.spatial_id);
+            builder.wr().push_stacking_context(
+                spatial_id,
+                PrimitiveFlags::empty(),
+                Some(chain),
+                webrender_api::TransformStyle::Flat,
+                wr::MixBlendMode::Normal,
+                &[],
+                &[],
+                RasterSpace::Screen,
+                StackingContextFlags::empty(),
+                None,
+            );
+        }
+
         self.build_background(builder, state);
         self.build_box_shadow(builder, state);
         if !self.fragment.is_table_grid_with_collapsed_borders() {
             self.build_border(builder, state);
+        }
+
+        if mask_clip_chain.is_some() {
+            builder.wr().pop_stacking_context();
         }
 
         let overflow = self
@@ -1739,6 +1852,7 @@ impl<'a> BuilderForBoxFragment<'a> {
                                     size,
                                     node,
                                     vector_image.svg_id,
+                                    false,
                                 )
                             })
                             .and_then(|rasterized_image| rasterized_image.id)
@@ -1987,6 +2101,7 @@ impl<'a> BuilderForBoxFragment<'a> {
                                 size,
                                 node,
                                 vector_image.svg_id,
+                                false,
                             )
                         })
                         .and_then(|rasterized_image| rasterized_image.id)

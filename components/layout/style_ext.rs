@@ -683,7 +683,7 @@ impl ComputedValuesExt for ComputedValues {
         //    used value of the contain property, such as content-visibility:
         //    hidden.
         //
-        // TODO: Support `mask-image`, `mask-border-source`, and `contain`.
+        // TODO: Support `mask-border-source` and `contain` (`mask-image` is handled below).
         let effects = self.get_effects();
         let overflow = self.effective_overflow(fragment_flags);
         if !matches!(overflow.x, Overflow::Visible | Overflow::Clip) ||
@@ -692,6 +692,11 @@ impl ComputedValuesExt for ComputedValues {
             !effects.filter.0.is_empty() ||
             !effects.clip.is_auto() ||
             self.get_svg().clip_path != ClipPath::None ||
+            self.get_svg()
+                .mask_image
+                .0
+                .iter()
+                .any(|image| !matches!(image, ComputedImageLayer::None)) ||
             self.get_box().isolation == ComputedIsolation::Isolate ||
             effects.mix_blend_mode != ComputedMixBlendMode::Normal
         {
@@ -820,6 +825,19 @@ impl ComputedValuesExt for ComputedValues {
         // > A computed value of other than `none` results in the creation of a stacking context.
         // Note `will-change: clip-path` is handled above by `STACKING_CONTEXT_UNCONDITIONAL`.
         if self.get_svg().clip_path != ClipPath::None {
+            return true;
+        }
+
+        // From <https://www.w3.org/TR/css-masking-1/#the-mask-image>
+        // > A computed value of other than `none` for `mask-image` results in the creation of a
+        // > stacking context (the same way `opacity` does for values other than `1`).
+        if self
+            .get_svg()
+            .mask_image
+            .0
+            .iter()
+            .any(|image| !matches!(image, ComputedImageLayer::None))
+        {
             return true;
         }
 

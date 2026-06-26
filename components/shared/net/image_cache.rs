@@ -203,11 +203,17 @@ pub trait ImageCache: Sync + Send {
     /// Otherwise, triggers a new job to perform the rasterization. If a notification
     /// is needed after rasterization is completed, the `add_rasterization_complete_listener`
     /// API below can be used to add a listener.
+    /// `for_mask`: rasterize the SVG as a CSS `mask-image` source. This WebRender samples an
+    /// image-mask's RED channel as coverage (not alpha), so the result is post-processed to put
+    /// the alpha coverage into red. Mask and non-mask rasterizations of the same SVG share the
+    /// rasterization cache, so an SVG used as both a background and a mask at the same size may
+    /// collide (rare); separating the cache key is a future improvement.
     fn rasterize_vector_image(
         &self,
         image_id: VectorImageId,
         size: DeviceIntSize,
         svg_id: Option<String>,
+        for_mask: bool,
     ) -> Option<RasterImage>;
 
     /// Adds a new listener to be notified once the given `image_id` has been rasterized at

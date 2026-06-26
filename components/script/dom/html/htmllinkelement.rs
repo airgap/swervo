@@ -873,7 +873,7 @@ impl HTMLLinkElement {
 
                 let image_cache = window.image_cache();
                 if let Some(raster_image) =
-                    image_cache.rasterize_vector_image(vector_image.id, size, None)
+                    image_cache.rasterize_vector_image(vector_image.id, size, None, false)
                 {
                     send_rasterized_favicon_to_embedder(&raster_image);
                 } else {
