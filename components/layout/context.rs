@@ -255,10 +255,11 @@ impl ImageResolver {
         size: DeviceIntSize,
         node: OpaqueNode,
         svg_id: Option<String>,
+        for_mask: bool,
     ) -> Option<RasterImage> {
         let result = self
             .image_cache
-            .rasterize_vector_image(image_id, size, svg_id);
+            .rasterize_vector_image(image_id, size, svg_id, for_mask);
         if result.is_none() {
             self.pending_rasterization_images
                 .lock()

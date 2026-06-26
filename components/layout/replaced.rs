@@ -508,6 +508,7 @@ impl ReplacedContents {
                                 size,
                                 tag.node,
                                 vector_image.svg_id.clone(),
+                                false,
                             )
                             .and_then(|i| i.id)
                     },
@@ -613,6 +614,7 @@ impl ReplacedContents {
                         raster_size,
                         tag.node,
                         vector_image.svg_id.clone(),
+                        false,
                     )
                     .and_then(|image| image.id)
                     .map(|image_key| {
