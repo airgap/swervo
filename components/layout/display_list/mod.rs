@@ -9,19 +9,22 @@ use app_units::{AU_PER_PX, Au};
 use clip::Clip;
 pub(crate) use clip::ClipId;
 use euclid::{Box2D, Point2D, Rect, Scale, SideOffsets2D, Size2D, UnknownUnit, Vector2D};
-use fonts::ShapedTextSlice;
+use fonts::{FontRef, ShapedTextSlice};
 use gradient::WebRenderGradient;
 use layout_api::ReflowStatistics;
 use net_traits::image_cache::Image as CachedImage;
 use paint_api::display_list::{PaintDisplayListInfo, SpatialTreeNodeInfo};
+use paint_api::{CrossProcessPaintApi, SerializableImageData};
+use pixels::{CorsStatus, ImageFrame, ImageMetadata, PixelFormat, RasterImage};
 use servo_arc::Arc as ServoArc;
-use servo_base::id::{PipelineId, ScrollTreeNodeId};
+use servo_base::id::{PipelineId, ScrollTreeNodeId, WebViewId};
 use servo_config::opts::{DiagnosticsLogging, DiagnosticsLoggingOption};
 use servo_config::{pref, prefs};
 use servo_url::ServoUrl;
 use style::Zero;
 use style::color::{AbsoluteColor, ColorSpace};
 use style::computed_values::background_blend_mode::SingleComputedValue as BackgroundBlendMode;
+use style::computed_values::background_clip::single_value::T as BackgroundClip;
 use style::computed_values::border_image_outset::T as BorderImageOutset;
 use style::computed_values::mix_blend_mode::T as ComputedMixBlendMode;
 use style::computed_values::overflow_x::T as ComputedOverflow;
@@ -119,6 +122,13 @@ pub(crate) struct DisplayListBuilder<'a> {
     /// An [`ImageResolver`] to use during display list construction.
     image_resolver: Arc<ImageResolver>,
 
+    /// The cross-process paint API, used to upload rasterized images (e.g. the glyph alpha mask
+    /// for `background-clip: text`) and mint their [`wr::ImageKey`]s during display list building.
+    paint_api: CrossProcessPaintApi,
+
+    /// The [`WebViewId`] this display list belongs to, needed to mint image keys.
+    webview_id: WebViewId,
+
     /// The device pixel ratio used for this `Document`'s display list.
     device_pixel_ratio: Scale<f32, StyloCSSPixel, StyloDevicePixel>,
 
@@ -173,6 +183,8 @@ impl DisplayListBuilder<'_> {
         stacking_context_tree: &mut StackingContextTree,
         fragment_tree: &FragmentTree,
         image_resolver: Arc<ImageResolver>,
+        paint_api: CrossProcessPaintApi,
+        webview_id: WebViewId,
         device_pixel_ratio: Scale<f32, StyloCSSPixel, StyloDevicePixel>,
         highlighted_dom_node: Option<OpaqueNode>,
         debug: &DiagnosticsLogging,
@@ -204,6 +216,8 @@ impl DisplayListBuilder<'_> {
             paint_body_background: true,
             clip_map: Default::default(),
             image_resolver,
+            paint_api,
+            webview_id,
             device_pixel_ratio,
             paint_timing_handler,
             reflow_statistics,
@@ -1532,6 +1546,137 @@ impl<'a> BuilderForBoxFragment<'a> {
         None
     }
 
+    /// If this box has `background-clip: text` on any background layer, rasterize its descendant
+    /// text glyphs into an alpha-coverage mask (the union of all glyph coverage, sized to the
+    /// border box), upload it as a WebRender image, and build an image-mask clip chain over the
+    /// border box — to be attached to a stacking context that wraps the background paint. Returns
+    /// `None` when there is no text clip, no rasterizable descendant text, or the upload fails.
+    ///
+    /// The mask is rasterized at CSS-pixel resolution (the fonts' instantiated sizes) and
+    /// WebRender upscales it to device pixels, so on HiDPI displays the clipped edges are slightly
+    /// soft. TODO: rasterize at device resolution for crisp HiDPI edges, and cache the image key
+    /// per (node, size) — deleting it on invalidation — instead of minting a new key each build.
+    fn build_text_clip_chain(
+        &self,
+        builder: &mut DisplayListBuilder,
+        state: &TraversalState,
+    ) -> Option<ClipChainId> {
+        let style = self.fragment.style();
+        let background = style.get_background();
+        if !background
+            .background_clip
+            .0
+            .iter()
+            .any(|clip| matches!(clip, BackgroundClip::Text))
+        {
+            return None;
+        }
+
+        // Gather all descendant text glyphs, positioned in absolute layout-pixel space — the same
+        // coordinate space as `self.border_rect` (see `paint_traversal`'s origin accumulation).
+        let children_origin = state.origin + self.fragment.content_rect().origin.to_vector();
+        let mut runs: Vec<(FontRef, Vec<GlyphInstance>)> = Vec::new();
+        collect_clip_text_glyphs(&self.fragment.children, children_origin, &mut runs);
+        if runs.iter().all(|(_, glyphs)| glyphs.is_empty()) {
+            return None;
+        }
+
+        // The mask spans the border box, rasterized at CSS-pixel resolution (clamped to avoid
+        // pathological allocations for very large text-clipped boxes).
+        const MAX_TEXT_CLIP_DIMENSION: i32 = 4096;
+        let origin = self.border_rect.min;
+        let width = (self.border_rect.width().ceil() as i32).clamp(1, MAX_TEXT_CLIP_DIMENSION);
+        let height = (self.border_rect.height().ceil() as i32).clamp(1, MAX_TEXT_CLIP_DIMENSION);
+        let (w, h) = (width as usize, height as usize);
+
+        // Single-channel coverage, max-blending overlapping glyphs.
+        let mut coverage = vec![0u8; w * h];
+        let mut any_coverage = false;
+        for (font, glyphs) in &runs {
+            for glyph in glyphs {
+                let Some(raster) = font.rasterize_glyph(glyph.index) else {
+                    continue;
+                };
+                if raster.width == 0 || raster.height == 0 {
+                    continue;
+                }
+                // Pen position relative to the border-box origin, in CSS px.
+                let pen_x = (glyph.point.x - origin.x).round() as i32;
+                let pen_y = (glyph.point.y - origin.y).round() as i32;
+                let glyph_left = pen_x + raster.left;
+                let glyph_top = pen_y - raster.top;
+                let gw = raster.width as i32;
+                let gh = raster.height as i32;
+                for row in 0..gh {
+                    let ty = glyph_top + row;
+                    if ty < 0 || ty >= height {
+                        continue;
+                    }
+                    for col in 0..gw {
+                        let tx = glyph_left + col;
+                        if tx < 0 || tx >= width {
+                            continue;
+                        }
+                        let src = raster.coverage[(row * gw + col) as usize];
+                        if src == 0 {
+                            continue;
+                        }
+                        let dst = &mut coverage[ty as usize * w + tx as usize];
+                        if src > *dst {
+                            *dst = src;
+                        }
+                        any_coverage = true;
+                    }
+                }
+            }
+        }
+        if !any_coverage {
+            return None;
+        }
+
+        // Expand to premultiplied RGBA. WebRender samples an image-mask's RED channel as coverage;
+        // storing `(c, c, c, c)` (premultiplied white at alpha `c`) makes red == alpha == coverage,
+        // including anti-aliased glyph edges.
+        let mut rgba = Vec::with_capacity(w * h * 4);
+        for &c in &coverage {
+            rgba.extend_from_slice(&[c, c, c, c]);
+        }
+
+        // Upload the mask as a WebRender image and reference it from an image-mask clip.
+        let image_key = builder
+            .paint_api
+            .generate_image_key_blocking(builder.webview_id)?;
+        let byte_len = rgba.len();
+        let raster_image = RasterImage {
+            metadata: ImageMetadata {
+                width: width as u32,
+                height: height as u32,
+            },
+            format: PixelFormat::RGBA8,
+            id: Some(image_key),
+            cors_status: CorsStatus::Safe,
+            bytes: Arc::new(rgba),
+            frames: vec![ImageFrame {
+                delay: None,
+                byte_range: 0..byte_len,
+                width: width as u32,
+                height: height as u32,
+            }],
+            is_opaque: false,
+            loop_count: None,
+        };
+        let (descriptor, data, is_animated) =
+            raster_image.webrender_image_descriptor_and_data_for_frame(0);
+        builder.paint_api.add_image(
+            image_key,
+            descriptor,
+            SerializableImageData::Raw(data),
+            is_animated,
+        );
+
+        Some(builder.add_image_mask_clip(state, image_key, self.border_rect))
+    }
+
     fn build(&mut self, builder: &mut DisplayListBuilder, state: &TraversalState) {
         if self
             .fragment
@@ -1564,7 +1709,31 @@ impl<'a> BuilderForBoxFragment<'a> {
             );
         }
 
+        // CSS `background-clip: text` clips ONLY the background to the descendant text glyphs, so
+        // (unlike `mask-image`) its stacking context wraps just the background paint — not the
+        // box-shadow or border. Like the mask, the image-mask clip must be on a stacking-context
+        // surface to be honored.
+        let text_clip_chain = self.build_text_clip_chain(builder, state);
+        if let Some(chain) = text_clip_chain {
+            let spatial_id = builder.spatial_id(state.spatial_id);
+            builder.wr().push_stacking_context(
+                spatial_id,
+                PrimitiveFlags::empty(),
+                Some(chain),
+                webrender_api::TransformStyle::Flat,
+                wr::MixBlendMode::Normal,
+                &[],
+                &[],
+                RasterSpace::Screen,
+                StackingContextFlags::empty(),
+                None,
+            );
+        }
         self.build_background(builder, state);
+        if text_clip_chain.is_some() {
+            builder.wr().pop_stacking_context();
+        }
+
         self.build_box_shadow(builder, state);
         if !self.fragment.is_table_grid_with_collapsed_borders() {
             self.build_border(builder, state);
@@ -2307,6 +2476,56 @@ fn rgba(color: AbsoluteColor) -> wr::ColorF {
         rgba.components.2.clamp(0.0, 1.0),
         rgba.alpha,
     )
+}
+
+/// Recursively walk a box's descendant fragments to collect their text glyphs for a
+/// `background-clip: text` mask, positioned in absolute layout-pixel space. `origin` is the
+/// absolute origin of `children` (i.e. the parent's content-box origin), accumulated exactly as
+/// the paint traversal does (`content_rect().origin` for boxes, `base.rect().origin` for
+/// positioning fragments — see [`paint_traversal::TraversalState`]). Each entry pairs the font
+/// that shaped a run with that run's positioned [`GlyphInstance`]s.
+fn collect_clip_text_glyphs(
+    children: &[Fragment],
+    origin: PhysicalPoint<Au>,
+    out: &mut Vec<(FontRef, Vec<GlyphInstance>)>,
+) {
+    for child in children {
+        match child {
+            Fragment::Box(box_fragment) => {
+                // Descendants that establish their own stacking context are painted in a separate
+                // pass and aren't part of this box's clipped background.
+                if box_fragment.stacking_context_type().is_some() {
+                    continue;
+                }
+                let child_origin = origin + box_fragment.content_rect().origin.to_vector();
+                collect_clip_text_glyphs(&box_fragment.children, child_origin, out);
+            },
+            Fragment::Positioning(positioning_fragment) => {
+                let child_origin = origin + positioning_fragment.base.rect().origin.to_vector();
+                collect_clip_text_glyphs(&positioning_fragment.children, child_origin, out);
+            },
+            Fragment::Text(text_fragment) => {
+                let mut baseline = origin + text_fragment.base.rect().origin.to_vector();
+                baseline.y += text_fragment.font_metrics.ascent;
+                let (positioned, _) = glyphs(
+                    &text_fragment.glyphs,
+                    baseline,
+                    text_fragment.justification_adjustment,
+                    false,
+                );
+                if !positioned.is_empty() {
+                    out.push((text_fragment.font.clone(), positioned));
+                }
+            },
+            // Floats, replaced content, placeholders and nested layout roots don't contribute to
+            // a box's own text-clip mask.
+            Fragment::LayoutRoot(_) |
+            Fragment::Float(_) |
+            Fragment::AbsoluteOrFixedPositionedPlaceholder(_) |
+            Fragment::Image(_) |
+            Fragment::IFrame(_) => {},
+        }
+    }
 }
 
 fn glyphs(
