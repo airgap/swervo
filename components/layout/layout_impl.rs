@@ -1466,6 +1466,8 @@ impl LayoutThread {
             stacking_context_tree,
             fragment_tree,
             image_resolver.clone(),
+            self.paint_api.clone(),
+            self.webview_id,
             self.device().device_pixel_ratio(),
             reflow_request.highlighted_dom_node,
             &self.debug,

@@ -86,6 +86,24 @@ pub const LAST_RESORT_GLYPH_ADVANCE: FractionalPixel = 10.0;
 // needed by the text shaper as well as access to the underlying font
 // resources needed by the graphics layer to draw glyphs.
 
+/// A single glyph rasterized to an 8-bit alpha coverage bitmap, at the font's instantiated
+/// size. Produced by [`Font::rasterize_glyph`] and used to build the alpha mask for CSS
+/// `background-clip: text`. Positions are in pixels relative to the glyph's pen origin on the
+/// baseline (matching FreeType's `bitmap_left` / `bitmap_top` conventions).
+#[derive(Clone, Debug)]
+pub struct GlyphRaster {
+    /// Horizontal offset (px) from the pen position to the left edge of `coverage`.
+    pub left: i32,
+    /// Vertical offset (px) from the baseline UP to the top edge of `coverage`.
+    pub top: i32,
+    /// Width of the coverage bitmap in pixels.
+    pub width: u32,
+    /// Height of the coverage bitmap in pixels.
+    pub height: u32,
+    /// Row-major, tightly packed (`width * height`) 8-bit alpha coverage.
+    pub coverage: Vec<u8>,
+}
+
 pub trait PlatformFontMethods: Sized {
     #[servo_tracing::instrument(name = "PlatformFontMethods::new_from_template", skip_all)]
     fn new_from_template(
@@ -142,6 +160,13 @@ pub trait PlatformFontMethods: Sized {
     fn metrics(&self) -> FontMetrics;
     fn table_for_tag(&self, _: Tag) -> Option<FontTable>;
     fn typographic_bounds(&self, _: GlyphId) -> Rect<f32>;
+
+    /// Rasterize a single glyph to an 8-bit alpha coverage bitmap at the font's instantiated
+    /// size. Returns `None` if the glyph cannot be rendered as a simple grayscale coverage
+    /// mask (e.g. color/bitmap glyphs), or on any backend that does not implement this yet.
+    fn rasterize_glyph(&self, _glyph: GlyphId) -> Option<GlyphRaster> {
+        None
+    }
 
     /// Get the necessary [`FontInstanceFlags`]` for this font.
     fn webrender_font_instance_flags(&self) -> FontInstanceFlags;
@@ -600,6 +625,13 @@ impl Font {
 
     pub fn typographic_bounds(&self, glyph_id: GlyphId) -> Rect<f32> {
         self.handle.typographic_bounds(glyph_id)
+    }
+
+    /// Rasterize a single glyph to an 8-bit alpha coverage bitmap at this font's instantiated
+    /// size. Used to build the alpha mask for CSS `background-clip: text`. See
+    /// [`GlyphRaster`].
+    pub fn rasterize_glyph(&self, glyph_id: GlyphId) -> Option<GlyphRaster> {
+        self.handle.rasterize_glyph(glyph_id)
     }
 
     /// Get the [`FontBaseline`] for this font.

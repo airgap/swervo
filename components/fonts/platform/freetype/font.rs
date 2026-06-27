@@ -10,8 +10,8 @@ use euclid::default::{Point2D, Rect, Size2D};
 use fonts_traits::{FontIdentifier, FontTemplateDescriptor, LocalFontIdentifier};
 use freetype_sys::{
     FT_F26Dot6, FT_Get_Char_Index, FT_Get_Kerning, FT_GlyphSlot, FT_KERNING_DEFAULT,
-    FT_LOAD_DEFAULT, FT_LOAD_NO_HINTING, FT_Load_Glyph, FT_Size_Metrics, FT_SizeRec, FT_UInt,
-    FT_ULong, FT_Vector,
+    FT_LOAD_DEFAULT, FT_LOAD_NO_HINTING, FT_Load_Glyph, FT_PIXEL_MODE_GRAY, FT_RENDER_MODE_NORMAL,
+    FT_Render_Glyph, FT_Size_Metrics, FT_SizeRec, FT_UInt, FT_ULong, FT_Vector,
 };
 use log::debug;
 use memmap2::Mmap;
@@ -25,7 +25,9 @@ use webrender_api::{FontInstanceFlags, FontVariation};
 
 use super::library_handle::FreeTypeLibraryHandle;
 use crate::FontData;
-use crate::font::{FontMetrics, FontTableMethods, FractionalPixel, PlatformFontMethods};
+use crate::font::{
+    FontMetrics, FontTableMethods, FractionalPixel, GlyphRaster, PlatformFontMethods,
+};
 use crate::glyph::GlyphId;
 use crate::platform::freetype::freetype_face::FreeTypeFace;
 
@@ -209,6 +211,87 @@ impl PlatformFontMethods for PlatformFont {
 
         let advance = unsafe { (*slot).metrics.horiAdvance };
         Some(fixed_26_dot_6_to_float(advance) * self.unscalable_font_metrics_scale())
+    }
+
+    fn rasterize_glyph(&self, glyph: GlyphId) -> Option<GlyphRaster> {
+        let face = self.face.lock();
+
+        // Load the outline (without rendering yet) so we can optionally embolden it first,
+        // mirroring `glyph_h_advance`.
+        let load_flags = face.glyph_load_flags();
+        let result = unsafe { FT_Load_Glyph(face.as_ptr(), glyph as FT_UInt, load_flags) };
+        if result != 0 {
+            debug!("rasterize_glyph: FT_Load_Glyph({glyph}) failed: {result:?}");
+            return None;
+        }
+
+        let slot: FT_GlyphSlot = face.as_ref().glyph;
+        if slot.is_null() {
+            return None;
+        }
+
+        if self.synthetic_bold {
+            mozilla_glyphslot_embolden_less(slot);
+        }
+
+        let result = unsafe { FT_Render_Glyph(slot, FT_RENDER_MODE_NORMAL) };
+        if result != 0 {
+            debug!("rasterize_glyph: FT_Render_Glyph({glyph}) failed: {result:?}");
+            return None;
+        }
+
+        let bitmap = unsafe { &(*slot).bitmap };
+        // We only handle 8-bit grayscale coverage. Color/bitmap glyphs (e.g. emoji) and other
+        // pixel modes are skipped; the caller treats a missing glyph as contributing no
+        // coverage to the mask.
+        if (bitmap.pixel_mode as u32) != (FT_PIXEL_MODE_GRAY as u32) {
+            return None;
+        }
+
+        let left = unsafe { (*slot).bitmap_left };
+        let top = unsafe { (*slot).bitmap_top };
+        let width = bitmap.width as u32;
+        let height = bitmap.rows as u32;
+        if width == 0 || height == 0 {
+            return Some(GlyphRaster {
+                left,
+                top,
+                width: 0,
+                height: 0,
+                coverage: Vec::new(),
+            });
+        }
+
+        // `pitch` is the number of bytes per bitmap row; its sign indicates row order (positive:
+        // top row first, negative: bottom row first).
+        let pitch = bitmap.pitch;
+        let stride = pitch.unsigned_abs() as usize;
+        let row_len = width as usize;
+        let mut coverage = vec![0u8; row_len * height as usize];
+        // SAFETY: while `face` is locked the glyph slot's bitmap buffer is valid for at least
+        // `stride * height` bytes.
+        let src = unsafe {
+            std::slice::from_raw_parts(bitmap.buffer as *const u8, stride * height as usize)
+        };
+        for row in 0..height as usize {
+            let src_row = if pitch >= 0 {
+                row
+            } else {
+                height as usize - 1 - row
+            };
+            let src_start = src_row * stride;
+            let dst_start = row * row_len;
+            coverage[dst_start..dst_start + row_len]
+                .copy_from_slice(&src[src_start..src_start + row_len]);
+        }
+
+        Some(GlyphRaster {
+            left,
+            top,
+            width,
+            height,
+            coverage,
+        })
     }
 
     fn metrics(&self) -> FontMetrics {

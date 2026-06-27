@@ -74,7 +74,10 @@ impl<'a> BackgroundPainter<'a> {
         match get_cyclic(&background.background_clip.0, layer_index) {
             Clip::ContentBox => *fragment_builder.content_rect(),
             Clip::PaddingBox => *fragment_builder.padding_rect(),
-            Clip::BorderBox => fragment_builder.border_rect,
+            // `background-clip: text` paints the background over the whole border box; the
+            // glyph-shaped clipping is applied separately as an image-mask stacking context
+            // in `BuilderForBoxFragment::build` (see `build_text_clip_chain`).
+            Clip::BorderBox | Clip::Text => fragment_builder.border_rect,
         }
     }
 
@@ -104,7 +107,9 @@ impl<'a> BackgroundPainter<'a> {
             Clip::PaddingBox => {
                 fragment_builder.padding_edge_clip(builder, state, force_clip_creation)
             },
-            Clip::BorderBox => {
+            // `text` clips to the border box rectangularly here; the glyph-shaped image mask
+            // is layered on by `build_text_clip_chain`.
+            Clip::BorderBox | Clip::Text => {
                 fragment_builder.border_edge_clip(builder, state, force_clip_creation)
             },
         }
