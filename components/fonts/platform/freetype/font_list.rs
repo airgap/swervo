@@ -275,6 +275,45 @@ pub(crate) fn default_system_generic_font_family(
     .into()
 }
 
+/// Resolve a requested font family *name* through fontconfig's configuration substitution + match —
+/// i.e. its aliases (Arial → Liberation Sans, Verdana → Noto Sans, Helvetica → Nimbus Sans, Times New
+/// Roman → Liberation Serif, …). This is what Chrome does on Linux for families that are not installed
+/// under their requested name; swervo otherwise only ran fontconfig for *generic* families and dropped
+/// named misses to the generic fallback, so e.g. Arial and Verdana both collapsed to the same font.
+/// Returns the matched family name (always an installed font), or None on failure.
+pub(crate) fn font_family_substitute(name: &str) -> Option<String> {
+    let cname = std::ffi::CString::new(name).ok()?;
+    unsafe {
+        let pattern = FcNameParse(cname.as_ptr() as *mut FcChar8);
+        if pattern.is_null() {
+            return None;
+        }
+        FcConfigSubstitute(ptr::null_mut(), pattern, FcMatchPattern);
+        FcDefaultSubstitute(pattern);
+
+        let mut result = 0;
+        let family_match = FcFontMatch(ptr::null_mut(), pattern, &mut result);
+        let mut matched = None;
+        if !family_match.is_null() {
+            let mut match_string: *mut FcChar8 = ptr::null_mut();
+            FcPatternGetString(
+                family_match,
+                FC_FAMILY.as_ptr() as *mut c_char,
+                0,
+                &mut match_string,
+            );
+            if !match_string.is_null() {
+                if let Ok(s) = CStr::from_ptr(match_string as *const c_char).to_str() {
+                    matched = Some(s.to_owned());
+                }
+            }
+            FcPatternDestroy(family_match);
+        }
+        FcPatternDestroy(pattern);
+        matched
+    }
+}
+
 fn font_style_from_fontconfig_pattern(pattern: *mut FcPattern) -> Option<FontStyle> {
     let mut slant: c_int = 0;
     unsafe {

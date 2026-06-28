@@ -31,6 +31,19 @@ use crate::platform::font_list::{
     default_system_generic_font_family, for_each_available_family, for_each_variation,
 };
 
+/// Resolve a *named* font family that isn't installed under that name, via the platform's font
+/// configuration. On Linux/freetype this is fontconfig's alias substitution (Arial -> Liberation
+/// Sans, Verdana -> Noto Sans, …, matching Chrome); on macOS/Windows the requested families are
+/// installed and native matching already handles them, so this is a no-op.
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
+fn platform_family_substitute(name: &str) -> Option<String> {
+    crate::platform::font_list::font_family_substitute(name)
+}
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "freebsd")))]
+fn platform_family_substitute(_name: &str) -> Option<String> {
+    None
+}
+
 #[derive(Default, MallocSizeOf)]
 struct ResolvedGenericFontFamilies {
     default: OnceCell<LowercaseFontFamilyName>,
@@ -239,7 +252,21 @@ impl SystemFontService {
     ) -> Vec<FontTemplateRef> {
         // TODO(Issue #188): look up localized font family names if canonical name not found
         // look up canonical name
-        let family_name = self.family_name_for_single_font_family(family);
+        let mut family_name = self.family_name_for_single_font_family(family);
+        // If a *named* family is not installed under that name, resolve it through the platform's
+        // font configuration (fontconfig on Linux: Arial -> Liberation Sans, Verdana -> Noto Sans,
+        // Helvetica -> Nimbus Sans, …) instead of dropping to the generic fallback — matching what
+        // Chrome does. Generics are already resolved by `family_name_for_single_font_family`.
+        if matches!(family, SingleFontFamily::FamilyName(_)) &&
+            !self.local_families.families.contains_key(&family_name)
+        {
+            if let Some(substitute) = platform_family_substitute(&family_name)
+                .map(|name: String| LowercaseFontFamilyName::from(name))
+                .filter(|name| self.local_families.families.contains_key(name))
+            {
+                family_name = substitute;
+            }
+        }
         self.local_families
             .families
             .get_mut(&family_name)
