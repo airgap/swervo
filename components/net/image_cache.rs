@@ -984,6 +984,7 @@ impl ImageCache for ImageCacheImpl {
         image_id: PendingImageId,
         requested_size: DeviceIntSize,
         svg_id: Option<String>,
+        for_mask: bool,
     ) -> Option<RasterImage> {
         let mut store = self.store.lock();
         let Some(vector_image) = store.vector_images.get(&image_id).cloned() else {
@@ -1050,7 +1051,16 @@ impl ImageCache for ImageCacheImpl {
             .unwrap();
             resvg::render(&vector_image.svg_tree, transform, &mut pixmap.as_mut());
 
-            let bytes = pixmap.take();
+            let mut bytes = pixmap.take();
+            if for_mask {
+                // CSS `mask-image` is alpha-based, but this WebRender samples an image-mask's
+                // RED channel as coverage. The pixmap is premultiplied RGBA, so copying alpha
+                // into red yields correct coverage (including anti-aliased edges); the source
+                // color is discarded, which matches CSS alpha-mask semantics for an image source.
+                for px in bytes.chunks_exact_mut(4) {
+                    px[0] = px[3];
+                }
+            }
             let frame = ImageFrame {
                 delay: None,
                 byte_range: 0..bytes.len(),

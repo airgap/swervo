@@ -612,6 +612,7 @@ impl LineItemLayout<'_, '_> {
                 selected_style: text_item.inline_styles.selected.clone(),
                 font_metrics: font_metrics.clone(),
                 font_key,
+                font: text_item.info.font.clone(),
                 glyphs: text_item.text,
                 justification_adjustment: self.justification_adjustment,
                 offsets: text_item.offsets,

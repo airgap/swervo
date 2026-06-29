@@ -127,6 +127,14 @@ input[type="submit"],
 input[type="reset"],
 input[type="file"]::file-selector-button {
   text-align: center;
+  /* Vertically center button content for Chrome parity. Without this the single text line is
+     top-aligned in the content box, so a button taller than its text (an explicit height, common
+     on real sites like Google's search buttons) shows the label sitting too high. Servo has no
+     align-content-on-block yet (see the FIXME near the text-control inner container above), so
+     center via inline-flex — the same flex approach <input> text controls already use. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 button:hover,
@@ -316,8 +324,19 @@ input[type="checkbox"]:disabled::before {
   color: grey;
 }
 
+input[type="checkbox"]:checked {
+  background: #007aff;
+  border-color: #007aff;
+}
+
+input[type="checkbox"]:checked:disabled {
+  background: lightgrey;
+  border-color: lightgrey;
+}
+
 input[type="checkbox"]:checked::before {
   content: "✔";
+  color: white;
 }
 
 input[type="checkbox"]:indeterminate::before {
@@ -377,8 +396,12 @@ input[type="radio"]::after {
   border-radius: 50%;
 }
 
+input[type="radio"]:checked::before {
+  border-color: #007aff;
+}
+
 input[type="radio"]:checked::after {
-  background: black;
+  background: #007aff;
 }
 
 input[type="radio"]:checked:disabled::after {

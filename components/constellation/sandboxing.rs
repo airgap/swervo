@@ -5,19 +5,7 @@
 use std::ffi::OsStr;
 use std::{env, process};
 
-#[cfg(any(
-    target_os = "macos",
-    all(
-        not(target_os = "windows"),
-        not(target_os = "ios"),
-        not(target_os = "android"),
-        not(target_env = "ohos"),
-        not(target_arch = "arm"),
-        not(target_arch = "aarch64"),
-        not(target_arch = "riscv32"),
-        not(target_arch = "riscv64")
-    )
-))]
+#[cfg(target_os = "macos")]
 use gaol::profile::{Operation, PathPattern, Profile};
 use ipc_channel::IpcError;
 use serde::{Deserialize, Serialize};
@@ -93,40 +81,9 @@ pub fn content_process_sandbox_profile() -> Profile {
     Profile::new(operations).expect("Failed to create sandbox profile!")
 }
 
-/// Our content process sandbox profile on Linux. As restrictive as possible.
-#[cfg(all(
-    not(target_os = "macos"),
-    not(target_os = "windows"),
-    not(target_os = "ios"),
-    not(target_os = "android"),
-    not(target_env = "ohos"),
-    not(target_arch = "arm"),
-    not(target_arch = "aarch64"),
-    not(target_arch = "riscv32"),
-    not(target_arch = "riscv64")
-))]
-pub fn content_process_sandbox_profile() -> Profile {
-    use std::path::PathBuf;
-
-    use embedder_traits::resources;
-
-    let mut operations = vec![Operation::FileReadAll(PathPattern::Literal(PathBuf::from(
-        "/dev/urandom",
-    )))];
-
-    operations.extend(
-        resources::sandbox_access_files()
-            .into_iter()
-            .map(|p| Operation::FileReadAll(PathPattern::Literal(p))),
-    );
-    operations.extend(
-        resources::sandbox_access_files_dirs()
-            .into_iter()
-            .map(|p| Operation::FileReadAll(PathPattern::Subpath(p))),
-    );
-
-    Profile::new(operations).expect("Failed to create sandbox profile!")
-}
+// The Linux content-process sandbox profile is no longer gaol-based; the
+// policy is built by `sandbox_backend::content_process_policy()` and applied
+// (Landlock + seccomp) in the child. See `crate::sandbox_backend`.
 
 #[cfg(any(
     target_os = "windows",
@@ -150,7 +107,7 @@ pub fn content_process_sandbox_profile() {
     target_os = "android",
     target_env = "ohos",
     target_arch = "arm",
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(target_os = "macos")),
     target_arch = "riscv32",
     target_arch = "riscv64"
 ))]
@@ -177,16 +134,8 @@ pub fn spawn_multiprocess(content: UnprivilegedContent) -> Result<Process, IpcEr
     Ok(Process::Unsandboxed(child))
 }
 
-#[cfg(all(
-    not(target_os = "windows"),
-    not(target_os = "ios"),
-    not(target_os = "android"),
-    not(target_env = "ohos"),
-    not(target_arch = "arm"),
-    not(target_arch = "aarch64"),
-    not(target_arch = "riscv32"),
-    not(target_arch = "riscv64")
-))]
+// macOS keeps the gaol child-process sandbox (parent starts the sandboxed child).
+#[cfg(target_os = "macos")]
 pub fn spawn_multiprocess(content: UnprivilegedContent) -> Result<Process, IpcError> {
     use gaol::sandbox::{self, Sandbox, SandboxMethods};
     use ipc_channel::ipc::{IpcOneShotServer, IpcSender};
@@ -245,6 +194,44 @@ pub fn spawn_multiprocess(content: UnprivilegedContent) -> Result<Process, IpcEr
     sender.send(content)?;
 
     Ok(process)
+}
+
+// Linux (and other non-macOS gaol-free supported targets): Landlock + seccomp
+// self-apply in the child (see `create_sandbox` / `crate::sandbox_backend`), so
+// the parent just plain-spawns the content process. The child is always
+// `Process::Unsandboxed(Child)` — a real `std::process::Child` we can reap.
+#[cfg(all(
+    not(target_os = "macos"),
+    not(target_os = "windows"),
+    not(target_os = "ios"),
+    not(target_os = "android"),
+    not(target_env = "ohos"),
+    not(target_arch = "arm"),
+    not(target_arch = "aarch64"),
+    not(target_arch = "riscv32"),
+    not(target_arch = "riscv64")
+))]
+pub fn spawn_multiprocess(content: UnprivilegedContent) -> Result<Process, IpcError> {
+    use ipc_channel::ipc::{IpcOneShotServer, IpcSender};
+    // Note that this function can panic, due to process creation,
+    // avoiding this panic would require a mechanism for dealing
+    // with low-resource scenarios.
+    let (server, token) = IpcOneShotServer::<IpcSender<UnprivilegedContent>>::new()
+        .expect("Failed to create IPC one-shot server.");
+
+    let path_to_self = env::current_exe().expect("Failed to get current executor.");
+    let mut child_process = process::Command::new(path_to_self);
+    setup_common(&mut child_process, token);
+
+    #[allow(clippy::zombie_processes)]
+    let child = child_process
+        .spawn()
+        .expect("Failed to start unsandboxed child process!");
+
+    let (_receiver, sender) = server.accept().expect("Server failed to accept.");
+    sender.send(content)?;
+
+    Ok(Process::Unsandboxed(child))
 }
 
 #[cfg(target_os = "ios")]

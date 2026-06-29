@@ -12,16 +12,7 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 pub use embedder_traits::*;
 use env_logger::Builder as EnvLoggerBuilder;
 use fonts::SystemFontService;
-#[cfg(all(
-    not(target_os = "windows"),
-    not(target_os = "ios"),
-    not(target_os = "android"),
-    not(target_arch = "arm"),
-    not(target_arch = "aarch64"),
-    not(target_arch = "riscv32"),
-    not(target_arch = "riscv64"),
-    not(target_env = "ohos"),
-))]
+#[cfg(target_os = "macos")]
 use gaol::sandbox::{ChildSandbox, ChildSandboxMethods};
 use ipc_channel::ipc::{self, IpcSender};
 use layout::LayoutFactoryImpl;
@@ -52,7 +43,10 @@ use servo_bluetooth_traits::BluetoothRequest;
 use servo_config::opts::{DiagnosticsLoggingOption, Opts};
 use servo_config::prefs::{PrefValue, Preferences};
 use servo_config::{opts, pref, prefs};
+#[cfg(target_os = "macos")]
+use servo_constellation::content_process_sandbox_profile;
 #[cfg(all(
+    not(target_os = "macos"),
     not(target_os = "windows"),
     not(target_os = "ios"),
     not(target_os = "android"),
@@ -62,7 +56,7 @@ use servo_config::{opts, pref, prefs};
     not(target_arch = "riscv64"),
     not(target_env = "ohos"),
 ))]
-use servo_constellation::content_process_sandbox_profile;
+use servo_constellation::{apply_sandbox, content_process_policy};
 use servo_constellation::{
     Constellation, ConstellationToEmbedderMsg, FromEmbedderLogger, FromScriptLogger,
     InitialConstellationState, NewScriptEventLoopProcessInfo, UnprivilegedContent,
@@ -564,6 +558,18 @@ impl ServoInner {
             EmbedderMsg::NotifyLoadStatusChanged(webview_id, load_status) => {
                 if let Some(webview) = self.get_webview_handle(webview_id) {
                     webview.set_load_status(load_status);
+                }
+            },
+            EmbedderMsg::DownloadStarted(webview_id, url, path) => {
+                if let Some(webview) = self.get_webview_handle(webview_id) {
+                    webview.delegate().notify_download_started(webview, url, path);
+                }
+            },
+            EmbedderMsg::DownloadCompleted(webview_id, path, success) => {
+                if let Some(webview) = self.get_webview_handle(webview_id) {
+                    webview
+                        .delegate()
+                        .notify_download_completed(webview, path, success);
                 }
             },
             EmbedderMsg::NotifyFullscreenStateChanged(webview_id, fullscreen) => {
@@ -1363,7 +1369,15 @@ pub fn run_content_process(token: String) {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn create_sandbox() {
+    ChildSandbox::new(content_process_sandbox_profile())
+        .activate()
+        .expect("Failed to activate sandbox!");
+}
+
 #[cfg(all(
+    not(target_os = "macos"),
     not(target_os = "windows"),
     not(target_os = "ios"),
     not(target_os = "android"),
@@ -1374,9 +1388,16 @@ pub fn run_content_process(token: String) {
     not(target_env = "ohos"),
 ))]
 fn create_sandbox() {
-    ChildSandbox::new(content_process_sandbox_profile())
-        .activate()
-        .expect("Failed to activate sandbox!");
+    // Landlock + seccomp self-applied in this content process. Never panics on
+    // failure: a sandbox that can't be fully applied degrades gracefully so the
+    // browser keeps running (the anti-gaol requirement). The outcome is logged
+    // for the --sandbox-selftest / soak telemetry.
+    let outcome = apply_sandbox(&content_process_policy());
+    if outcome.degraded {
+        warn!("Content process sandbox applied with degradation: {outcome:?}");
+    } else {
+        debug!("Content process sandbox applied: {outcome:?}");
+    }
 }
 
 #[cfg(any(
@@ -1384,7 +1405,7 @@ fn create_sandbox() {
     target_os = "ios",
     target_os = "android",
     target_arch = "arm",
-    target_arch = "aarch64",
+    all(target_arch = "aarch64", not(target_os = "macos")),
     target_arch = "riscv32",
     target_arch = "riscv64",
     target_env = "ohos",

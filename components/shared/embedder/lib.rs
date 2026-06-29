@@ -502,6 +502,10 @@ pub enum EmbedderMsg {
     NotifyFullscreenStateChanged(WebViewId, bool),
     /// The [`LoadStatus`] of the Given `WebView` has changed.
     NotifyLoadStatusChanged(WebViewId, LoadStatus),
+    /// A download started: (webview, source URL, destination file path).
+    DownloadStarted(WebViewId, String, String),
+    /// A download finished: (webview, destination file path, success).
+    DownloadCompleted(WebViewId, String, bool),
     /// Open dialog to select bluetooth device.
     GetSelectedBluetoothDevice(
         WebViewId,
