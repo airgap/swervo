@@ -284,34 +284,45 @@ pub enum PutItemResult {
 
 #[derive(Debug, Deserialize, MallocSizeOf, Serialize)]
 pub enum AsyncReadOnlyOperation {
+    // `index` selects the source for a read: `None` reads the object store by primary key (the
+    // `key_range` applies to the primary key); `Some(index name)` reads via that index (the
+    // `key_range` applies to the index key, and the backend resolves matching index entries to
+    // the records they reference). The returned values/keys are always the record's value and the
+    // record's primary key, regardless of source. (LYK-1310)
     /// Gets the value associated with the given key in the associated idb data
     GetKey {
         callback: GenericCallback<BackendResult<Option<IndexedDBKeyType>>>,
         key_range: IndexedDBKeyRange,
+        index: Option<String>,
     },
     GetItem {
         callback: GenericCallback<BackendResult<Option<Vec<u8>>>>,
         key_range: IndexedDBKeyRange,
+        index: Option<String>,
     },
 
     GetAllKeys {
         callback: GenericCallback<BackendResult<Vec<IndexedDBKeyType>>>,
         key_range: IndexedDBKeyRange,
         count: Option<u32>,
+        index: Option<String>,
     },
     GetAllItems {
         callback: GenericCallback<BackendResult<Vec<Vec<u8>>>>,
         key_range: IndexedDBKeyRange,
         count: Option<u32>,
+        index: Option<String>,
     },
 
     Count {
         callback: GenericCallback<BackendResult<u64>>,
         key_range: IndexedDBKeyRange,
+        index: Option<String>,
     },
     Iterate {
         callback: GenericCallback<BackendResult<Vec<IndexedDBRecord>>>,
         key_range: IndexedDBKeyRange,
+        index: Option<String>,
     },
 }
 
@@ -338,6 +349,13 @@ pub enum AsyncReadWriteOperation {
         should_overwrite: bool,
         /// New object store key generator current number to persist if the put succeeds.
         key_generator_current_number: Option<i64>,
+        /// Index keys extracted (script-side, via each index's key path) from the value being
+        /// stored, as `(index name, index key)`. The key-path evaluation needs SpiderMonkey, so it
+        /// happens in the script process and the results are shipped here for the backend to write
+        /// into `index_data`/`unique_index_data`. For a multiEntry index the key may be an
+        /// `Array`, which the backend expands to one index entry per element. Indexes whose key
+        /// path did not yield a valid key for this value are omitted (no index entry). (LYK-1310)
+        index_keys: Vec<(String, IndexedDBKeyType)>,
     },
 
     /// Removes the key/value pair for the given key in the associated idb data

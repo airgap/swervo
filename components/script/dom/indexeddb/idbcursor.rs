@@ -3,22 +3,26 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::cell::Cell;
+use std::ptr::NonNull;
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use js::jsapi::Heap;
 use js::jsval::{JSVal, UndefinedValue};
-use js::rust::MutableHandleValue;
+use js::rust::{HandleValue, MutableHandleValue};
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object};
 use script_bindings::script_runtime::CanGc;
-use storage_traits::indexeddb::{IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord};
+use storage_traits::indexeddb::{
+    AsyncOperation, AsyncReadOnlyOperation, IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord,
+};
 
 use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::{
     IDBCursorDirection, IDBCursorMethods,
 };
 use crate::dom::bindings::codegen::UnionTypes::IDBObjectStoreOrIDBIndex;
-use crate::dom::bindings::error::Error;
+use crate::dom::bindings::error::{Error, Fallible};
+use crate::dom::bindings::import::base::SafeJSContext;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::structuredclone;
@@ -27,7 +31,7 @@ use crate::dom::indexeddb::idbindex::IDBIndex;
 use crate::dom::indexeddb::idbobjectstore::IDBObjectStore;
 use crate::dom::indexeddb::idbrequest::IDBRequest;
 use crate::dom::indexeddb::idbtransaction::IDBTransaction;
-use crate::indexeddb::key_type_to_jsval;
+use crate::indexeddb::{convert_value_to_key, key_type_to_jsval};
 
 #[derive(JSTraceable, MallocSizeOf)]
 #[expect(unused)]
@@ -171,6 +175,58 @@ impl IDBCursor {
             ObjectStoreOrIndex::Index(_) => self.object_store_position.borrow().clone(),
         }
     }
+
+    /// Re-run the cursor's request to advance it (the shared core of `continue`/`advance`). Until
+    /// this existed no cursor could move past its first record. The backend re-fetches the records
+    /// and [`iterate_cursor`] advances from the cursor's current position, optionally skipping to
+    /// `key` and/or moving `count` steps. (LYK-1310)
+    fn iterate(
+        &self,
+        cx: &mut JSContext,
+        key: Option<IndexedDBKeyType>,
+        count: Option<u32>,
+    ) -> Fallible<()> {
+        // The transaction must still be active and the cursor must hold a value (i.e. not already
+        // be iterating) before it can be advanced again.
+        if !self.transaction.is_active() || !self.transaction.is_usable() {
+            return Err(Error::TransactionInactive(None));
+        }
+        if !self.got_value.get() {
+            return Err(Error::InvalidState(None));
+        }
+        self.got_value.set(false);
+        *self.cached_key.borrow_mut() = None;
+        *self.cached_primary_key.borrow_mut() = None;
+
+        let (object_store, index) = match &self.source {
+            ObjectStoreOrIndex::ObjectStore(os) => (DomRoot::from_ref(&**os), None),
+            ObjectStoreOrIndex::Index(idx) => (
+                DomRoot::from_ref(idx.object_store()),
+                Some(idx.name().to_string()),
+            ),
+        };
+        let iteration_param = IterationParam {
+            cursor: Trusted::new(self),
+            key,
+            primary_key: None,
+            count,
+        };
+        let range = self.range.clone();
+        IDBRequest::execute_async(
+            &object_store,
+            move |callback| {
+                AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
+                    callback,
+                    key_range: range,
+                    index,
+                })
+            },
+            Some(self.Request()),
+            Some(iteration_param),
+            CanGc::from_cx(cx),
+        )?;
+        Ok(())
+    }
 }
 
 impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
@@ -245,6 +301,23 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
             .get()
             .expect("IDBCursor.request should be set when cursor is opened")
     }
+
+    /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbcursor-continue>
+    fn Continue(&self, cx: SafeJSContext, key: HandleValue) -> Fallible<()> {
+        // The generated binding hands us the raw `SafeJSContext`; the IndexedDB key helpers want
+        // `js::context::JSContext`. SAFETY: `cx` is the live context for this call.
+        let mut cx =
+            unsafe { js::context::JSContext::from_ptr(NonNull::new(cx.raw_cx()).unwrap()) };
+        // If a key is given, the cursor advances to the first record whose key is >= it; otherwise
+        // it advances to the next record. The ordering against the current position is enforced by
+        // `iterate_cursor`.
+        let key = if key.is_undefined() {
+            None
+        } else {
+            Some(convert_value_to_key(&mut cx, key, None)?.into_result()?)
+        };
+        self.iterate(&mut cx, key, None)
+    }
 }
 
 /// A struct containing parameters for
@@ -301,7 +374,7 @@ pub(crate) fn iterate_cursor(
     let mut position = cursor.position.borrow().clone();
 
     // Step 7. Let object store position be cursor’s object store position.
-    let object_store_position = cursor.object_store_position.borrow().clone();
+    let mut object_store_position = cursor.object_store_position.borrow().clone();
 
     // Step 8. If count is not given, let count be 1.
     let mut count = count.unwrap_or(1);
@@ -508,9 +581,13 @@ pub(crate) fn iterate_cursor(
                 // Step 9.3. Let position be found record’s key.
                 position = Some(found_record.key.clone());
 
-                // Step 9.4. If source is an index, let object store position be found record’s value.
+                // Step 9.4. If source is an index, let object store position be found record’s value
+                // (the referenced record's primary key). Update the *local* tracked value so that
+                // Step 11 persists it onto the cursor — writing the cursor directly here is then
+                // overwritten by Step 11 with the stale pre-loop value, which left an index cursor's
+                // primaryKey undefined and stalled continue(). (LYK-1310)
                 if matches!(source, ObjectStoreOrIndex::Index(_)) {
-                    cursor.set_object_store_position(Some(found_record.primary_key.clone()));
+                    object_store_position = Some(found_record.primary_key.clone());
                 }
 
                 // Step 9.5. Decrease count by 1.
