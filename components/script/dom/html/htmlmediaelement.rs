@@ -64,7 +64,7 @@ use crate::dom::bindings::codegen::Bindings::TextTrackBinding::{TextTrackKind, T
 use crate::dom::bindings::codegen::Bindings::URLBinding::URLMethods;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::Window_Binding::WindowMethods;
 use crate::dom::bindings::codegen::UnionTypes::{
-    MediaStreamOrBlob, VideoTrackOrAudioTrackOrTextTrack,
+    BlobOrMediaSource, MediaStreamOrBlob, VideoTrackOrAudioTrackOrTextTrack,
 };
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::inheritance::Castable;
@@ -1586,7 +1586,10 @@ impl HTMLMediaElement {
                 if let Some(ref src_object) = *self.src_object.borrow() {
                     match src_object {
                         SrcObject::Blob(blob) => {
-                            let blob_url = URL::CreateObjectURL(&self.global(), blob);
+                            let blob_url = URL::CreateObjectURL(
+                                &self.global(),
+                                BlobOrMediaSource::Blob(DomRoot::from_ref(&**blob)),
+                            );
                             *self.blob_url.borrow_mut() =
                                 Some(ServoUrl::parse(&blob_url.str()).expect("infallible"));
                             self.fetch_request(None, None);
