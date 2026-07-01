@@ -17,13 +17,16 @@ use crate::dom::bindings::codegen::Bindings::MediaSourceBinding::{
 };
 use script_bindings::reflector::reflect_dom_object_with_proto;
 use servo_media::{ServoMedia, SupportsMediaType};
+use stylo_atoms::Atom;
 
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
+use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::reflector::DomGlobal;
-use crate::dom::bindings::root::{Dom, DomRoot};
+use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
+use crate::dom::html::htmlmediaelement::HTMLMediaElement;
 use crate::dom::media::sourcebuffer::SourceBuffer;
 use crate::dom::media::sourcebufferlist::SourceBufferList;
 use crate::dom::window::Window;
@@ -36,6 +39,9 @@ pub(crate) struct MediaSource {
     active_source_buffers: Dom<SourceBufferList>,
     ready_state: Cell<ReadyState>,
     duration: Cell<f64>,
+    /// The `HTMLMediaElement` this MediaSource is attached to, once `URL.createObjectURL`'d and
+    /// loaded. `None` while `readyState` is `"closed"`.
+    media_element: MutNullableDom<HTMLMediaElement>,
 }
 
 impl MediaSource {
@@ -49,6 +55,7 @@ impl MediaSource {
             active_source_buffers: Dom::from_ref(active_source_buffers),
             ready_state: Cell::new(ReadyState::Closed),
             duration: Cell::new(f64::NAN),
+            media_element: Default::default(),
         }
     }
 
@@ -68,6 +75,19 @@ impl MediaSource {
             proto,
             can_gc,
         )
+    }
+
+    /// Record the `HTMLMediaElement` this MediaSource has been attached to.
+    pub(crate) fn set_media_element(&self, element: &HTMLMediaElement) {
+        self.media_element.set(Some(element));
+    }
+
+    /// Transition to `"open"` and fire `sourceopen`, per the MSE attach steps. Called from a
+    /// media-element task once the element has resolved this MediaSource's blob URL.
+    pub(crate) fn open_and_fire_sourceopen(&self, cx: &mut js::context::JSContext) {
+        self.ready_state.set(ReadyState::Open);
+        self.upcast::<EventTarget>()
+            .fire_event(cx, Atom::from("sourceopen"));
     }
 }
 
