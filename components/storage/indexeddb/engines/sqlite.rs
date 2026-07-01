@@ -241,6 +241,7 @@ impl SqliteEngine {
         value: Vec<u8>,
         should_overwrite: bool,
         key_generator_current_number: Option<i64>,
+        index_keys: Vec<(String, IndexedDBKeyType)>,
     ) -> Result<PutItemResult, Error> {
         let no_overwrite = !should_overwrite;
         let serialized_key: Vec<u8> = encoding::serialize(&key);
@@ -257,7 +258,9 @@ impl SqliteEngine {
                 return Ok(PutItemResult::CannotOverwrite);
             }
             // Preserve `put()` semantics by replacing the stored value when the primary
-            // key already exists.
+            // key already exists. Drop the record's stale index entries first so they can be
+            // rebuilt from the new value below. (LYK-1310)
+            Self::delete_index_entries_for_key(connection, store.id, &serialized_key)?;
             connection.execute(
                 "UPDATE object_data SET data = ? WHERE object_store_id = ? AND key = ?",
                 params![value, store.id, serialized_key],
@@ -268,6 +271,8 @@ impl SqliteEngine {
                 params![store.id, serialized_key, value],
             )?;
         }
+        // Record this value in each of its object store's indexes. (LYK-1310)
+        Self::write_index_entries(connection, store.id, &serialized_key, index_keys)?;
         if let Some(next_key_generator_current_number) = key_generator_current_number {
             connection.execute(
                 "UPDATE object_store SET auto_increment = ? WHERE id = ?",
@@ -277,21 +282,396 @@ impl SqliteEngine {
         Ok(PutItemResult::Key(key))
     }
 
+    /// Write `index_data`/`unique_index_data` rows for a record's extracted index keys, mapping
+    /// each index key to the record's primary key. A `multiEntry` index whose key is an `Array`
+    /// produces one entry per element. A unique index relies on the `unique_index_data` primary
+    /// key `(index_id, value)` to reject a duplicate (surfaced as an error). (LYK-1310)
+    fn write_index_entries(
+        connection: &Connection,
+        object_store_id: i32,
+        serialized_primary_key: &[u8],
+        index_keys: Vec<(String, IndexedDBKeyType)>,
+    ) -> Result<(), Error> {
+        for (index_name, index_key) in index_keys {
+            let lookup = connection
+                .prepare(
+                    "SELECT id, unique_index, multi_entry_index FROM object_store_index \
+                     WHERE name = ? AND object_store_id = ?",
+                )
+                .and_then(|mut stmt| {
+                    stmt.query_row(params![index_name, object_store_id], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, bool>(1)?,
+                            row.get::<_, bool>(2)?,
+                        ))
+                    })
+                    .optional()
+                })?;
+            let Some((index_id, unique, multi_entry)) = lookup else {
+                // Index was removed since the script process snapshotted it; nothing to write.
+                continue;
+            };
+            // multiEntry expands an array key into one entry per element; everything else is a
+            // single entry.
+            let entry_keys: Vec<IndexedDBKeyType> = match (multi_entry, index_key) {
+                (true, IndexedDBKeyType::Array(elements)) => elements,
+                (_, other) => vec![other],
+            };
+            for entry_key in &entry_keys {
+                let serialized_index_value = encoding::serialize(entry_key);
+                if unique {
+                    connection.execute(
+                        "INSERT INTO unique_index_data \
+                         (index_id, value, object_store_id, object_data_key) VALUES (?, ?, ?, ?)",
+                        params![
+                            index_id,
+                            serialized_index_value,
+                            object_store_id,
+                            serialized_primary_key
+                        ],
+                    )?;
+                } else {
+                    connection.execute(
+                        "INSERT INTO index_data \
+                         (index_id, value, object_data_key, object_store_id) VALUES (?, ?, ?, ?)",
+                        params![
+                            index_id,
+                            serialized_index_value,
+                            serialized_primary_key,
+                            object_store_id
+                        ],
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove all index entries (both tables) that point at a given record's primary key — used
+    /// when a record is overwritten or deleted so indexes don't keep stale rows. (LYK-1310)
+    fn delete_index_entries_for_key(
+        connection: &Connection,
+        object_store_id: i32,
+        serialized_primary_key: &[u8],
+    ) -> Result<(), Error> {
+        connection.execute(
+            "DELETE FROM index_data WHERE object_store_id = ? AND object_data_key = ?",
+            params![object_store_id, serialized_primary_key],
+        )?;
+        connection.execute(
+            "DELETE FROM unique_index_data WHERE object_store_id = ? AND object_data_key = ?",
+            params![object_store_id, serialized_primary_key],
+        )?;
+        Ok(())
+    }
+
+    // ----- Index reads (LYK-1310) -------------------------------------------------------------
+    // A read with `index = Some(name)` resolves matching index entries (by index-key range) to
+    // the primary keys they reference, then to the stored records. Index values and object-store
+    // keys share the same order-preserving `encoding::serialize` form, so the index-key range
+    // becomes a plain byte comparison on the `value` column.
+
+    /// Resolve an index name to its `(id, unique)` within an object store, or `None` if absent.
+    fn lookup_index(
+        connection: &Connection,
+        object_store_id: i32,
+        index_name: &str,
+    ) -> Result<Option<(i64, bool)>, Error> {
+        connection
+            .prepare(
+                "SELECT id, unique_index FROM object_store_index \
+                 WHERE name = ? AND object_store_id = ?",
+            )
+            .and_then(|mut stmt| {
+                stmt.query_row(params![index_name, object_store_id], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?))
+                })
+                .optional()
+            })
+    }
+
+    /// Build the `value`-column predicates + their bound blobs for an index-key range.
+    fn index_value_conditions(range: &IndexedDBKeyRange) -> (Vec<String>, Vec<Vec<u8>>) {
+        let mut parts = Vec::new();
+        let mut binds = Vec::new();
+        if let Some(singleton) = range.as_singleton() {
+            parts.push("value = ?".to_string());
+            binds.push(encoding::serialize(singleton));
+        } else {
+            if let Some(lower) = range.lower.as_ref() {
+                parts.push(format!("value {} ?", if range.lower_open { ">" } else { ">=" }));
+                binds.push(encoding::serialize(lower));
+            }
+            if let Some(upper) = range.upper.as_ref() {
+                parts.push(format!("value {} ?", if range.upper_open { "<" } else { "<=" }));
+                binds.push(encoding::serialize(upper));
+            }
+        }
+        (parts, binds)
+    }
+
+    /// `(serialized index value, serialized primary key)` for index entries in `range`, ordered by
+    /// index value then primary key (the cursor/getAll iteration order), optionally capped.
+    fn index_entries(
+        connection: &Connection,
+        index_id: i64,
+        unique: bool,
+        range: IndexedDBKeyRange,
+        count: Option<u32>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Error> {
+        let table = if unique { "unique_index_data" } else { "index_data" };
+        let (mut conds, binds) = Self::index_value_conditions(&range);
+        conds.insert(0, "index_id = ?".to_string());
+        let limit = match count {
+            Some(c) => format!(" LIMIT {}", c),
+            None => String::new(),
+        };
+        let sql = format!(
+            "SELECT value, object_data_key FROM {} WHERE {} ORDER BY value, object_data_key{}",
+            table,
+            conds.join(" AND "),
+            limit,
+        );
+        let mut stmt = connection.prepare(&sql)?;
+        let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&index_id];
+        for b in &binds {
+            bound.push(b);
+        }
+        let rows = stmt
+            .query_map(&bound[..], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Number of index entries in `range`.
+    fn index_count(
+        connection: &Connection,
+        index_id: i64,
+        unique: bool,
+        range: IndexedDBKeyRange,
+    ) -> Result<u64, Error> {
+        let table = if unique { "unique_index_data" } else { "index_data" };
+        let (mut conds, binds) = Self::index_value_conditions(&range);
+        conds.insert(0, "index_id = ?".to_string());
+        let sql = format!("SELECT COUNT(*) FROM {} WHERE {}", table, conds.join(" AND "));
+        let mut stmt = connection.prepare(&sql)?;
+        let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&index_id];
+        for b in &binds {
+            bound.push(b);
+        }
+        let n: i64 = stmt.query_row(&bound[..], |row| row.get(0))?;
+        Ok(n as u64)
+    }
+
+    /// The stored value (data blob) for a primary key, or `None` if the record is gone.
+    fn object_data_value(
+        connection: &Connection,
+        object_store_id: i32,
+        serialized_key: &[u8],
+    ) -> Result<Option<Vec<u8>>, Error> {
+        connection
+            .prepare("SELECT data FROM object_data WHERE object_store_id = ? AND key = ?")
+            .and_then(|mut stmt| {
+                stmt.query_row(params![object_store_id, serialized_key], |row| {
+                    row.get::<_, Vec<u8>>(0)
+                })
+                .optional()
+            })
+    }
+
+    // ----- Read dispatch helpers: branch on object-store vs index source ----------------------
+
+    fn op_get_item(
+        connection: &Connection,
+        store: object_store_model::Model,
+        key_range: IndexedDBKeyRange,
+        index: Option<String>,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        let Some(index_name) = index else {
+            return Self::get_item(connection, store, key_range);
+        };
+        let store_id = store.id;
+        let Some((index_id, unique)) = Self::lookup_index(connection, store_id, &index_name)? else {
+            return Ok(None);
+        };
+        match Self::index_entries(connection, index_id, unique, key_range, Some(1))?
+            .into_iter()
+            .next()
+        {
+            Some((_, primary_key)) => Self::object_data_value(connection, store_id, &primary_key),
+            None => Ok(None),
+        }
+    }
+
+    fn op_get_key(
+        connection: &Connection,
+        store: object_store_model::Model,
+        key_range: IndexedDBKeyRange,
+        index: Option<String>,
+    ) -> Result<Option<IndexedDBKeyType>, Error> {
+        let Some(index_name) = index else {
+            return Self::get_key(connection, store, key_range)
+                .map(|opt| opt.and_then(|k| encoding::deserialize(&k)));
+        };
+        let Some((index_id, unique)) = Self::lookup_index(connection, store.id, &index_name)? else {
+            return Ok(None);
+        };
+        Ok(Self::index_entries(connection, index_id, unique, key_range, Some(1))?
+            .into_iter()
+            .next()
+            .and_then(|(_, primary_key)| encoding::deserialize(&primary_key)))
+    }
+
+    fn op_get_all_keys(
+        connection: &Connection,
+        store: object_store_model::Model,
+        key_range: IndexedDBKeyRange,
+        count: Option<u32>,
+        index: Option<String>,
+    ) -> Result<Vec<IndexedDBKeyType>, Error> {
+        let Some(index_name) = index else {
+            return Self::get_all_keys(connection, store, key_range, count).map(|keys| {
+                keys.into_iter()
+                    .filter_map(|k| encoding::deserialize(&k))
+                    .collect()
+            });
+        };
+        let Some((index_id, unique)) = Self::lookup_index(connection, store.id, &index_name)? else {
+            return Ok(Vec::new());
+        };
+        Ok(Self::index_entries(connection, index_id, unique, key_range, count)?
+            .into_iter()
+            .filter_map(|(_, primary_key)| encoding::deserialize(&primary_key))
+            .collect())
+    }
+
+    fn op_get_all_items(
+        connection: &Connection,
+        store: object_store_model::Model,
+        key_range: IndexedDBKeyRange,
+        count: Option<u32>,
+        index: Option<String>,
+    ) -> Result<Vec<Vec<u8>>, Error> {
+        let Some(index_name) = index else {
+            return Self::get_all_items(connection, store, key_range, count);
+        };
+        let store_id = store.id;
+        let Some((index_id, unique)) = Self::lookup_index(connection, store_id, &index_name)? else {
+            return Ok(Vec::new());
+        };
+        let mut values = Vec::new();
+        for (_, primary_key) in Self::index_entries(connection, index_id, unique, key_range, count)? {
+            if let Some(value) = Self::object_data_value(connection, store_id, &primary_key)? {
+                values.push(value);
+            }
+        }
+        Ok(values)
+    }
+
+    fn op_count(
+        connection: &Connection,
+        store: object_store_model::Model,
+        key_range: IndexedDBKeyRange,
+        index: Option<String>,
+    ) -> Result<u64, Error> {
+        let Some(index_name) = index else {
+            return Self::count(connection, store, key_range).map(|r| r as u64);
+        };
+        let Some((index_id, unique)) = Self::lookup_index(connection, store.id, &index_name)? else {
+            return Ok(0);
+        };
+        Self::index_count(connection, index_id, unique, key_range)
+    }
+
+    fn op_iterate(
+        connection: &Connection,
+        store: object_store_model::Model,
+        key_range: IndexedDBKeyRange,
+        index: Option<String>,
+    ) -> Result<Vec<IndexedDBRecord>, Error> {
+        let Some(index_name) = index else {
+            return Self::get_all_records(connection, store, key_range).map(|records| {
+                records
+                    .into_iter()
+                    .filter_map(|(key, data)| {
+                        let key = encoding::deserialize(&key)?;
+                        Some(IndexedDBRecord {
+                            key: key.clone(),
+                            primary_key: key,
+                            value: data,
+                        })
+                    })
+                    .collect()
+            });
+        };
+        let store_id = store.id;
+        let Some((index_id, unique)) = Self::lookup_index(connection, store_id, &index_name)? else {
+            return Ok(Vec::new());
+        };
+        // For an index cursor the cursor key is the index value and the primary key is the
+        // referenced record's key; the value is that record's stored data.
+        let mut records = Vec::new();
+        for (index_value, primary_key) in
+            Self::index_entries(connection, index_id, unique, key_range, None)?
+        {
+            let (Some(key), Some(primary)) = (
+                encoding::deserialize(&index_value),
+                encoding::deserialize(&primary_key),
+            ) else {
+                continue;
+            };
+            let value = Self::object_data_value(connection, store_id, &primary_key)?
+                .unwrap_or_default();
+            records.push(IndexedDBRecord {
+                key,
+                primary_key: primary,
+                value,
+            });
+        }
+        Ok(records)
+    }
+
     fn delete_item(
         connection: &Connection,
         store: object_store_model::Model,
         key_range: IndexedDBKeyRange,
     ) -> Result<(), Error> {
+        // Resolve the primary keys in range, then drop each record's index entries before the
+        // record itself — the `index_data -> object_data` foreign key would otherwise block the
+        // delete ("FOREIGN KEY constraint failed"). (LYK-1310)
         let query = range_to_query(key_range);
-        let (sql, values) = sea_query::Query::delete()
-            .from_table(object_data_model::Column::Table)
+        let (sql, values) = sea_query::Query::select()
+            .column(object_data_model::Column::Key)
+            .from(object_data_model::Column::Table)
             .and_where(query.and(Expr::col(object_data_model::Column::ObjectStoreId).is(store.id)))
             .build_rusqlite(SqliteQueryBuilder);
-        connection.prepare(&sql)?.execute(&*values.as_params())?;
+        let keys: Vec<Vec<u8>> = connection
+            .prepare(&sql)?
+            .query_map(&*values.as_params(), |row| row.get::<_, Vec<u8>>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        for key in &keys {
+            Self::delete_index_entries_for_key(connection, store.id, key)?;
+            connection.execute(
+                "DELETE FROM object_data WHERE object_store_id = ? AND key = ?",
+                params![store.id, key],
+            )?;
+        }
         Ok(())
     }
 
     fn clear(connection: &Connection, store: object_store_model::Model) -> Result<(), Error> {
+        // Drop the store's index entries before its records (FK: index_data -> object_data). (LYK-1310)
+        connection.execute(
+            "DELETE FROM index_data WHERE object_store_id = ?",
+            params![store.id],
+        )?;
+        connection.execute(
+            "DELETE FROM unique_index_data WHERE object_store_id = ?",
+            params![store.id],
+        )?;
         connection.execute(
             "DELETE FROM object_data WHERE object_store_id = ?",
             params![store.id],
@@ -438,6 +818,7 @@ impl KvsEngine for SqliteEngine {
                         value,
                         should_overwrite,
                         key_generator_current_number,
+                        index_keys,
                     }) => {
                         let (key, key_generator_current_number) = match key {
                             Some(key) => (key, key_generator_current_number),
@@ -476,6 +857,7 @@ impl KvsEngine for SqliteEngine {
                                 value,
                                 should_overwrite,
                                 key_generator_current_number,
+                                index_keys,
                             )
                             .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
                         );
@@ -483,9 +865,10 @@ impl KvsEngine for SqliteEngine {
                     AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetItem {
                         callback,
                         key_range,
+                        index,
                     }) => {
                         let _ = callback.send(
-                            Self::get_item(&connection, object_store, key_range)
+                            Self::op_get_item(&connection, object_store, key_range, index)
                                 .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
                         );
                     },
@@ -493,14 +876,10 @@ impl KvsEngine for SqliteEngine {
                         callback,
                         key_range,
                         count,
+                        index,
                     }) => {
                         let _ = callback.send(
-                            Self::get_all_keys(&connection, object_store, key_range, count)
-                                .map(|keys| {
-                                    keys.into_iter()
-                                        .map(|k| encoding::deserialize(&k).unwrap())
-                                        .collect()
-                                })
+                            Self::op_get_all_keys(&connection, object_store, key_range, count, index)
                                 .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
                         );
                     },
@@ -508,9 +887,10 @@ impl KvsEngine for SqliteEngine {
                         callback,
                         key_range,
                         count,
+                        index,
                     }) => {
                         let _ = callback.send(
-                            Self::get_all_items(&connection, object_store, key_range, count)
+                            Self::op_get_all_items(&connection, object_store, key_range, count, index)
                                 .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
                         );
                     },
@@ -526,29 +906,20 @@ impl KvsEngine for SqliteEngine {
                     AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Count {
                         callback,
                         key_range,
+                        index,
                     }) => {
                         let _ = callback.send(
-                            Self::count(&connection, object_store, key_range)
-                                .map(|r| r as u64)
+                            Self::op_count(&connection, object_store, key_range, index)
                                 .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
                         );
                     },
                     AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
                         callback,
                         key_range,
+                        index,
                     }) => {
                         let _ = callback.send(
-                            Self::get_all_records(&connection, object_store, key_range)
-                                .map(|records| {
-                                    records
-                                        .into_iter()
-                                        .map(|(key, data)| IndexedDBRecord {
-                                            key: encoding::deserialize(&key).unwrap(),
-                                            primary_key: encoding::deserialize(&key).unwrap(),
-                                            value: data,
-                                        })
-                                        .collect()
-                                })
+                            Self::op_iterate(&connection, object_store, key_range, index)
                                 .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
                         );
                     },
@@ -561,10 +932,10 @@ impl KvsEngine for SqliteEngine {
                     AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetKey {
                         callback,
                         key_range,
+                        index,
                     }) => {
                         let _ = callback.send(
-                            Self::get_key(&connection, object_store, key_range)
-                                .map(|key| key.map(|k| encoding::deserialize(&k).unwrap()))
+                            Self::op_get_key(&connection, object_store, key_range, index)
                                 .map_err(|e| BackendError::DbErr(format!("{:?}", e))),
                         );
                     },
@@ -1031,6 +1402,7 @@ mod tests {
             vec![1, 2, 3],
             true,
             None,
+            vec![],
         )
         .expect("Failed to insert item");
 
@@ -1116,6 +1488,7 @@ mod tests {
                             value: vec![1, 2, 3],
                             should_overwrite: false,
                             key_generator_current_number: None,
+                            index_keys: vec![],
                         }),
                     },
                     KvsOperation {
@@ -1126,6 +1499,7 @@ mod tests {
                             value: vec![4, 5, 6],
                             should_overwrite: false,
                             key_generator_current_number: None,
+                            index_keys: vec![],
                         }),
                     },
                     KvsOperation {
@@ -1139,6 +1513,7 @@ mod tests {
                             value: vec![7, 8, 9],
                             should_overwrite: false,
                             key_generator_current_number: None,
+                            index_keys: vec![],
                         }),
                     },
                     // Try to put a duplicate key without overwrite
@@ -1150,6 +1525,7 @@ mod tests {
                             value: vec![10, 11, 12],
                             should_overwrite: false,
                             key_generator_current_number: None,
+                            index_keys: vec![],
                         }),
                     },
                     KvsOperation {
@@ -1160,6 +1536,7 @@ mod tests {
                             value: vec![13, 14, 15],
                             should_overwrite: true,
                             key_generator_current_number: None,
+                            index_keys: vec![],
                         }),
                     },
                     KvsOperation {
@@ -1167,6 +1544,7 @@ mod tests {
                         operation: AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetItem {
                             callback: get_callback(get_item_some.0),
                             key_range: IndexedDBKeyRange::only(IndexedDBKeyType::Number(1.0)),
+                            index: None,
                         }),
                     },
                     KvsOperation {
@@ -1174,6 +1552,7 @@ mod tests {
                         operation: AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetItem {
                             callback: get_callback(get_item_none.0),
                             key_range: IndexedDBKeyRange::only(IndexedDBKeyType::Number(5.0)),
+                            index: None,
                         }),
                     },
                     KvsOperation {
@@ -1185,6 +1564,7 @@ mod tests {
                                 false,
                             ),
                             count: None,
+                            index: None,
                         }),
                     },
                     KvsOperation {
@@ -1192,6 +1572,7 @@ mod tests {
                         operation: AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Count {
                             callback: get_callback(count.0),
                             key_range: IndexedDBKeyRange::only(IndexedDBKeyType::Number(1.0)),
+                            index: None,
                         }),
                     },
                     KvsOperation {
@@ -1276,6 +1657,7 @@ mod tests {
                     vec![key as u8],
                     false,
                     None,
+                    vec![],
                 )
                 .expect("Failed to seed object store");
             }

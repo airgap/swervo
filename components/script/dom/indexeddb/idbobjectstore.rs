@@ -323,7 +323,7 @@ impl IDBObjectStore {
         self.key_path.is_some()
     }
 
-    fn verify_not_deleted(&self) -> ErrorResult {
+    pub(crate) fn verify_not_deleted(&self) -> ErrorResult {
         let db = self.transaction.Db();
         if !db.object_store_exists(&self.name.borrow()) {
             return Err(Error::InvalidState(None));
@@ -332,7 +332,7 @@ impl IDBObjectStore {
     }
 
     /// Checks if the transaction is active, throwing a "TransactionInactiveError" DOMException if not.
-    fn check_transaction_active(&self) -> Fallible<()> {
+    pub(crate) fn check_transaction_active(&self) -> Fallible<()> {
         // Let transaction be this object store handle's transaction.
         let transaction = &self.transaction;
 
@@ -467,6 +467,33 @@ impl IDBObjectStore {
         let Ok(serialized_value) = postcard::to_stdvec(&cloned_value) else {
             return Err(Error::InvalidState(None));
         };
+
+        // Extract this value's key for each of the store's indexes. Key-path evaluation needs
+        // SpiderMonkey, so it happens here in the script process; the resulting `(index name, key)`
+        // pairs travel with the put so the storage backend can write the `index_data` entries.
+        // Indexes whose key path does not yield a valid key for this value contribute no entry.
+        // (LYK-1310)
+        let index_descriptors: Vec<(String, KeyPath, bool)> = self
+            .index_set
+            .borrow()
+            .values()
+            .map(|index| {
+                (
+                    index.name().to_string(),
+                    index.key_path().clone(),
+                    index.is_multi_entry(),
+                )
+            })
+            .collect();
+        let mut index_keys: Vec<(String, IndexedDBKeyType)> = Vec::new();
+        for (name, key_path, multi_entry) in &index_descriptors {
+            if let ExtractionResult::Key(index_key) =
+                extract_key(cx, cloned_js_value.handle(), key_path, Some(*multi_entry))?
+            {
+                index_keys.push((name.clone(), index_key));
+            }
+        }
+
         // Step 12. Let operation be an algorithm to run store a record into an object store with
         // store, clone, key, and no-overwrite flag.
         let request = IDBRequest::execute_async(
@@ -478,6 +505,7 @@ impl IDBObjectStore {
                     value: serialized_value,
                     should_overwrite: !no_overwrite,
                     key_generator_current_number: key_generator_current_number_for_put,
+                    index_keys,
                 })
             },
             None,
@@ -566,6 +594,7 @@ impl IDBObjectStore {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
                     callback,
                     key_range: range,
+                    index: None,
                 })
             },
             None,
@@ -698,6 +727,7 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
                     AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetItem {
                         callback,
                         key_range: q,
+                        index: None,
                     })
                 },
                 None,
@@ -730,6 +760,7 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
                     AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetKey {
                         callback,
                         key_range: q,
+                        index: None,
                     })
                 },
                 None,
@@ -768,6 +799,7 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
                         callback,
                         key_range: q,
                         count,
+                        index: None,
                     })
                 },
                 None,
@@ -806,6 +838,7 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
                         callback,
                         key_range: q,
                         count,
+                        index: None,
                     })
                 },
                 None,
@@ -837,6 +870,7 @@ impl IDBObjectStoreMethods<crate::DomTypeHolder> for IDBObjectStore {
                     AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Count {
                         callback,
                         key_range: q,
+                        index: None,
                     })
                 },
                 None,
