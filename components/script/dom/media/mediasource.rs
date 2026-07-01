@@ -8,6 +8,7 @@
 //! feature-detection stays honest.
 
 use std::cell::Cell;
+use std::ffi::CString;
 
 use dom_struct::dom_struct;
 use js::rust::HandleObject;
@@ -118,9 +119,27 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         Ok(())
     }
 
-    /// Phase 2 wires codec validation + the SourceBuffer append pipeline.
-    fn AddSourceBuffer(&self, _type_: DOMString) -> Fallible<DomRoot<SourceBuffer>> {
-        Err(Error::NotSupported(None))
+    /// <https://w3c.github.io/media-source/#dom-mediasource-addsourcebuffer>
+    fn AddSourceBuffer(&self, type_: DOMString) -> Fallible<DomRoot<SourceBuffer>> {
+        // Step 1. If type is an empty string, throw a TypeError.
+        if type_.is_empty() {
+            return Err(Error::Type(
+                CString::new("The type provided is empty").unwrap(),
+            ));
+        }
+        // Step 2. If type is not supported, throw a NotSupportedError.
+        if ServoMedia::get().can_play_type(&type_.str()) == SupportsMediaType::No {
+            return Err(Error::NotSupported(None));
+        }
+        // Step 4. If readyState is not "open", throw an InvalidStateError.
+        if self.ready_state.get() != ReadyState::Open {
+            return Err(Error::InvalidState(None));
+        }
+        // Steps 5-7. Create the SourceBuffer, add it to sourceBuffers.
+        // TODO(Phase 2b): fire `addsourcebuffer` at sourceBuffers (needs a JSContext).
+        let source_buffer = SourceBuffer::new(&self.global(), self, CanGc::deprecated_note());
+        self.source_buffers.add(&source_buffer);
+        Ok(source_buffer)
     }
     fn RemoveSourceBuffer(&self, _buffer: &SourceBuffer) -> ErrorResult {
         Err(Error::NotSupported(None))

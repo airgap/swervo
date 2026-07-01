@@ -46,7 +46,6 @@ impl SourceBuffer {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn new(
         global: &GlobalScope,
         media_source: &MediaSource,
