@@ -16,6 +16,7 @@ use crate::dom::bindings::codegen::Bindings::MediaSourceBinding::{
     EndOfStreamError, MediaSourceMethods, ReadyState,
 };
 use script_bindings::reflector::reflect_dom_object_with_proto;
+use servo_media::{ServoMedia, SupportsMediaType};
 
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::reflector::DomGlobal;
@@ -109,9 +110,11 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
     }
 
     /// <https://w3c.github.io/media-source/#dom-mediasource-istypesupported>
-    /// Phase 1 heuristic; Phase 2 will consult the GStreamer registry scanner.
+    /// Consults the media backend (GStreamer registry) for real codec/container support.
     fn IsTypeSupported(_window: &Window, type_: DOMString) -> bool {
-        let t = type_.to_ascii_lowercase();
-        !t.is_empty() && (t.starts_with("video/") || t.starts_with("audio/"))
+        if type_.is_empty() {
+            return false;
+        }
+        ServoMedia::get().can_play_type(&type_.str()) != SupportsMediaType::No
     }
 }
