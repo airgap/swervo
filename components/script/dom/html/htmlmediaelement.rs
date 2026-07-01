@@ -72,6 +72,7 @@ use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom, UnrootedDom};
+use crate::dom::media::mediasource::MediaSource;
 use crate::dom::bindings::str::{DOMString, USVString};
 use crate::dom::blob::Blob;
 use crate::dom::csp::{GlobalCspReporting, Violation};
@@ -1519,6 +1520,22 @@ impl HTMLMediaElement {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#concept-media-load-resource>
+    /// Attach this media element to a `MediaSource` (MSE): link them, put the element into the
+    /// loading network state, and queue the `sourceopen` transition on the MediaSource. The
+    /// GStreamer player was already created by `create_media_player`; `SourceBuffer.appendBuffer`
+    /// will feed it via `push_data`.
+    fn attach_media_source(&self, media_source: &MediaSource) {
+        media_source.set_media_element(self);
+        self.network_state.set(NetworkState::Loading);
+        let media_source = Trusted::new(media_source);
+        self.owner_global()
+            .task_manager()
+            .media_element_task_source()
+            .queue(task!(mse_source_open: move |cx| {
+                media_source.root().open_and_fire_sourceopen(cx);
+            }));
+    }
+
     fn resource_fetch_algorithm(&self, resource: Resource) {
         if let Err(e) = self.create_media_player(&resource) {
             error!("Create media player error {:?}", e);
@@ -1536,6 +1553,13 @@ impl HTMLMediaElement {
         // Step 5. Run the appropriate steps from the following list:
         match resource {
             Resource::Url(url) => {
+                // MSE: if this URL was minted by `URL.createObjectURL(mediaSource)`, attach to the
+                // MediaSource instead of fetching a remote resource.
+                if let Some(media_source) = self.global().get_media_source(url.as_str()) {
+                    self.attach_media_source(&media_source);
+                    return;
+                }
+
                 // Step 5.remote.1. Optionally, run the following substeps. This is the expected
                 // behavior if the user agent intends to not attempt to fetch the resource until the
                 // user requests it explicitly (e.g. as a way to implement the preload attribute's
