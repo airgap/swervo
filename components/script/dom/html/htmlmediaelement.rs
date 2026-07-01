@@ -1520,6 +1520,12 @@ impl HTMLMediaElement {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#concept-media-load-resource>
+    /// The GStreamer player backing this element, if one has been created. Used by MSE
+    /// `SourceBuffer.appendBuffer` to feed appended bytes via `push_data`.
+    pub(crate) fn get_player(&self) -> Option<Arc<Mutex<dyn Player>>> {
+        self.player.borrow().clone()
+    }
+
     /// Attach this media element to a `MediaSource` (MSE): link them, put the element into the
     /// loading network state, and queue the `sourceopen` transition on the MediaSource. The
     /// GStreamer player was already created by `create_media_player`; `SourceBuffer.appendBuffer`

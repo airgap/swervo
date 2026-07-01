@@ -22,8 +22,7 @@ interface SourceBuffer : EventTarget {
   //   attribute EventHandler onupdateend;
   //   attribute EventHandler onerror;
   //   attribute EventHandler onabort;
-  // Phase 2 (append pipeline):
-  // [Throws] undefined appendBuffer(BufferSource data);
+  [Throws] undefined appendBuffer(BufferSource data);
   // [Throws] undefined abort();
   // [Throws] undefined remove(double start, unrestricted double end);
 };

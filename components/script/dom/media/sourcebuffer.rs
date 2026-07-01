@@ -8,11 +8,15 @@
 use std::cell::Cell;
 
 use dom_struct::dom_struct;
-
 use script_bindings::reflector::reflect_dom_object;
+use stylo_atoms::Atom;
 
 use crate::dom::bindings::codegen::Bindings::SourceBufferBinding::{AppendMode, SourceBufferMethods};
-use crate::dom::bindings::error::{ErrorResult, Fallible};
+use crate::dom::bindings::codegen::UnionTypes::ArrayBufferViewOrArrayBuffer;
+use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
+use crate::dom::bindings::inheritance::Castable;
+use crate::dom::bindings::refcounted::Trusted;
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
@@ -59,9 +63,53 @@ impl SourceBuffer {
             can_gc,
         )
     }
+
+    /// The async segment of `appendBuffer`: push the bytes into the attached element's player,
+    /// then clear `updating` and fire `update` + `updateend`.
+    fn finish_append(&self, cx: &mut js::context::JSContext, bytes: Vec<u8>) {
+        self.upcast::<EventTarget>()
+            .fire_event(cx, Atom::from("updatestart"));
+
+        if let Some(element) = self.media_source.media_element() &&
+            let Some(player) = element.get_player()
+        {
+            if let Err(error) = player.lock().unwrap().push_data(bytes) {
+                warn!("MSE appendBuffer push_data failed: {error:?}");
+            }
+        }
+
+        self.updating.set(false);
+        self.upcast::<EventTarget>()
+            .fire_event(cx, Atom::from("update"));
+        self.upcast::<EventTarget>()
+            .fire_event(cx, Atom::from("updateend"));
+    }
 }
 
 impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
+    /// <https://w3c.github.io/media-source/#dom-sourcebuffer-appendbuffer>
+    fn AppendBuffer(&self, data: ArrayBufferViewOrArrayBuffer) -> ErrorResult {
+        // Steps 1-2. Throw InvalidStateError if updating, or the parent MediaSource is not "open".
+        if self.updating.get() || !self.media_source.is_open() {
+            return Err(Error::InvalidState(None));
+        }
+        // Copy out the bytes to append.
+        let bytes = match data {
+            ArrayBufferViewOrArrayBuffer::ArrayBufferView(view) => view.to_vec(),
+            ArrayBufferViewOrArrayBuffer::ArrayBuffer(buffer) => buffer.to_vec(),
+        };
+        // Step 5. Set updating to true and run the append asynchronously.
+        self.updating.set(true);
+        let this = Trusted::new(self);
+        self.global()
+            .task_manager()
+            .media_element_task_source()
+            .queue(task!(mse_append_buffer: move |cx| {
+                this.root().finish_append(cx, bytes);
+            }));
+        Ok(())
+    }
+
     fn GetMode(&self) -> Fallible<AppendMode> {
         Ok(self.mode.get())
     }

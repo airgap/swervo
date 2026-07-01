@@ -83,6 +83,16 @@ impl MediaSource {
         self.media_element.set(Some(element));
     }
 
+    /// The `HTMLMediaElement` this MediaSource is attached to, if any.
+    pub(crate) fn media_element(&self) -> Option<DomRoot<HTMLMediaElement>> {
+        self.media_element.get()
+    }
+
+    /// Whether `readyState` is `"open"`.
+    pub(crate) fn is_open(&self) -> bool {
+        self.ready_state.get() == ReadyState::Open
+    }
+
     /// Transition to `"open"` and fire `sourceopen`, per the MSE attach steps. Called from a
     /// media-element task once the element has resolved this MediaSource's blob URL.
     pub(crate) fn open_and_fire_sourceopen(&self, cx: &mut js::context::JSContext) {
@@ -144,8 +154,20 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
     fn RemoveSourceBuffer(&self, _buffer: &SourceBuffer) -> ErrorResult {
         Err(Error::NotSupported(None))
     }
+    /// <https://w3c.github.io/media-source/#dom-mediasource-endofstream>
     fn EndOfStream(&self, _error: Option<EndOfStreamError>) -> ErrorResult {
-        Err(Error::NotSupported(None))
+        // Step 1. If readyState is not "open", throw an InvalidStateError.
+        if !self.is_open() {
+            return Err(Error::InvalidState(None));
+        }
+        // Steps 2-4. Transition to "ended" and signal end-of-stream to the player.
+        self.ready_state.set(ReadyState::Ended);
+        if let Some(element) = self.media_element.get() &&
+            let Some(player) = element.get_player()
+        {
+            let _ = player.lock().unwrap().end_of_stream();
+        }
+        Ok(())
     }
 
     /// <https://w3c.github.io/media-source/#dom-mediasource-istypesupported>
