@@ -33,6 +33,11 @@ impl SourceBufferList {
     pub(crate) fn new(global: &GlobalScope, can_gc: CanGc) -> DomRoot<SourceBufferList> {
         reflect_dom_object(Box::new(SourceBufferList::new_inherited()), global, can_gc)
     }
+
+    /// Append a SourceBuffer to the list (used by `MediaSource.addSourceBuffer`).
+    pub(crate) fn add(&self, source_buffer: &SourceBuffer) {
+        self.buffers.borrow_mut().push(Dom::from_ref(source_buffer));
+    }
 }
 
 impl SourceBufferListMethods<crate::DomTypeHolder> for SourceBufferList {
