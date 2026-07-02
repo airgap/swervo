@@ -22,6 +22,7 @@ use stylo_atoms::Atom;
 
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::inheritance::Castable;
+use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
@@ -100,6 +101,19 @@ impl MediaSource {
         self.upcast::<EventTarget>()
             .fire_event(cx, Atom::from("sourceopen"));
     }
+
+    /// Queue a task that fires a named event at this MediaSource.
+    fn queue_event(&self, name: &'static str) {
+        let this = Trusted::new(self);
+        self.global()
+            .task_manager()
+            .media_element_task_source()
+            .queue(task!(mse_event: move |cx| {
+                this.root()
+                    .upcast::<EventTarget>()
+                    .fire_event(cx, Atom::from(name));
+            }));
+    }
 }
 
 impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
@@ -145,8 +159,8 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         if self.ready_state.get() != ReadyState::Open {
             return Err(Error::InvalidState(None));
         }
-        // Steps 5-7. Create the SourceBuffer, add it to sourceBuffers.
-        // TODO(Phase 2b): fire `addsourcebuffer` at sourceBuffers (needs a JSContext).
+        // Steps 5-7. Create the SourceBuffer, add it to sourceBuffers (which queues the
+        // `addsourcebuffer` event at the list).
         let source_buffer = SourceBuffer::new(&self.global(), self, CanGc::deprecated_note());
         self.source_buffers.add(&source_buffer);
         Ok(source_buffer)
@@ -167,6 +181,7 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         {
             let _ = player.lock().unwrap().end_of_stream();
         }
+        self.queue_event("sourceended");
         Ok(())
     }
 
