@@ -23,6 +23,6 @@ interface SourceBuffer : EventTarget {
   //   attribute EventHandler onerror;
   //   attribute EventHandler onabort;
   [Throws] undefined appendBuffer(BufferSource data);
-  // [Throws] undefined abort();
-  // [Throws] undefined remove(double start, unrestricted double end);
+  [Throws] undefined abort();
+  [Throws] undefined remove(unrestricted double start, unrestricted double end);
 };
