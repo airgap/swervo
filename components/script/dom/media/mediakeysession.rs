@@ -23,14 +23,19 @@ use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_dom_object;
 use stylo_atoms::Atom;
 
+use crate::dom::bindings::codegen::Bindings::EventBinding::EventMethods;
 use crate::dom::bindings::codegen::Bindings::MediaKeySessionBinding::MediaKeySessionMethods;
+use crate::dom::bindings::codegen::Bindings::MediaKeySystemAccessBinding::MediaKeyMessageType;
 use crate::dom::bindings::codegen::UnionTypes::ArrayBufferViewOrArrayBuffer;
 use crate::dom::bindings::error::Error;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
+use crate::dom::bindings::reflector::DomGlobal;
+use crate::dom::event::Event;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
+use crate::dom::media::mediakeymessageevent::MediaKeyMessageEvent;
 use crate::dom::promise::Promise;
 use crate::script_runtime::CanGc;
 
@@ -106,10 +111,26 @@ impl MediaKeySessionMethods<crate::DomTypeHolder> for MediaKeySession {
             "cenc" => parse_pssh_key_ids(&data),
             _ => Vec::new(),
         };
-        *self.key_ids.borrow_mut() = key_ids;
+        *self.key_ids.borrow_mut() = key_ids.clone();
 
-        // TODO(brick 2b): fire a `message` MediaKeyMessageEvent carrying the Clear Key license
-        // request `{"kids":[...],"type":"temporary"}` so unmodified Clear Key players work.
+        // Fire a `message` event carrying the Clear Key license request so unmodified players can
+        // fetch a license (or answer from a local config) and hand it back via `update`.
+        if !key_ids.is_empty() {
+            let kids: Vec<String> = key_ids.iter().map(|k| URL_SAFE_NO_PAD.encode(k)).collect();
+            let request = serde_json::json!({ "kids": kids, "type": "temporary" }).to_string();
+            let can_gc = CanGc::from_cx(cx);
+            let global = self.global();
+            let event = MediaKeyMessageEvent::new(
+                cx,
+                &global,
+                Atom::from("message"),
+                MediaKeyMessageType::License_request,
+                request.as_bytes(),
+                can_gc,
+            );
+            event.upcast::<Event>().fire(cx, self.upcast::<EventTarget>());
+        }
+
         promise.resolve_native_with_cx(cx, &());
         promise
     }
