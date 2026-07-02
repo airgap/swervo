@@ -33,7 +33,14 @@ mod imp {
     });
 
     #[derive(Default)]
-    pub struct ServoCencDecrypt;
+    pub struct ServoCencDecrypt {
+        /// PTS (ns) of samples we have decrypted. If a *meta-less* buffer arrives whose PTS we
+        /// already decrypted, it is a re-push of an encrypted sample (e.g. the post-EOS flush
+        /// re-demux, which loses the crypto info) — we drop it instead of emitting ciphertext as
+        /// a garbage frame. Genuinely-clear samples (clear lead) have a PTS we never decrypted,
+        /// so they still pass through.
+        decrypted_pts: std::sync::Mutex<std::collections::HashSet<u64>>,
+    }
 
     #[glib::object_subclass]
     impl ObjectSubclass for ServoCencDecrypt {
@@ -171,7 +178,15 @@ mod imp {
             // Pull the per-sample crypto info out of the protection meta.
             let (key_id, iv, subsamples) = {
                 let Some(meta) = buffer.meta::<gstreamer::meta::ProtectionMeta>() else {
-                    // No protection meta: already clear, pass through.
+                    // No crypto meta. If we already decrypted this PTS, this is a re-pushed
+                    // encrypted sample (the demuxer dropped the crypto info on a re-demux, e.g.
+                    // after EOS) — drop it so the decoder never sees ciphertext. A genuinely-clear
+                    // sample (clear lead) has a PTS we never decrypted, so it passes through.
+                    if let Some(pts) = buffer.pts() &&
+                        self.decrypted_pts.lock().unwrap().contains(&pts.nseconds())
+                    {
+                        return Ok(gstreamer_base::BASE_TRANSFORM_FLOW_DROPPED);
+                    }
                     return Ok(gstreamer::FlowSuccess::Ok);
                 };
                 let info = meta.info();
@@ -232,6 +247,10 @@ mod imp {
             // Drop the protection meta so downstream treats the buffer as clear.
             while let Some(mut meta) = buffer.meta_mut::<gstreamer::meta::ProtectionMeta>() {
                 let _ = meta.remove();
+            }
+            // Remember this PTS so a later meta-less re-push of the same sample is dropped.
+            if let Some(pts) = buffer.pts() {
+                self.decrypted_pts.lock().unwrap().insert(pts.nseconds());
             }
             Ok(gstreamer::FlowSuccess::Ok)
         }
