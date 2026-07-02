@@ -70,6 +70,7 @@ use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom, UnrootedDom};
+use crate::dom::media::mediaencryptedevent::MediaEncryptedEvent;
 use crate::dom::media::mediakeys::MediaKeys;
 use crate::dom::media::mediasource::MediaSource;
 use crate::dom::bindings::str::{DOMString, USVString};
@@ -2730,6 +2731,23 @@ impl HTMLMediaElement {
         }
     }
 
+    /// The stream is protected: fire the `encrypted` event so scripts can set up decryption keys.
+    fn playback_need_key(&self, init_data_type: &str, init_data: &[u8], cx: &mut JSContext) {
+        let can_gc = CanGc::from_cx(cx);
+        let global = self.global();
+        let event = MediaEncryptedEvent::new(
+            cx,
+            &global,
+            Atom::from("encrypted"),
+            DOMString::from(init_data_type),
+            init_data,
+            can_gc,
+        );
+        event
+            .upcast::<Event>()
+            .fire(cx, self.upcast::<EventTarget>());
+    }
+
     fn playback_need_data(&self) {
         // The media engine signals that the source needs more data. If we already have a valid
         // fetch request, we do nothing. Otherwise, if we have no request and the previous request
@@ -4137,6 +4155,10 @@ impl HTMLMediaElementEventHandler {
                 element.playback_metadata_updated(cx, metadata)
             },
             PlayerEvent::NeedData => element.playback_need_data(),
+            PlayerEvent::NeedKey {
+                ref init_data_type,
+                ref init_data,
+            } => element.playback_need_key(init_data_type, init_data, cx),
             PlayerEvent::PositionChanged(position) => {
                 element.playback_position_changed(cx, position)
             },

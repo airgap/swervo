@@ -519,6 +519,47 @@ impl GStreamerPlayer {
             pipeline.set_context(&context);
         }
 
+        // EME: when our CENC decryptor is autoplugged, probe its sink pad for the demuxer's
+        // GST_EVENT_PROTECTION so we can surface the init data (pssh) to the DOM as an
+        // `encrypted` event (fired once per stream). Scoped per-player via `observer`.
+        if let Some(bin) = pipeline.dynamic_cast_ref::<gstreamer::Bin>() {
+            let observer = self.observer.clone();
+            let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            bin.connect_deep_element_added(move |_bin, _sub_bin, element| {
+                let is_decryptor = element
+                    .factory()
+                    .map(|f| f.name() == "servocencdecrypt")
+                    .unwrap_or(false);
+                if !is_decryptor {
+                    return;
+                }
+                let Some(sink_pad) = element.static_pad("sink") else {
+                    return;
+                };
+                let observer = observer.clone();
+                let fired = fired.clone();
+                sink_pad.add_probe(gstreamer::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
+                    if let Some(gstreamer::PadProbeData::Event(ref event)) = info.data &&
+                        let gstreamer::EventView::Protection(protection) = event.view()
+                    {
+                        let (_system_id, data, _origin) = protection.get();
+                        if !fired.swap(true, std::sync::atomic::Ordering::Relaxed) &&
+                            let Ok(map) = data.map_readable()
+                        {
+                            let _ = notify!(
+                                observer,
+                                PlayerEvent::NeedKey {
+                                    init_data_type: "cenc".to_string(),
+                                    init_data: map.to_vec(),
+                                }
+                            );
+                        }
+                    }
+                    gstreamer::PadProbeReturn::Ok
+                });
+            });
+        }
+
         // FIXME(#282): The progressive downloading breaks playback on Windows and Android.
         if !cfg!(any(target_os = "windows", target_os = "android")) {
             // Set player to perform progressive downloading. This will make the

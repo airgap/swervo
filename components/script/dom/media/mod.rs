@@ -4,6 +4,7 @@
 
 pub(crate) mod mediadeviceinfo;
 pub(crate) mod mediadevices;
+pub(crate) mod mediaencryptedevent;
 pub(crate) mod mediaerror;
 pub(crate) mod mediafragmentparser;
 pub(crate) mod mediakeys;
