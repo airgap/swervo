@@ -195,9 +195,24 @@ mod imp {
                 gstreamer::warning!(CAT, "protected buffer without kid/iv");
                 return Err(gstreamer::FlowError::NotSupported);
             };
-            let Some(key) = clearkey::get_key(&key_id) else {
-                gstreamer::warning!(CAT, "no Clear Key for kid {key_id:02x?}");
-                return Err(gstreamer::FlowError::NotSupported);
+            // The key may still be in flight: an EME player sets it up asynchronously in response
+            // to the `encrypted` event we fired. Wait for it (bounded), rather than erroring —
+            // this is the "waiting for key" state the spec describes.
+            let key = {
+                let mut key = clearkey::get_key(&key_id);
+                let mut waited_ms = 0u32;
+                while key.is_none() && waited_ms < 5000 {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    waited_ms += 20;
+                    key = clearkey::get_key(&key_id);
+                }
+                match key {
+                    Some(key) => key,
+                    None => {
+                        gstreamer::warning!(CAT, "no Clear Key for kid {key_id:02x?} after wait");
+                        return Err(gstreamer::FlowError::NotSupported);
+                    },
+                }
             };
             let mut key16 = [0u8; 16];
             key16[..key.len().min(16)].copy_from_slice(&key[..key.len().min(16)]);

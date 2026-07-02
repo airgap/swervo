@@ -102,7 +102,8 @@ impl MediaKeySessionMethods<crate::DomTypeHolder> for MediaKeySession {
                 .unwrap_or_default(),
             // "webm": init data is a single raw key id.
             "webm" => vec![data],
-            // "cenc" (pssh) and others: follow-up.
+            // "cenc": init data is one or more `pssh` boxes; extract the key ids.
+            "cenc" => parse_pssh_key_ids(&data),
             _ => Vec::new(),
         };
         *self.key_ids.borrow_mut() = key_ids;
@@ -171,4 +172,60 @@ impl MediaKeySessionMethods<crate::DomTypeHolder> for MediaKeySession {
         promise.resolve_native_with_cx(cx, &());
         promise
     }
+}
+
+/// Extract the key ids from one or more concatenated `pssh` boxes (ISO/IEC 23001-7). Handles a
+/// version-1 pssh (explicit KID list) and a version-0 Clear Key pssh (data = concatenated key ids).
+fn parse_pssh_key_ids(data: &[u8]) -> Vec<Vec<u8>> {
+    let mut key_ids = Vec::new();
+    let mut pos = 0usize;
+    while pos + 32 <= data.len() {
+        let box_size = u32::from_be_bytes([
+            data[pos],
+            data[pos + 1],
+            data[pos + 2],
+            data[pos + 3],
+        ]) as usize;
+        if &data[pos + 4..pos + 8] != b"pssh" || box_size < 32 {
+            break;
+        }
+        let box_end = (pos + box_size).min(data.len());
+        let version = data[pos + 8];
+        // 4 size + 4 'pssh' + 4 version/flags + 16 system id.
+        let mut off = pos + 28;
+        if version >= 1 {
+            if off + 4 <= box_end {
+                let kid_count = u32::from_be_bytes([
+                    data[off],
+                    data[off + 1],
+                    data[off + 2],
+                    data[off + 3],
+                ]) as usize;
+                off += 4;
+                for _ in 0..kid_count {
+                    if off + 16 > box_end {
+                        break;
+                    }
+                    key_ids.push(data[off..off + 16].to_vec());
+                    off += 16;
+                }
+            }
+        } else if off + 4 <= box_end {
+            // Version 0: [u32 data_size][data]; Clear Key data is concatenated 16-byte key ids.
+            let data_size = u32::from_be_bytes([
+                data[off],
+                data[off + 1],
+                data[off + 2],
+                data[off + 3],
+            ]) as usize;
+            off += 4;
+            let data_end = (off + data_size).min(box_end);
+            while off + 16 <= data_end {
+                key_ids.push(data[off..off + 16].to_vec());
+                off += 16;
+            }
+        }
+        pos = box_end;
+    }
+    key_ids
 }

@@ -76,6 +76,12 @@ pub enum PlayerEvent {
     /// The internal player queue is running out of data. The client should start
     /// pushing more data.
     NeedData,
+    /// The stream is protected (encrypted). Carries the protection-system init data (e.g. a
+    /// `pssh` box) so the client can fire the `encrypted` DOM event and set up decryption keys.
+    NeedKey {
+        init_data_type: String,
+        init_data: Vec<u8>,
+    },
     PositionChanged(f64),
     /// The player needs the data to perform a seek to the given offset in bytes.
     /// The next push_data should get the buffers from the new offset.
