@@ -2780,6 +2780,19 @@ impl HTMLMediaElement {
             return;
         }
 
+        // After playback has ended, the player (GStreamer) emits a spurious position update of 0
+        // while tearing the pipeline down. Per spec currentTime must remain at the end position
+        // after `ended`, so ignore backwards jumps to 0 once end-of-stream has been processed —
+        // that state is exactly readyState==HaveCurrentData with a nonzero position (playback_end
+        // sets it). A real replay goes through a seek, which the `seeking` early-return above
+        // handles.
+        if position == 0. &&
+            self.ready_state.get() == ReadyState::HaveCurrentData &&
+            self.official_playback_position.get() > 0.
+        {
+            return;
+        }
+
         let _ = self
             .played
             .borrow_mut()
