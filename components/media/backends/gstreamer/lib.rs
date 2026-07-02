@@ -5,6 +5,7 @@
 pub mod audio_decoder;
 pub mod audio_sink;
 pub mod audio_stream_reader;
+pub mod cenc_decryptor;
 mod datachannel;
 mod device_monitor;
 pub mod media_capture;
@@ -73,6 +74,11 @@ impl GStreamerBackend {
         plugins: &'a [T],
     ) -> Result<Box<dyn Backend>, ErrorLoadingPlugins<'a>> {
         gstreamer::init().unwrap();
+
+        // Register our Clear Key CENC decryptor so decodebin autoplugs it for encrypted content.
+        if let Err(error) = cenc_decryptor::register_cenc_decryptor() {
+            warn!("Failed to register the Clear Key CENC decryptor: {error:?}");
+        }
 
         // GStreamer between 1.19.1 and 1.22.7 will not send messages like "end of stream"
         // to GstPlayer unless there is a GLib main loop running somewhere. We should remove

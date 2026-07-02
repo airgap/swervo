@@ -505,6 +505,20 @@ impl GStreamerPlayer {
         let signal_adapter = gstreamer_play::PlaySignalAdapter::new_sync_emit(&player);
         let pipeline = player.pipeline();
 
+        // EME: advertise Clear Key as the preferred decryption system so the demuxer selects the
+        // Clear Key pssh and attaches per-sample crypto info; decodebin then autoplugs our
+        // `servocencdecrypt` element (registered at backend init). Set proactively — the demuxer's
+        // context query fires before any decryptor is plugged, so it can't answer for itself.
+        {
+            let mut context =
+                gstreamer::Context::new("drm-preferred-decryption-system-id", true);
+            context.get_mut().unwrap().structure_mut().set(
+                "decryption-system-id",
+                "1077efec-c0b2-4d02-ace3-3c1e52e2fb4b",
+            );
+            pipeline.set_context(&context);
+        }
+
         // FIXME(#282): The progressive downloading breaks playback on Windows and Android.
         if !cfg!(any(target_os = "windows", target_os = "android")) {
             // Set player to perform progressive downloading. This will make the
