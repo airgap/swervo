@@ -6,10 +6,13 @@
 
 use dom_struct::dom_struct;
 use script_bindings::cell::DomRefCell;
-
 use script_bindings::reflector::reflect_dom_object;
+use stylo_atoms::Atom;
 
 use crate::dom::bindings::codegen::Bindings::SourceBufferListBinding::SourceBufferListMethods;
+use crate::dom::bindings::inheritance::Castable;
+use crate::dom::bindings::refcounted::Trusted;
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
@@ -34,9 +37,24 @@ impl SourceBufferList {
         reflect_dom_object(Box::new(SourceBufferList::new_inherited()), global, can_gc)
     }
 
-    /// Append a SourceBuffer to the list (used by `MediaSource.addSourceBuffer`).
+    /// Append a SourceBuffer to the list (used by `MediaSource.addSourceBuffer`) and queue the
+    /// `addsourcebuffer` event at the list.
     pub(crate) fn add(&self, source_buffer: &SourceBuffer) {
         self.buffers.borrow_mut().push(Dom::from_ref(source_buffer));
+        self.queue_event("addsourcebuffer");
+    }
+
+    /// Queue a task that fires a named event at this SourceBufferList.
+    fn queue_event(&self, name: &'static str) {
+        let this = Trusted::new(self);
+        self.global()
+            .task_manager()
+            .media_element_task_source()
+            .queue(task!(sbl_event: move |cx| {
+                this.root()
+                    .upcast::<EventTarget>()
+                    .fire_event(cx, Atom::from(name));
+            }));
     }
 }
 
