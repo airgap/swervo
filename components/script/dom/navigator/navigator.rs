@@ -12,7 +12,10 @@ use dom_struct::dom_struct;
 use embedder_traits::{EmbedderMsg, ProtocolHandlerUpdateRegistration, RegisterOrUnregister};
 use headers::HeaderMap;
 use http::header::{self, HeaderValue};
+use std::rc::Rc;
+
 use js::context::JSContext;
+use js::realm::CurrentRealm;
 use js::rust::MutableHandleValue;
 use net_traits::blob_url_store::UrlWithBlobClaim;
 use net_traits::request::{
@@ -36,7 +39,10 @@ use crate::dom::bindings::codegen::Bindings::WindowBinding::Window_Binding::Wind
 use crate::dom::bindings::codegen::Bindings::XMLHttpRequestBinding::BodyInit;
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::refcounted::Trusted;
+use crate::dom::bindings::codegen::Bindings::MediaKeySystemAccessBinding::MediaKeySystemConfiguration;
 use crate::dom::bindings::reflector::DomGlobal;
+use crate::dom::media::mediakeysystemaccess::MediaKeySystemAccess;
+use crate::dom::promise::Promise;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::bindings::str::{DOMString, USVString};
 use crate::dom::bindings::utils::to_frozen_array;
@@ -297,6 +303,26 @@ impl Navigator {
 }
 
 impl NavigatorMethods<crate::DomTypeHolder> for Navigator {
+    /// <https://w3c.github.io/encrypted-media/#dom-navigator-requestmediakeysystemaccess>
+    /// Brick 1: Clear Key only — resolves for `org.w3.clearkey`, rejects otherwise.
+    fn RequestMediaKeySystemAccess(
+        &self,
+        cx: &mut JSContext,
+        key_system: DOMString,
+        _supported_configurations: Vec<MediaKeySystemConfiguration>,
+    ) -> Rc<Promise> {
+        let mut realm = CurrentRealm::assert(cx);
+        let promise = Promise::new_in_realm(&mut realm);
+        if key_system.to_string() == "org.w3.clearkey" {
+            let access =
+                MediaKeySystemAccess::new(&self.global(), key_system, CanGc::deprecated_note());
+            promise.resolve_native_with_cx(cx, &access);
+        } else {
+            promise.reject_error(cx, Error::NotSupported(None));
+        }
+        promise
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#dom-navigator-product>
     fn Product(&self) -> DOMString {
         navigatorinfo::Product()

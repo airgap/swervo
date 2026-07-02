@@ -222,6 +222,8 @@ pub struct Preferences {
     pub dom_webgl2_enabled: bool,
     // feature: Media Source Extensions | Web/API/Media_Source_Extensions_API
     pub dom_mediasource_enabled: bool,
+    // feature: Encrypted Media Extensions (EME) | Web/API/Encrypted_Media_Extensions_API
+    pub dom_eme_enabled: bool,
     // feature: WebRTC | #41396 | Web/API/WebRTC_API
     pub dom_webrtc_enabled: bool,
     // feature: WebRTC Transceiver | #41396 | Web/API/RTCRtpTransceiver
@@ -470,6 +472,7 @@ impl Preferences {
             dom_webgpu_enabled: false,
             dom_webgpu_wgpu_backend: String::new(),
             dom_mediasource_enabled: false,
+            dom_eme_enabled: false,
             dom_webrtc_enabled: false,
             dom_webrtc_transceiver_enabled: false,
             dom_webvtt_enabled: false,

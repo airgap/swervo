@@ -70,6 +70,7 @@ use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom, UnrootedDom};
+use crate::dom::media::mediakeys::MediaKeys;
 use crate::dom::media::mediasource::MediaSource;
 use crate::dom::bindings::str::{DOMString, USVString};
 use crate::dom::blob::Blob;
@@ -530,6 +531,8 @@ pub(crate) struct HTMLMediaElement {
     fired_loadeddata_event: Cell<bool>,
     /// <https://html.spec.whatwg.org/multipage/#dom-media-error>
     error: MutNullableDom<MediaError>,
+    /// <https://w3c.github.io/encrypted-media/#dom-htmlmediaelement-mediakeys> (EME)
+    media_keys: MutNullableDom<MediaKeys>,
     /// <https://html.spec.whatwg.org/multipage/#dom-media-paused>
     paused: Cell<bool>,
     /// <https://html.spec.whatwg.org/multipage/#dom-media-defaultplaybackrate>
@@ -654,6 +657,7 @@ impl HTMLMediaElement {
             generation_id: Cell::new(0),
             fired_loadeddata_event: Cell::new(false),
             error: Default::default(),
+            media_keys: Default::default(),
             paused: Cell::new(true),
             default_playback_rate: Cell::new(1.0),
             playback_rate: Cell::new(1.0),
@@ -3027,6 +3031,22 @@ impl HTMLMediaElement {
 }
 
 impl HTMLMediaElementMethods<crate::DomTypeHolder> for HTMLMediaElement {
+    /// <https://w3c.github.io/encrypted-media/#dom-htmlmediaelement-mediakeys> (EME)
+    fn GetMediaKeys(&self) -> Option<DomRoot<MediaKeys>> {
+        self.media_keys.get()
+    }
+
+    /// <https://w3c.github.io/encrypted-media/#dom-htmlmediaelement-setmediakeys> (EME)
+    /// Brick 1: associate the MediaKeys with this element and resolve; the encrypted-media
+    /// attachment (feeding keys into the decrypt pipeline) lands with brick 3.
+    fn SetMediaKeys(&self, cx: &mut JSContext, media_keys: Option<&MediaKeys>) -> Rc<Promise> {
+        let mut realm = CurrentRealm::assert(cx);
+        let promise = Promise::new_in_realm(&mut realm);
+        self.media_keys.set(media_keys);
+        promise.resolve_native_with_cx(cx, &());
+        promise
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#dom-media-networkstate>
     fn NetworkState(&self) -> u16 {
         self.network_state.get() as u16
