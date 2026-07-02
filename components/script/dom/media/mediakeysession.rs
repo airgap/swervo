@@ -139,6 +139,8 @@ impl MediaKeySessionMethods<crate::DomTypeHolder> for MediaKeySession {
                     let (Ok(kid_bytes), Ok(k_bytes)) =
                         (URL_SAFE_NO_PAD.decode(kid), URL_SAFE_NO_PAD.decode(k))
                 {
+                    // Publish to the process-global Clear Key store the CENC decrypt element reads.
+                    servo_media::clearkey::insert_key(kid_bytes.clone(), k_bytes.clone());
                     store.insert(kid_bytes, k_bytes);
                     stored += 1;
                 }
@@ -162,6 +164,9 @@ impl MediaKeySessionMethods<crate::DomTypeHolder> for MediaKeySession {
     fn Close(&self, cx: &mut JSContext) -> Rc<Promise> {
         let mut realm = CurrentRealm::assert(cx);
         let promise = Promise::new_in_realm(&mut realm);
+        // Drop this session's keys from the global Clear Key store, then the local copy.
+        let key_ids: Vec<Vec<u8>> = self.keys.borrow().keys().cloned().collect();
+        servo_media::clearkey::remove_keys(&key_ids);
         self.keys.borrow_mut().clear();
         promise.resolve_native_with_cx(cx, &());
         promise
