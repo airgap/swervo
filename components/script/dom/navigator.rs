@@ -41,6 +41,7 @@ use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::codegen::Bindings::MediaKeySystemAccessBinding::MediaKeySystemConfiguration;
 use crate::dom::bindings::reflector::DomGlobal;
+use crate::dom::media::keysystem;
 use crate::dom::media::mediakeysystemaccess::MediaKeySystemAccess;
 use crate::dom::promise::Promise;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
@@ -313,12 +314,20 @@ impl NavigatorMethods<crate::DomTypeHolder> for Navigator {
     ) -> Rc<Promise> {
         let mut realm = CurrentRealm::assert(cx);
         let promise = Promise::new_in_realm(&mut realm);
-        if key_system.to_string() == "org.w3.clearkey" {
-            let access =
-                MediaKeySystemAccess::new(&self.global(), key_system, CanGc::deprecated_note());
-            promise.resolve_native_with_cx(cx, &access);
-        } else {
-            promise.reject_error(cx, Error::NotSupported(None));
+        match keysystem::evaluate(&key_system.to_string()) {
+            keysystem::KeySystemSupport::Available => {
+                let access = MediaKeySystemAccess::new(
+                    &self.global(),
+                    key_system,
+                    CanGc::deprecated_note(),
+                );
+                promise.resolve_native_with_cx(cx, &access);
+            },
+            // A recognized DRM whose CDM host is not bundled (LYK-1364), or an unknown key system:
+            // no usable access — reject as unsupported, per the EME algorithm.
+            keysystem::KeySystemSupport::NeedsCdm | keysystem::KeySystemSupport::Unsupported => {
+                promise.reject_error(cx, Error::NotSupported(None));
+            },
         }
         promise
     }
