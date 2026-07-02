@@ -1527,6 +1527,13 @@ impl HTMLMediaElement {
     fn attach_media_source(&self, media_source: &MediaSource) {
         media_source.set_media_element(self);
         self.network_state.set(NetworkState::Loading);
+        // MSE feeds an append-only forward byte stream via `appendBuffer` → `push_data`; there is
+        // no fetchable resource to seek. Mark the player non-seekable so the demuxer forward-
+        // demuxes instead of emitting `SeekData` (which routes to `fetch_request` and stalls MSE
+        // playback at readyState HAVE_CURRENT_DATA on multi-segment appends).
+        if let Some(player) = self.get_player() {
+            let _ = player.lock().unwrap().set_seekable(false);
+        }
         let media_source = Trusted::new(media_source);
         self.owner_global()
             .task_manager()
