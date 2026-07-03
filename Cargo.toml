@@ -450,15 +450,20 @@ codegen-units = 1
 #
 # Or for Stylo:
 #
-# [patch."https://github.com/servo/stylo"]
-# selectors = { path = "../stylo/selectors" }
-# servo_arc = { path = "../stylo/servo_arc" }
-# stylo = { path = "../stylo/style" }
-# stylo_atoms = { path = "../stylo/stylo_atoms" }
-# stylo_dom = { path = "../stylo/stylo_dom" }
-# stylo_malloc_size_of = { path = "../stylo/malloc_size_of" }
-# stylo_static_prefs = { path = "../stylo/stylo_static_prefs" }
-# stylo_traits = { path = "../stylo/style_traits" }
+# NavGator: `background-clip: text` needs a `background_clip::Clip::Text` variant that
+# upstream stylo only exposes to Gecko (`extra_gecko_values`). airgap/stylo promotes it
+# into the shared `values` list so Servo gets it too. This patch tree is servo/stylo at the
+# rev pinned above (bc25ec93) plus that one-line longhands.toml change — keep the rev bumped
+# in lockstep with the servo/stylo rev above. Branch: navgator-background-clip-text.
+[patch."https://github.com/servo/stylo"]
+selectors = { git = "https://github.com/airgap/stylo", rev = "ca6f5d497a0439efcdf17ca15d3e6f3c2e5dd700" }
+servo_arc = { git = "https://github.com/airgap/stylo", rev = "ca6f5d497a0439efcdf17ca15d3e6f3c2e5dd700" }
+stylo = { git = "https://github.com/airgap/stylo", rev = "ca6f5d497a0439efcdf17ca15d3e6f3c2e5dd700" }
+stylo_atoms = { git = "https://github.com/airgap/stylo", rev = "ca6f5d497a0439efcdf17ca15d3e6f3c2e5dd700" }
+stylo_dom = { git = "https://github.com/airgap/stylo", rev = "ca6f5d497a0439efcdf17ca15d3e6f3c2e5dd700" }
+stylo_malloc_size_of = { git = "https://github.com/airgap/stylo", rev = "ca6f5d497a0439efcdf17ca15d3e6f3c2e5dd700" }
+stylo_static_prefs = { git = "https://github.com/airgap/stylo", rev = "ca6f5d497a0439efcdf17ca15d3e6f3c2e5dd700" }
+stylo_traits = { git = "https://github.com/airgap/stylo", rev = "ca6f5d497a0439efcdf17ca15d3e6f3c2e5dd700" }
 #
 # Or for another Git dependency:
 #
