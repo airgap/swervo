@@ -3074,7 +3074,7 @@ impl HTMLMediaElementMethods<crate::DomTypeHolder> for HTMLMediaElement {
         let mut realm = CurrentRealm::assert(cx);
         let promise = Promise::new_in_realm(&mut realm);
         self.media_keys.set(media_keys);
-        promise.resolve_native_with_cx(cx, &());
+        promise.resolve_native(cx, &());
         promise
     }
 

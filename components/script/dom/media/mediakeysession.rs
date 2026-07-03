@@ -131,7 +131,7 @@ impl MediaKeySessionMethods<crate::DomTypeHolder> for MediaKeySession {
             event.upcast::<Event>().fire(cx, self.upcast::<EventTarget>());
         }
 
-        promise.resolve_native_with_cx(cx, &());
+        promise.resolve_native(cx, &());
         promise
     }
 
@@ -178,7 +178,7 @@ impl MediaKeySessionMethods<crate::DomTypeHolder> for MediaKeySession {
 
         self.upcast::<EventTarget>()
             .fire_event(cx, Atom::from("keystatuseschange"));
-        promise.resolve_native_with_cx(cx, &());
+        promise.resolve_native(cx, &());
         promise
     }
 
@@ -190,7 +190,7 @@ impl MediaKeySessionMethods<crate::DomTypeHolder> for MediaKeySession {
         let key_ids: Vec<Vec<u8>> = self.keys.borrow().keys().cloned().collect();
         servo_media::clearkey::remove_keys(&key_ids);
         self.keys.borrow_mut().clear();
-        promise.resolve_native_with_cx(cx, &());
+        promise.resolve_native(cx, &());
         promise
     }
 }

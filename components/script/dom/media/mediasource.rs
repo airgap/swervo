@@ -12,6 +12,7 @@ use std::ffi::CString;
 
 use dom_struct::dom_struct;
 use js::rust::HandleObject;
+use js::context::JSContext;
 
 use crate::dom::bindings::codegen::Bindings::MediaSourceBinding::{
     EndOfStreamError, MediaSourceMethods, ReadyState,
@@ -119,11 +120,15 @@ impl MediaSource {
 impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
     /// <https://w3c.github.io/media-source/#dom-mediasource-mediasource>
     fn Constructor(
+        cx: &mut JSContext,
         window: &Window,
         proto: Option<HandleObject>,
-        can_gc: CanGc,
     ) -> Fallible<DomRoot<MediaSource>> {
-        Ok(MediaSource::new_with_proto(&window.global(), proto, can_gc))
+        Ok(MediaSource::new_with_proto(
+            &window.global(),
+            proto,
+            CanGc::from_cx(cx),
+        ))
     }
 
     fn SourceBuffers(&self) -> DomRoot<SourceBufferList> {

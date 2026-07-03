@@ -21,7 +21,7 @@ use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::event::Event;
 use crate::dom::globalscope::GlobalScope;
-use crate::script_runtime::{CanGc, JSContext as SafeJSContext};
+use crate::script_runtime::CanGc;
 
 /// <https://w3c.github.io/encrypted-media/#mediaencryptedevent>
 #[dom_struct]
@@ -46,7 +46,7 @@ impl MediaEncryptedEvent {
         let buffer_source = if init_data.is_empty() {
             HeapBufferSource::<ArrayBufferU8>::default()
         } else {
-            create_buffer_source::<ArrayBufferU8>(cx.into(), init_data, array.handle_mut(), can_gc)
+            create_buffer_source::<ArrayBufferU8>(cx.into(), init_data, array.handle_mut())
                 .expect("Creating an ArrayBuffer from init data should never fail");
             HeapBufferSource::<ArrayBufferU8>::new(BufferSource::ArrayBuffer(Heap::boxed(
                 *array.handle(),
@@ -75,7 +75,7 @@ impl MediaEncryptedEventMethods<crate::DomTypeHolder> for MediaEncryptedEvent {
     }
 
     /// <https://w3c.github.io/encrypted-media/#dom-mediaencryptedevent-initdata>
-    fn GetInitData(&self, _cx: SafeJSContext) -> Option<RootedTraceableBox<HeapArrayBuffer>> {
+    fn GetInitData(&self) -> Option<RootedTraceableBox<HeapArrayBuffer>> {
         self.init_data.borrow().typed_array_to_option()
     }
 

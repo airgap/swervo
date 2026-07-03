@@ -58,7 +58,7 @@ impl MediaKeySystemAccessMethods<crate::DomTypeHolder> for MediaKeySystemAccess 
         let mut realm = CurrentRealm::assert(cx);
         let promise = Promise::new_in_realm(&mut realm);
         let media_keys = MediaKeys::new(&self.global(), CanGc::deprecated_note());
-        promise.resolve_native_with_cx(cx, &media_keys);
+        promise.resolve_native(cx, &media_keys);
         promise
     }
 }

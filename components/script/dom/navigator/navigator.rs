@@ -321,7 +321,7 @@ impl NavigatorMethods<crate::DomTypeHolder> for Navigator {
                     key_system,
                     CanGc::deprecated_note(),
                 );
-                promise.resolve_native_with_cx(cx, &access);
+                promise.resolve_native(cx, &access);
             },
             // A recognized DRM whose CDM host is not bundled (LYK-1364), or an unknown key system:
             // no usable access — reject as unsupported, per the EME algorithm.

@@ -1,7 +1,6 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
-use std::ptr::NonNull;
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
@@ -15,7 +14,7 @@ use storage_traits::indexeddb::{AsyncOperation, AsyncReadOnlyOperation};
 
 use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::IDBCursorDirection;
 use crate::dom::bindings::error::Fallible;
-use crate::dom::bindings::import::base::SafeJSContext;
+use js::context::JSContext as SafeJSContext;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
@@ -27,15 +26,6 @@ use crate::dom::indexeddb::idbobjectstore::IDBObjectStore;
 use crate::dom::indexeddb::idbrequest::IDBRequest;
 use crate::indexeddb::convert_value_to_key_range;
 use crate::script_runtime::CanGc;
-
-/// The generated `IDBIndex` bindings hand us a raw `SafeJSContext` wrapper, but the IndexedDB
-/// helpers (`convert_value_to_key_range`, `CanGc::from_cx`) take the realm-tracking
-/// `js::context::JSContext`. Re-wrap the live context pointer into that form, mirroring the
-/// conversion script_runtime.rs performs for SpiderMonkey callbacks.
-fn js_context(cx: SafeJSContext) -> js::context::JSContext {
-    // SAFETY: `cx` is the live JS context for the current call.
-    unsafe { js::context::JSContext::from_ptr(NonNull::new(cx.raw_cx()).unwrap()) }
-}
 
 #[dom_struct]
 pub(crate) struct IDBIndex {
@@ -127,6 +117,7 @@ impl IDBIndex {
 
         let cursor = if key_only {
             IDBCursor::new(
+                cx,
                 &self.global(),
                 &transaction,
                 direction,
@@ -134,10 +125,10 @@ impl IDBIndex {
                 ObjectStoreOrIndex::Index(Dom::from_ref(self)),
                 range.clone(),
                 key_only,
-                CanGc::from_cx(cx),
             )
         } else {
             DomRoot::upcast(IDBCursorWithValue::new(
+                cx,
                 &self.global(),
                 &transaction,
                 direction,
@@ -145,7 +136,6 @@ impl IDBIndex {
                 ObjectStoreOrIndex::Index(Dom::from_ref(self)),
                 range.clone(),
                 key_only,
-                CanGc::from_cx(cx),
             ))
         };
 
@@ -157,6 +147,7 @@ impl IDBIndex {
         };
         let index_name = self.name.to_string();
         IDBRequest::execute_async(
+            cx,
             self.object_store(),
             |callback| {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
@@ -167,7 +158,6 @@ impl IDBIndex {
             },
             None,
             Some(iteration_param),
-            CanGc::from_cx(cx),
         )
         .inspect(|request| cursor.set_request(request))
     }
@@ -202,13 +192,13 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
     }
 
     /// <https://www.w3.org/TR/IndexedDB/#dom-idbindex-get>
-    fn Get(&self, cx: SafeJSContext, query: HandleValue) -> Fallible<DomRoot<IDBRequest>> {
+    fn Get(&self, cx: &mut SafeJSContext, query: HandleValue) -> Fallible<DomRoot<IDBRequest>> {
         self.object_store().verify_not_deleted()?;
         self.object_store().check_transaction_active()?;
-        let mut cx = js_context(cx);
         let index_name = self.name.to_string();
-        let range = convert_value_to_key_range(&mut cx, query, Some(true))?;
+        let range = convert_value_to_key_range(cx, query, Some(true))?;
         IDBRequest::execute_async(
+            cx,
             self.object_store(),
             |callback| {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetItem {
@@ -219,18 +209,17 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
             },
             None,
             None,
-            CanGc::from_cx(&mut cx),
         )
     }
 
     /// <https://www.w3.org/TR/IndexedDB/#dom-idbindex-getkey>
-    fn GetKey(&self, cx: SafeJSContext, query: HandleValue) -> Fallible<DomRoot<IDBRequest>> {
+    fn GetKey(&self, cx: &mut SafeJSContext, query: HandleValue) -> Fallible<DomRoot<IDBRequest>> {
         self.object_store().verify_not_deleted()?;
         self.object_store().check_transaction_active()?;
-        let mut cx = js_context(cx);
         let index_name = self.name.to_string();
-        let range = convert_value_to_key_range(&mut cx, query, Some(true))?;
+        let range = convert_value_to_key_range(cx, query, Some(true))?;
         IDBRequest::execute_async(
+            cx,
             self.object_store(),
             |callback| {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetKey {
@@ -241,23 +230,22 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
             },
             None,
             None,
-            CanGc::from_cx(&mut cx),
         )
     }
 
     /// <https://www.w3.org/TR/IndexedDB/#dom-idbindex-getall>
     fn GetAll(
         &self,
-        cx: SafeJSContext,
+        cx: &mut SafeJSContext,
         query: HandleValue,
         count: Option<u32>,
     ) -> Fallible<DomRoot<IDBRequest>> {
         self.object_store().verify_not_deleted()?;
         self.object_store().check_transaction_active()?;
-        let mut cx = js_context(cx);
         let index_name = self.name.to_string();
-        let range = convert_value_to_key_range(&mut cx, query, None)?;
+        let range = convert_value_to_key_range(cx, query, None)?;
         IDBRequest::execute_async(
+            cx,
             self.object_store(),
             |callback| {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllItems {
@@ -269,23 +257,22 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
             },
             None,
             None,
-            CanGc::from_cx(&mut cx),
         )
     }
 
     /// <https://www.w3.org/TR/IndexedDB/#dom-idbindex-getallkeys>
     fn GetAllKeys(
         &self,
-        cx: SafeJSContext,
+        cx: &mut SafeJSContext,
         query: HandleValue,
         count: Option<u32>,
     ) -> Fallible<DomRoot<IDBRequest>> {
         self.object_store().verify_not_deleted()?;
         self.object_store().check_transaction_active()?;
-        let mut cx = js_context(cx);
         let index_name = self.name.to_string();
-        let range = convert_value_to_key_range(&mut cx, query, None)?;
+        let range = convert_value_to_key_range(cx, query, None)?;
         IDBRequest::execute_async(
+            cx,
             self.object_store(),
             |callback| {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::GetAllKeys {
@@ -297,18 +284,17 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
             },
             None,
             None,
-            CanGc::from_cx(&mut cx),
         )
     }
 
     /// <https://www.w3.org/TR/IndexedDB/#dom-idbindex-count>
-    fn Count(&self, cx: SafeJSContext, query: HandleValue) -> Fallible<DomRoot<IDBRequest>> {
+    fn Count(&self, cx: &mut SafeJSContext, query: HandleValue) -> Fallible<DomRoot<IDBRequest>> {
         self.object_store().verify_not_deleted()?;
         self.object_store().check_transaction_active()?;
-        let mut cx = js_context(cx);
         let index_name = self.name.to_string();
-        let range = convert_value_to_key_range(&mut cx, query, None)?;
+        let range = convert_value_to_key_range(cx, query, None)?;
         IDBRequest::execute_async(
+            cx,
             self.object_store(),
             |callback| {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Count {
@@ -319,29 +305,26 @@ impl IDBIndexMethods<crate::DomTypeHolder> for IDBIndex {
             },
             None,
             None,
-            CanGc::from_cx(&mut cx),
         )
     }
 
     /// <https://www.w3.org/TR/IndexedDB/#dom-idbindex-opencursor>
     fn OpenCursor(
         &self,
-        cx: SafeJSContext,
+        cx: &mut SafeJSContext,
         query: HandleValue,
         direction: IDBCursorDirection,
     ) -> Fallible<DomRoot<IDBRequest>> {
-        let mut cx = js_context(cx);
-        self.open_cursor(&mut cx, query, direction, false)
+        self.open_cursor(cx, query, direction, false)
     }
 
     /// <https://www.w3.org/TR/IndexedDB/#dom-idbindex-openkeycursor>
     fn OpenKeyCursor(
         &self,
-        cx: SafeJSContext,
+        cx: &mut SafeJSContext,
         query: HandleValue,
         direction: IDBCursorDirection,
     ) -> Fallible<DomRoot<IDBRequest>> {
-        let mut cx = js_context(cx);
-        self.open_cursor(&mut cx, query, direction, true)
+        self.open_cursor(cx, query, direction, true)
     }
 }

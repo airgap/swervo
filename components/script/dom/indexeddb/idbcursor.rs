@@ -22,7 +22,6 @@ use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::{
 };
 use crate::dom::bindings::codegen::UnionTypes::IDBObjectStoreOrIDBIndex;
 use crate::dom::bindings::error::{Error, Fallible};
-use crate::dom::bindings::import::base::SafeJSContext;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::structuredclone;
@@ -213,6 +212,7 @@ impl IDBCursor {
         };
         let range = self.range.clone();
         IDBRequest::execute_async(
+            cx,
             &object_store,
             move |callback| {
                 AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate {
@@ -223,7 +223,6 @@ impl IDBCursor {
             },
             Some(self.Request()),
             Some(iteration_param),
-            CanGc::from_cx(cx),
         )?;
         Ok(())
     }
@@ -303,20 +302,16 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbcursor-continue>
-    fn Continue(&self, cx: SafeJSContext, key: HandleValue) -> Fallible<()> {
-        // The generated binding hands us the raw `SafeJSContext`; the IndexedDB key helpers want
-        // `js::context::JSContext`. SAFETY: `cx` is the live context for this call.
-        let mut cx =
-            unsafe { js::context::JSContext::from_ptr(NonNull::new(cx.raw_cx()).unwrap()) };
+    fn Continue(&self, cx: &mut JSContext, key: HandleValue) -> Fallible<()> {
         // If a key is given, the cursor advances to the first record whose key is >= it; otherwise
         // it advances to the next record. The ordering against the current position is enforced by
         // `iterate_cursor`.
         let key = if key.is_undefined() {
             None
         } else {
-            Some(convert_value_to_key(&mut cx, key, None)?.into_result()?)
+            Some(convert_value_to_key(cx, key, None)?.into_result()?)
         };
-        self.iterate(&mut cx, key, None)
+        self.iterate(cx, key, None)
     }
 }
 

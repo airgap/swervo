@@ -21,7 +21,7 @@ use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::event::Event;
 use crate::dom::globalscope::GlobalScope;
-use crate::script_runtime::{CanGc, JSContext as SafeJSContext};
+use crate::script_runtime::CanGc;
 
 /// <https://w3c.github.io/encrypted-media/#mediakeymessageevent>
 #[dom_struct]
@@ -46,7 +46,7 @@ impl MediaKeyMessageEvent {
         let buffer_source = if message.is_empty() {
             HeapBufferSource::<ArrayBufferU8>::default()
         } else {
-            create_buffer_source::<ArrayBufferU8>(cx.into(), message, array.handle_mut(), can_gc)
+            create_buffer_source::<ArrayBufferU8>(cx.into(), message, array.handle_mut())
                 .expect("Creating an ArrayBuffer from the license message should never fail");
             HeapBufferSource::<ArrayBufferU8>::new(BufferSource::ArrayBuffer(Heap::boxed(
                 *array.handle(),
@@ -75,7 +75,7 @@ impl MediaKeyMessageEventMethods<crate::DomTypeHolder> for MediaKeyMessageEvent 
     }
 
     /// <https://w3c.github.io/encrypted-media/#dom-mediakeymessageevent-message>
-    fn GetMessage(&self, _cx: SafeJSContext) -> Option<RootedTraceableBox<HeapArrayBuffer>> {
+    fn GetMessage(&self) -> Option<RootedTraceableBox<HeapArrayBuffer>> {
         self.message.borrow().typed_array_to_option()
     }
 

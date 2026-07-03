@@ -23,6 +23,7 @@ use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::media::mediasource::MediaSource;
 use crate::dom::timeranges::{TimeRanges, TimeRangesContainer};
+use js::context::JSContext;
 use crate::script_runtime::CanGc;
 
 #[dom_struct]
@@ -191,7 +192,7 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
     }
     /// <https://w3c.github.io/media-source/#dom-sourcebuffer-buffered>
     /// Reports the ranges the attached element's player has actually buffered.
-    fn GetBuffered(&self) -> Fallible<DomRoot<TimeRanges>> {
+    fn GetBuffered(&self, cx: &mut JSContext) -> Fallible<DomRoot<TimeRanges>> {
         let mut buffered = TimeRangesContainer::default();
         if let Some(element) = self.media_source.media_element() &&
             let Some(player) = element.get_player()
@@ -200,11 +201,7 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
                 let _ = buffered.add(range.start, range.end);
             }
         }
-        Ok(TimeRanges::new(
-            self.global().as_window(),
-            buffered,
-            CanGc::deprecated_note(),
-        ))
+        Ok(TimeRanges::new(cx, self.global().as_window(), buffered))
     }
     fn GetTimestampOffset(&self) -> Fallible<f64> {
         Ok(self.timestamp_offset.get())
