@@ -467,6 +467,51 @@ impl WindowRenderingContext {
         })
     }
 
+    /// Create a `WindowRenderingContext` for another window that **shares this context's surfman
+    /// [`Connection`]** — and therefore its EGL display.
+    ///
+    /// Surfman's EGL display is reference-counted through the `Connection` (an internal `Arc`) and
+    /// is terminated only when the last device holding it drops. When each window instead builds
+    /// its own `Connection` from the same native display, they each independently own — and so each
+    /// independently `eglTerminate`s — the *same* underlying `EGLDisplay`; the first window to close
+    /// then invalidates the display the other windows (and Servo's compositor) are still rendering
+    /// with, panicking with `BadDisplay`. Sharing one `Connection` across every window makes the
+    /// display outlive them all.
+    ///
+    /// Use this for every window after the first; the first must use [`Self::new`].
+    pub fn new_shared(
+        &self,
+        window_handle: WindowHandle,
+        size: PhysicalSize<u32>,
+    ) -> Result<Self, Error> {
+        if size.width == 0 || size.height == 0 {
+            log::error!(
+                "Unable to create WindowRenderingContext with size under 1x1 ({size:?} provided)"
+            );
+            return Err(Error::Failed);
+        }
+
+        let connection = self.surfman_context.device.borrow().connection();
+        let adapter = connection.create_adapter()?;
+        let surfman_context = SurfmanRenderingContext::new(&connection, &adapter, None)?;
+
+        let native_widget = connection
+            .create_native_widget_from_window_handle(
+                window_handle,
+                Size2D::new(size.width as i32, size.height as i32),
+            )
+            .expect("Failed to create native widget");
+
+        let surface = surfman_context.create_surface(SurfaceType::Widget { native_widget })?;
+        surfman_context.bind_surface(surface)?;
+        surfman_context.make_current()?;
+
+        Ok(Self {
+            size: Cell::new(size),
+            surfman_context,
+        })
+    }
+
     pub fn offscreen_context(
         self: &Rc<Self>,
         size: PhysicalSize<u32>,
