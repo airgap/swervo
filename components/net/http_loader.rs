@@ -77,7 +77,7 @@ use crate::connector::{
     CertificateErrorOverrideManager, ServoClient, TlsHandshakeInfo, create_tls_config,
 };
 use crate::cookie::ServoCookie;
-use crate::cookie_storage::CookieStorage;
+use crate::cookie_storage::{CookieStorage, SameSiteContext};
 use crate::decoder::Decoder;
 use crate::devtools::{
     prepare_devtools_request, send_request_to_devtools, send_response_values_to_devtools,
@@ -240,7 +240,7 @@ fn strict_origin_when_cross_origin(
 }
 
 /// <https://html.spec.whatwg.org/multipage/#schemelessly-same-site>
-fn is_schemelessy_same_site(site_a: &ImmutableOrigin, site_b: &ImmutableOrigin) -> bool {
+pub(crate) fn is_schemelessy_same_site(site_a: &ImmutableOrigin, site_b: &ImmutableOrigin) -> bool {
     // Step 1
     if !site_a.is_tuple() && !site_b.is_tuple() && site_a == site_b {
         true
@@ -330,14 +330,60 @@ pub fn determine_requests_referrer(
     }
 }
 
+/// Compute the [`SameSiteContext`] for attaching cookies to `request`: the same-site
+/// relationship between the request's initiator (its `origin`) and the target URL,
+/// refined by whether the request is a top-level navigation with a safe method.
+/// <https://www.ietf.org/archive/id/draft-ietf-httpbis-rfc6265bis-15.html#name-the-samesite-attribute-2>
+pub(crate) fn same_site_context_for_request(request: &Request) -> SameSiteContext {
+    // The initiator origin. `Client` should have been resolved to the client's origin
+    // earlier in fetch; treat an unresolved value as first-party rather than silently
+    // withholding cookies (this also covers embedder/browser-initiated loads, which
+    // carry no initiating site — like an address-bar navigation in other browsers).
+    let initiator = match &request.origin {
+        Origin::Client => return SameSiteContext::SameSite,
+        Origin::Origin(origin) => origin,
+    };
+    // Schemelessly-same-site comparison of the initiator with the target, mirroring
+    // the `Sec-Fetch-Site` computation. An opaque initiator (sandboxed iframe, data:
+    // context) is never same-site with a tuple origin.
+    if is_schemelessy_same_site(initiator, &request.current_url().origin()) {
+        return SameSiteContext::SameSite;
+    }
+    let top_level_navigation = matches!(request.mode, RequestMode::Navigate) &&
+        !request
+            .client
+            .as_ref()
+            .is_some_and(|client| client.is_nested_browsing_context);
+    // A browser-initiated top-level navigation — address bar, bookmark, session
+    // restore — carries a *fresh opaque* initiator origin here (navigation.rs maps every
+    // non-`Script` LoadOrigin to `ImmutableOrigin::new_opaque()`), whereas a script-driven
+    // cross-site navigation carries the initiating document's real tuple origin. Chrome,
+    // Firefox and Safari all treat the browser-initiated case as same-site so a directly
+    // typed URL keeps `SameSite=Strict` session cookies (you stay logged in); mirror that.
+    // A page cannot forge this: any navigation it initiates is `Script` with its own tuple
+    // origin, so cross-site script navigations still fall through to Lax-only below.
+    if top_level_navigation && !initiator.is_tuple() {
+        return SameSiteContext::SameSite;
+    }
+    // Other cross-site top-level navigations with a safe method still carry `Lax`
+    // (and Lax-by-default) cookies, but not `Strict`.
+    if top_level_navigation && request.method.is_safe() {
+        return SameSiteContext::CrossSiteLaxAllowed;
+    }
+    SameSiteContext::CrossSite
+}
+
 fn set_request_cookies(
+    same_site_context: SameSiteContext,
     url: &ServoUrl,
     headers: &mut HeaderMap,
     cookie_jar: &RwLock<CookieStorage>,
 ) {
     let mut cookie_jar = cookie_jar.write();
     cookie_jar.remove_expired_cookies_for_url(url);
-    if let Some(cookie_list) = cookie_jar.cookies_for_url(url, CookieSource::HTTP) {
+    if let Some(cookie_list) =
+        cookie_jar.cookies_for_url_with_same_site(url, CookieSource::HTTP, same_site_context)
+    {
         headers.insert(
             header::COOKIE,
             HeaderValue::from_bytes(cookie_list.as_bytes()).unwrap(),
@@ -1489,7 +1535,9 @@ async fn http_network_or_cache_fetch(
         // Substep 1
         // TODO http://mxr.mozilla.org/servo/source/components/net/http_loader.rs#504
         // XXXManishearth http_loader has block_cookies: support content blocking here too
+        let same_site_context = same_site_context_for_request(http_request);
         set_request_cookies(
+            same_site_context,
             &current_url,
             &mut http_request.headers,
             &context.state.cookie_jar,

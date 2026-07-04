@@ -22,7 +22,7 @@ use http::HeaderMap;
 use http::header::{self, HeaderName, HeaderValue};
 use ipc_channel::ipc::IpcSender;
 use log::{debug, trace, warn};
-use net_traits::request::{RequestBuilder, RequestMode};
+use net_traits::request::{Origin as RequestOrigin, RequestBuilder, RequestMode};
 use net_traits::{CookieSource, MessageData, WebSocketDomAction, WebSocketNetworkEvent};
 use servo_base::generic_channel::CallbackSetter;
 use servo_url::ServoUrl;
@@ -38,8 +38,9 @@ use tungstenite::{ClientRequestBuilder, Message};
 use crate::async_runtime::spawn_task;
 use crate::connector::TlsConfig;
 use crate::cookie::ServoCookie;
+use crate::cookie_storage::SameSiteContext;
 use crate::hosts::replace_host;
-use crate::http_loader::HttpState;
+use crate::http_loader::{HttpState, is_schemelessy_same_site};
 
 /// Create a Request object for the initial HTTP request.
 /// This request contains `Origin`, `Sec-WebSocket-Protocol`, `Authorization`,
@@ -96,9 +97,26 @@ pub fn create_handshake_request(
         headers.insert("Sec-WebSocket-Protocol", HeaderValue::from_str(&protocols)?);
     }
 
+    // A WebSocket handshake is never a navigation, so cross-site handshakes may only
+    // carry `SameSite=None` cookies (a `Client` or opaque-vs-tuple mismatch falls back
+    // to the same-site/cross-site defaults of `is_schemelessy_same_site`).
+    let same_site_context = match &request.origin {
+        RequestOrigin::Client => SameSiteContext::SameSite,
+        RequestOrigin::Origin(initiator) => {
+            if is_schemelessy_same_site(initiator, &request.url.origin()) {
+                SameSiteContext::SameSite
+            } else {
+                SameSiteContext::CrossSite
+            }
+        },
+    };
     let mut cookie_jar = http_state.cookie_jar.write();
     cookie_jar.remove_expired_cookies_for_url(&request.url);
-    if let Some(cookie_list) = cookie_jar.cookies_for_url(&request.url, CookieSource::HTTP) {
+    if let Some(cookie_list) = cookie_jar.cookies_for_url_with_same_site(
+        &request.url,
+        CookieSource::HTTP,
+        same_site_context,
+    ) {
         headers.insert("Cookie", HeaderValue::from_str(&cookie_list)?);
     }
 
