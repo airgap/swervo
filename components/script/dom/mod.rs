@@ -224,6 +224,8 @@ pub(crate) use self::bluetooth::*;
 pub(crate) mod broadcastchannel;
 mod canvas;
 pub(crate) use self::canvas::*;
+pub(crate) mod cache;
+pub(crate) mod cachestorage;
 pub(crate) mod characterdata;
 pub(crate) use self::characterdata::*;
 pub(crate) mod clipboard;
