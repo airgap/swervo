@@ -859,6 +859,11 @@ impl ServoInner {
 
 impl Drop for ServoInner {
     fn drop(&mut self) {
+        // A prior explicit `Servo::shutdown()` may have already completed the shutdown; don't
+        // re-run it (the constellation/network threads are already gone).
+        if self.shutdown_state.get() == ShutdownState::FinishedShuttingDown {
+            return;
+        }
         self.constellation_proxy
             .send(EmbedderToConstellationMessage::Exit);
         self.shutdown_state.set(ShutdownState::ShuttingDown);
@@ -1058,6 +1063,24 @@ impl Servo {
     ///   - Maybe update the rendered `Paint` output, but *without* swapping buffers.
     pub fn spin_event_loop(&self) {
         self.0.spin_event_loop();
+    }
+
+    /// Gracefully shut Servo down: ask the constellation to exit and spin the event loop until
+    /// shutdown completes. This is what `Drop` does, exposed so an embedder that keeps `Servo`
+    /// handles alive until process exit (or that intentionally leaks them) can still trigger the
+    /// clean-shutdown work — flushing the network thread's persistent state (cookies, HSTS, auth,
+    /// the HTTP cache) to disk. Idempotent: a no-op once shutdown has finished.
+    pub fn shutdown(&self) {
+        if self.0.shutdown_state.get() == ShutdownState::FinishedShuttingDown {
+            return;
+        }
+        self.0
+            .constellation_proxy
+            .send(EmbedderToConstellationMessage::Exit);
+        self.0.shutdown_state.set(ShutdownState::ShuttingDown);
+        while self.0.spin_event_loop() {
+            std::thread::sleep(Duration::from_micros(500));
+        }
     }
 
     pub fn setup_logging(&self) {

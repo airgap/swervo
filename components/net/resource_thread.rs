@@ -213,13 +213,20 @@ fn create_http_states(
         servo_base::read_json_from_file(&mut cookie_jar, config_dir, "cookie_jar.json");
     }
 
+    // Reload the persistent HTTP cache from disk (main profile only; the private state below stays
+    // memory-only). Still-fresh entries serve from cache on a cold start; stale ones revalidate.
+    let http_cache = match config_dir {
+        Some(config_dir) => HttpCache::load(config_dir),
+        None => HttpCache::default(),
+    };
+
     let override_manager = CertificateErrorOverrideManager::new();
     let http_state = HttpState {
         hsts_list: RwLock::new(hsts_list),
         cookie_jar: RwLock::new(cookie_jar),
         auth_cache: RwLock::new(auth_cache),
         history_states: RwLock::new(FxHashMap::default()),
-        http_cache: HttpCache::default(),
+        http_cache,
         client: create_http_client(create_tls_config(
             ca_certificates.clone(),
             ignore_certificate_errors,
@@ -672,6 +679,8 @@ impl ResourceChannelManager {
                     servo_base::write_json_to_file(&*jar, config_dir, "cookie_jar.json");
                     let hsts = http_state.hsts_list.read();
                     servo_base::write_json_to_file(&*hsts, config_dir, "hsts_list.json");
+                    // Persist the HTTP cache now that in-flight bodies have completed.
+                    http_state.http_cache.persist(config_dir);
                 }
                 self.resource_manager.exit();
                 let _ = sender.send(());

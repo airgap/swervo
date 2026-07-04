@@ -14,8 +14,10 @@ use std::time::{Duration, Instant, SystemTime};
 use headers::{
     CacheControl, ContentRange, Expires, HeaderMapExt, LastModified, Pragma, Range, Vary,
 };
+use base64::Engine;
 use http::{HeaderMap, Method, StatusCode, header};
 use log::{debug, error};
+use serde::{Deserialize, Serialize};
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use malloc_size_of_derive::MallocSizeOf;
 use net_traits::http_status::HttpStatus;
@@ -128,6 +130,220 @@ impl Default for HttpCache {
         Self {
             entries: Cache::new(size),
         }
+    }
+}
+
+// ── Disk persistence ────────────────────────────────────────────────────────
+// The HTTP cache is otherwise memory-only and lost on restart. We persist the completed entries
+// to the profile config dir on resource-thread exit and reload them at startup, so a cold start
+// reuses cached bodies (served directly if still fresh, or revalidated with a conditional request
+// that returns 304 and reuses the stored body) instead of re-downloading everything. Only the
+// main (non-private) profile is persisted; incognito stays memory-only.
+
+/// File name (JSON) under the profile config dir.
+const CACHE_FILE: &str = "http_cache.json";
+/// Total persisted-body budget. Beyond this, remaining entries are dropped (LRU-ish: iteration
+/// order is arbitrary, so this is a coarse bound rather than strict LRU — good enough as a cap).
+const MAX_PERSIST_BYTES: usize = 24 * 1024 * 1024;
+/// Skip persisting any single response body larger than this.
+const MAX_ENTRY_BYTES: usize = 3 * 1024 * 1024;
+
+#[derive(Default, Deserialize, Serialize)]
+struct PersistedCache {
+    entries: Vec<PersistedEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct PersistedEntry {
+    url: String,
+    resources: Vec<PersistedResource>,
+}
+
+/// A cached response flattened into serializable, restart-durable form. Header values and the body
+/// are base64 (JSON number-arrays would bloat binary bodies ~5x); freshness is stored as wall-clock
+/// so it survives a restart (the live `Instant`/`Duration` can't).
+#[derive(Deserialize, Serialize)]
+struct PersistedResource {
+    request_headers: Vec<(String, String)>,
+    response_headers: Vec<(String, String)>,
+    body_b64: String,
+    final_url: String,
+    content_type: Option<String>,
+    charset: Option<String>,
+    status_code: u16,
+    status_message_b64: String,
+    location_url: Option<String>,
+    url_list: Vec<String>,
+    /// Wall-clock seconds since the epoch at which the resource was last validated.
+    validated_at_unix: u64,
+    /// Freshness lifetime in seconds (the live `expires` Duration).
+    freshness_secs: u64,
+}
+
+fn headers_to_persisted(map: &HeaderMap) -> Vec<(String, String)> {
+    map.iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_owned(),
+                base64::engine::general_purpose::STANDARD.encode(value.as_bytes()),
+            )
+        })
+        .collect()
+}
+
+fn headers_from_persisted(pairs: &[(String, String)]) -> HeaderMap {
+    let mut map = HeaderMap::new();
+    for (name, value_b64) in pairs {
+        let Ok(value_bytes) = base64::engine::general_purpose::STANDARD.decode(value_b64) else {
+            continue;
+        };
+        if let (Ok(name), Ok(value)) = (
+            http::HeaderName::from_bytes(name.as_bytes()),
+            http::HeaderValue::from_bytes(&value_bytes),
+        ) {
+            map.append(name, value);
+        }
+    }
+    map
+}
+
+impl HttpCache {
+    /// Load a cache previously written by [`Self::persist`] from `config_dir`. Missing/corrupt files
+    /// yield an empty cache. Each entry's freshness is recomputed from the persisted wall-clock time,
+    /// so still-fresh entries serve immediately and stale ones revalidate on first use.
+    pub fn load(config_dir: &std::path::Path) -> HttpCache {
+        let cache = HttpCache::default();
+        let mut persisted = PersistedCache::default();
+        servo_base::read_json_from_file(&mut persisted, config_dir, CACHE_FILE);
+
+        let now_wall = SystemTime::now();
+        let now_instant = Instant::now();
+        let b64 = base64::engine::general_purpose::STANDARD;
+
+        for entry in persisted.entries {
+            let Ok(url) = ServoUrl::parse(&entry.url) else {
+                continue;
+            };
+            let mut resources = Vec::with_capacity(entry.resources.len());
+            for r in entry.resources {
+                let Ok(body) = b64.decode(&r.body_b64) else {
+                    continue;
+                };
+                let status_message = b64.decode(&r.status_message_b64).unwrap_or_default();
+                // Reconstruct `last_validated` (an Instant) from the persisted wall-clock time.
+                let validated_at =
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(r.validated_at_unix);
+                let elapsed = now_wall.duration_since(validated_at).unwrap_or_default();
+                let last_validated = now_instant.checked_sub(elapsed).unwrap_or(now_instant);
+
+                resources.push(CachedResource {
+                    request_headers: Arc::new(ParkingLotMutex::new(headers_from_persisted(
+                        &r.request_headers,
+                    ))),
+                    body: Arc::new(ParkingLotMutex::new(ResponseBody::Done(body))),
+                    aborted: Arc::new(AtomicBool::new(false)),
+                    awaiting_body: Arc::new(ParkingLotMutex::new(vec![])),
+                    metadata: CachedMetadata {
+                        headers: Arc::new(ParkingLotMutex::new(headers_from_persisted(
+                            &r.response_headers,
+                        ))),
+                        final_url: ServoUrl::parse(&r.final_url).unwrap_or_else(|_| url.clone()),
+                        content_type: r.content_type,
+                        charset: r.charset,
+                        status: HttpStatus::new_raw(r.status_code, status_message.clone()),
+                    },
+                    location_url: r
+                        .location_url
+                        .and_then(|s| ServoUrl::parse(&s).ok())
+                        .map(Ok),
+                    status: HttpStatus::new_raw(r.status_code, status_message),
+                    url_list: r
+                        .url_list
+                        .iter()
+                        .filter_map(|s| ServoUrl::parse(s).ok())
+                        .collect(),
+                    expires: Duration::from_secs(r.freshness_secs),
+                    last_validated,
+                });
+            }
+            if !resources.is_empty() {
+                cache
+                    .entries
+                    .insert(CacheKey::from_url(url), std::sync::Arc::new(TokioRwLock::new(resources)));
+            }
+        }
+        cache
+    }
+
+    /// Serialize the completed cache entries to `config_dir`. Intended to run on resource-thread
+    /// exit, when in-flight bodies have finished. Only `Done` GET responses are written, capped by
+    /// [`MAX_ENTRY_BYTES`] per body and [`MAX_PERSIST_BYTES`] in total.
+    pub fn persist(&self, config_dir: &std::path::Path) {
+        let mut persisted = PersistedCache::default();
+        let mut total = 0usize;
+        let now_wall = SystemTime::now();
+        let now_instant = Instant::now();
+        let b64 = base64::engine::general_purpose::STANDARD;
+
+        'outer: for (key, entry) in self.entries.iter() {
+            // Non-blocking: at shutdown nothing else holds the lock; skip any that are contended
+            // rather than risk blocking a runtime thread.
+            let Ok(resources) = entry.try_read() else {
+                continue;
+            };
+            let mut out = Vec::new();
+            for res in resources.iter() {
+                let body_bytes = {
+                    let body = res.body.lock();
+                    match &*body {
+                        ResponseBody::Done(bytes) => bytes.clone(),
+                        _ => continue, // incomplete/streaming — skip
+                    }
+                };
+                if body_bytes.len() > MAX_ENTRY_BYTES {
+                    continue;
+                }
+                if total + body_bytes.len() > MAX_PERSIST_BYTES {
+                    break 'outer;
+                }
+                total += body_bytes.len();
+
+                // Convert `last_validated` (Instant) into a wall-clock timestamp.
+                let ago = now_instant.saturating_duration_since(res.last_validated);
+                let validated_at_unix = now_wall
+                    .checked_sub(ago)
+                    .unwrap_or(now_wall)
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+
+                out.push(PersistedResource {
+                    request_headers: headers_to_persisted(&res.request_headers.lock()),
+                    response_headers: headers_to_persisted(&res.metadata.headers.lock()),
+                    body_b64: b64.encode(&body_bytes),
+                    final_url: res.metadata.final_url.to_string(),
+                    content_type: res.metadata.content_type.clone(),
+                    charset: res.metadata.charset.clone(),
+                    status_code: res.status.code().as_u16(),
+                    status_message_b64: b64.encode(res.status.message()),
+                    location_url: match &res.location_url {
+                        Some(Ok(url)) => Some(url.to_string()),
+                        _ => None,
+                    },
+                    url_list: res.url_list.iter().map(|u| u.to_string()).collect(),
+                    validated_at_unix,
+                    freshness_secs: res.expires.as_secs(),
+                });
+            }
+            if !out.is_empty() {
+                persisted.entries.push(PersistedEntry {
+                    url: key.url.to_string(),
+                    resources: out,
+                });
+            }
+        }
+
+        servo_base::write_json_to_file(&persisted, config_dir, CACHE_FILE);
     }
 }
 
