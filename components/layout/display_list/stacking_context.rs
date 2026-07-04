@@ -65,6 +65,16 @@ pub(crate) struct ContainingBlock {
     /// The physical rect of this containing block.
     rect: PhysicalRect<Au>,
 
+    /// When this containing block is established by a scroll container, the scroll
+    /// container's *scrollable overflow* rectangle, in the same coordinate space as
+    /// child fragment rects (relative to the scroll container's content-box origin).
+    /// Sticky containment ("the position box remains contained within its containing
+    /// block") must be computed against this rather than `rect`: `rect` only spans the
+    /// scrollport, but a sticky child may travel through the whole scrolled content —
+    /// bounding it to the scrollport made `position: sticky` stop sticking after one
+    /// scrollport-height of scrolling inside `overflow` scrollers.
+    scrollable_overflow_rect: Option<PhysicalRect<Au>>,
+
     /// Normally containing block offsets and display list items are positioned relative
     /// to their parent reference frame, but cumulative containing block boundaries on
     /// fragments need to disregard reference frames entirely. This value tracks the
@@ -86,6 +96,7 @@ impl ContainingBlock {
             scroll_frame_size,
             clip_id,
             rect,
+            scrollable_overflow_rect: None,
             accumulated_reference_frame_offset,
         }
     }
@@ -706,6 +717,7 @@ impl BoxFragment {
             stacking_context_tree,
             containing_block.scroll_node_id,
             &containing_block.rect,
+            containing_block.scrollable_overflow_rect,
             &new_scroll_frame_size,
         );
 
@@ -805,6 +817,7 @@ impl BoxFragmentWithStyle<'_> {
             .for_non_absolute_descendants
             .scroll_frame_size;
         let mut new_clip_id = containing_block.clip_id;
+        let mut new_scrollable_overflow_rect = None;
         if let Some(overflow_frame_data) = self.build_overflow_frame_if_necessary(
             stacking_context_tree,
             new_scroll_node_id,
@@ -818,6 +831,15 @@ impl BoxFragmentWithStyle<'_> {
                 new_scroll_node_id = scroll_frame_data.scroll_tree_node_id;
                 new_scroll_frame_size = Some(scroll_frame_data.scroll_frame_rect.size());
                 self.set_generated_scroll_tree_node_id(new_scroll_node_id);
+                // This box is a scroll container establishing the containing block for its
+                // in-flow descendants, so record its scrollable overflow (translated from
+                // this box's own coordinate space into its children's space — relative to
+                // the content-box origin) for sticky containment. See
+                // `ContainingBlock::scrollable_overflow_rect`.
+                new_scrollable_overflow_rect = Some(
+                    self.scrollable_overflow()
+                        .translate(-self.content_rect().origin.to_vector()),
+                );
             }
         }
 
@@ -835,13 +857,14 @@ impl BoxFragmentWithStyle<'_> {
             new_clip_id,
             containing_block.accumulated_reference_frame_offset,
         );
-        let for_non_absolute_descendants = ContainingBlock::new(
+        let mut for_non_absolute_descendants = ContainingBlock::new(
             content_rect,
             new_scroll_node_id,
             new_scroll_frame_size,
             new_clip_id,
             containing_block.accumulated_reference_frame_offset,
         );
+        for_non_absolute_descendants.scrollable_overflow_rect = new_scrollable_overflow_rect;
 
         // Create a new `ContainingBlockInfo` for descendants depending on
         // whether or not this fragment establishes a containing block for
@@ -1055,6 +1078,7 @@ impl BoxFragment {
         stacking_context_tree: &mut StackingContextTree,
         parent_scroll_node_id: ScrollTreeNodeId,
         containing_block_rect: &PhysicalRect<Au>,
+        containing_block_scrollable_overflow: Option<PhysicalRect<Au>>,
         scroll_frame_size: &Option<LayoutSize>,
     ) -> Option<ScrollTreeNodeId> {
         let style = self.style();
@@ -1120,14 +1144,24 @@ impl BoxFragment {
         let border_rect = self.border_rect();
         let computed_margin = style.physical_margin();
 
+        // The rectangle the sticky box must remain contained within. Normally this is the
+        // containing block's rect, but when the containing block is established by the scroll
+        // container itself the box may travel through the whole *scrollable overflow* area:
+        // the CB box only spans the scrollport, and bounding the sticky offset to it made
+        // sticky elements stop sticking after one scrollport-height of scrolling inside
+        // `overflow` scrollers (matching neither Gecko nor Blink).
+        let containment_rect = containing_block_scrollable_overflow.unwrap_or_else(|| {
+            PhysicalRect::new(PhysicalPoint::zero(), containing_block_rect.size)
+        });
+
         // Signed distance between each side of the border box to the corresponding side of the
-        // containing block. Note that |border_rect| is already in the coordinate system of the
-        // containing block.
+        // containment rectangle. Note that |border_rect| is already in the coordinate system of
+        // the containing block, as is |containment_rect|.
         let distance_from_border_box_to_cb = PhysicalSides::new(
-            border_rect.min_y(),
-            containing_block_rect.width() - border_rect.max_x(),
-            containing_block_rect.height() - border_rect.max_y(),
-            border_rect.min_x(),
+            border_rect.min_y() - containment_rect.min_y(),
+            containment_rect.max_x() - border_rect.max_x(),
+            containment_rect.max_y() - border_rect.max_y(),
+            border_rect.min_x() - containment_rect.min_x(),
         );
 
         // Shrinks the signed distance by the margin, producing a limit on how much we can shift
