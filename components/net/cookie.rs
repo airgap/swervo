@@ -9,7 +9,7 @@ use std::borrow::ToOwned;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::SystemTime;
 
-use cookie::Cookie;
+use cookie::{Cookie, SameSite};
 use log::{Level, debug, log_enabled};
 use net_traits::CookieSource;
 use net_traits::pub_domains::is_pub_domain;
@@ -76,6 +76,13 @@ impl ServoCookie {
         request: &ServoUrl,
         source: CookieSource,
     ) -> Option<ServoCookie> {
+        // A cookie asserting "SameSite=None" must also carry the "Secure" attribute;
+        // otherwise it is rejected outright.
+        // <https://www.ietf.org/archive/id/draft-ietf-httpbis-rfc6265bis-15.html#section-5.7.7>
+        if cookie.same_site() == Some(SameSite::None) && !cookie.secure().unwrap_or(false) {
+            return None;
+        }
+
         let persistent;
         let expiry_time;
 

@@ -611,3 +611,53 @@ fn test_delete_cookie_with_name_does_not_affect_other_domains() {
         Some("foo=bar")
     );
 }
+
+#[test]
+fn test_same_site_none_without_secure_is_rejected() {
+    // SameSite=None requires Secure; over http it must be dropped entirely, while a
+    // Secure SameSite=None cookie over https is kept.
+    let http = ServoUrl::parse("http://example.com/").unwrap();
+    let cookie = cookie::Cookie::parse("foo=bar; SameSite=None".to_owned()).unwrap();
+    assert!(ServoCookie::new_wrapped(cookie, &http, CookieSource::HTTP).is_none());
+
+    let https = ServoUrl::parse("https://example.com/").unwrap();
+    let secure = cookie::Cookie::parse("foo=bar; SameSite=None; Secure".to_owned()).unwrap();
+    assert!(ServoCookie::new_wrapped(secure, &https, CookieSource::HTTP).is_some());
+}
+
+#[test]
+fn test_same_site_attribute_filtering() {
+    use net::cookie_storage::SameSiteContext;
+
+    let mut storage = CookieStorage::new(5);
+    let url = ServoUrl::parse("https://example.com/").unwrap();
+    let source = CookieSource::HTTP;
+    add_cookie_to_storage(&mut storage, &url, "strictc=1; SameSite=Strict");
+    add_cookie_to_storage(&mut storage, &url, "laxc=1; SameSite=Lax");
+    add_cookie_to_storage(&mut storage, &url, "nonec=1; SameSite=None; Secure");
+    add_cookie_to_storage(&mut storage, &url, "plainc=1");
+
+    // Same-site: every cookie is eligible.
+    let same = storage
+        .cookies_for_url_with_same_site(&url, source, SameSiteContext::SameSite)
+        .unwrap();
+    for name in ["strictc", "laxc", "nonec", "plainc"] {
+        assert!(same.contains(name), "same-site should include {name}: {same}");
+    }
+
+    // Cross-site top-level navigation with a safe method (Lax-allowed): Strict withheld,
+    // Lax + unspecified (Lax-by-default) + None allowed.
+    let lax = storage
+        .cookies_for_url_with_same_site(&url, source, SameSiteContext::CrossSiteLaxAllowed)
+        .unwrap();
+    assert!(!lax.contains("strictc"), "lax-allowed must drop Strict: {lax}");
+    for name in ["laxc", "nonec", "plainc"] {
+        assert!(lax.contains(name), "lax-allowed should include {name}: {lax}");
+    }
+
+    // Cross-site subresource: only SameSite=None cookies attach.
+    let cross = storage
+        .cookies_for_url_with_same_site(&url, source, SameSiteContext::CrossSite)
+        .unwrap();
+    assert_eq!(cross, "nonec=1", "cross-site must send only SameSite=None: {cross}");
+}

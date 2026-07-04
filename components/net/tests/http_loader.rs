@@ -745,6 +745,10 @@ fn test_load_sets_cookies_in_the_resource_manager_when_it_get_set_cookie_header_
         .method(Method::GET)
         .body(None)
         .destination(Destination::Document)
+        // A top-level document load is a navigation; `mock_origin()` is cross-site with the
+        // test server, so this exercises the cross-site-navigation cookie path (Lax-default
+        // cookies attach; Strict would not) rather than a cross-site subresource.
+        .mode(RequestMode::Navigate)
         .origin(mock_origin())
         .pipeline_id(Some(TEST_PIPELINE_ID))
         .credentials_mode(CredentialsMode::Include)
@@ -801,6 +805,10 @@ fn test_load_sets_requests_cookies_header_for_url_by_getting_cookies_from_the_re
         .method(Method::GET)
         .body(None)
         .destination(Destination::Document)
+        // A top-level document load is a navigation; `mock_origin()` is cross-site with the
+        // test server, so this exercises the cross-site-navigation cookie path (Lax-default
+        // cookies attach; Strict would not) rather than a cross-site subresource.
+        .mode(RequestMode::Navigate)
         .origin(mock_origin())
         .pipeline_id(Some(TEST_PIPELINE_ID))
         .credentials_mode(CredentialsMode::Include)
@@ -851,6 +859,10 @@ fn test_load_sends_cookie_if_nonhttp() {
         .method(Method::GET)
         .body(None)
         .destination(Destination::Document)
+        // A top-level document load is a navigation; `mock_origin()` is cross-site with the
+        // test server, so this exercises the cross-site-navigation cookie path (Lax-default
+        // cookies attach; Strict would not) rather than a cross-site subresource.
+        .mode(RequestMode::Navigate)
         .origin(mock_origin())
         .pipeline_id(Some(TEST_PIPELINE_ID))
         .credentials_mode(CredentialsMode::Include)
@@ -892,6 +904,10 @@ fn test_cookie_set_with_httponly_should_not_be_available_using_getcookiesforurl(
         .method(Method::GET)
         .body(None)
         .destination(Destination::Document)
+        // A top-level document load is a navigation; `mock_origin()` is cross-site with the
+        // test server, so this exercises the cross-site-navigation cookie path (Lax-default
+        // cookies attach; Strict would not) rather than a cross-site subresource.
+        .mode(RequestMode::Navigate)
         .origin(mock_origin())
         .pipeline_id(Some(TEST_PIPELINE_ID))
         .credentials_mode(CredentialsMode::Include)
@@ -945,6 +961,10 @@ fn test_when_cookie_received_marked_secure_is_ignored_for_http() {
         .method(Method::GET)
         .body(None)
         .destination(Destination::Document)
+        // A top-level document load is a navigation; `mock_origin()` is cross-site with the
+        // test server, so this exercises the cross-site-navigation cookie path (Lax-default
+        // cookies attach; Strict would not) rather than a cross-site subresource.
+        .mode(RequestMode::Navigate)
         .origin(mock_origin())
         .pipeline_id(Some(TEST_PIPELINE_ID))
         .credentials_mode(CredentialsMode::Include)
@@ -1388,6 +1408,8 @@ fn test_redirect_from_x_to_y_provides_y_cookies_from_y() {
     )
     .method(Method::GET)
     .destination(Destination::Document)
+    // Cross-site top-level navigation (see the SameSite note in the load tests).
+    .mode(RequestMode::Navigate)
     .origin(mock_origin())
     .pipeline_id(Some(TEST_PIPELINE_ID))
     .credentials_mode(CredentialsMode::Include)
@@ -1444,6 +1466,8 @@ fn test_redirect_from_x_to_x_provides_x_with_cookie_from_first_response() {
     )
     .method(Method::GET)
     .destination(Destination::Document)
+    // Cross-site top-level navigation (see the SameSite note in the load tests).
+    .mode(RequestMode::Navigate)
     .origin(mock_origin())
     .pipeline_id(Some(TEST_PIPELINE_ID))
     .credentials_mode(CredentialsMode::Include)

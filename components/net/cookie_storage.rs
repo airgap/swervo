@@ -11,7 +11,7 @@ use std::collections::hash_map::Entry;
 use std::net::IpAddr;
 use std::time::SystemTime;
 
-use cookie::Cookie;
+use cookie::{Cookie, SameSite};
 use itertools::Itertools;
 use log::info;
 use net_traits::pub_domains::reg_suffix;
@@ -20,6 +20,22 @@ use serde::{Deserialize, Serialize};
 use servo_url::ServoUrl;
 
 use crate::cookie::ServoCookie;
+
+/// The same-site relationship between a request and the context that issued it, used to
+/// decide which cookies may be attached to the request per their `SameSite` attribute.
+/// <https://www.ietf.org/archive/id/draft-ietf-httpbis-rfc6265bis-15.html#name-the-samesite-attribute-2>
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SameSiteContext {
+    /// A same-site request, or a context where SameSite filtering does not apply (a
+    /// document reading its own cookies via `document.cookie`): all cookies attach.
+    SameSite,
+    /// A cross-site *top-level navigation* with a safe method: `Strict` cookies are
+    /// withheld; `Lax`, unspecified (Lax-by-default), and `None` cookies attach.
+    CrossSiteLaxAllowed,
+    /// Any other cross-site request (subresources, cross-site POST navigations…):
+    /// only `SameSite=None` cookies attach.
+    CrossSite,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CookieStorage {
@@ -218,8 +234,28 @@ impl CookieStorage {
 
     // http://tools.ietf.org/html/rfc6265#section-5.4
     pub fn cookies_for_url(&mut self, url: &ServoUrl, source: CookieSource) -> Option<String> {
-        // Let cookie-list be the set of cookies from the cookie store
-        let cookie_list = self.cookies_data_for_url(url, source);
+        self.cookies_for_url_with_same_site(url, source, SameSiteContext::SameSite)
+    }
+
+    /// Like [`Self::cookies_for_url`], but filters the cookie list by each cookie's
+    /// `SameSite` attribute according to the request's [`SameSiteContext`].
+    pub fn cookies_for_url_with_same_site(
+        &mut self,
+        url: &ServoUrl,
+        source: CookieSource,
+        same_site_context: SameSiteContext,
+    ) -> Option<String> {
+        // Let cookie-list be the set of cookies from the cookie store, retaining only
+        // those whose SameSite attribute admits this request context.
+        let cookie_list = self
+            .cookies_data_for_url(url, source)
+            .filter(|cookie| match same_site_context {
+                SameSiteContext::SameSite => true,
+                SameSiteContext::CrossSiteLaxAllowed => {
+                    cookie.same_site() != Some(SameSite::Strict)
+                },
+                SameSiteContext::CrossSite => cookie.same_site() == Some(SameSite::None),
+            });
 
         let reducer = |acc: String, cookie: Cookie<'static>| -> String {
             // Serialize the cookie-list into a cookie-string by processing each cookie in the cookie-list in order:
