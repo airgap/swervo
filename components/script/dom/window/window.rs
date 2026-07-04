@@ -135,6 +135,7 @@ use crate::dom::bindings::utils::GlobalStaticData;
 use crate::dom::bindings::weakref::DOMTracker;
 #[cfg(feature = "bluetooth")]
 use crate::dom::bluetooth::BluetoothExtraPermissionData;
+use crate::dom::cachestorage::CacheStorage;
 use crate::dom::cookiestore::CookieStore;
 use crate::dom::crypto::Crypto;
 use crate::dom::csp::GlobalCspReporting;
@@ -1431,6 +1432,11 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
     /// <https://w3c.github.io/IndexedDB/#factory-interface>
     fn IndexedDB(&self, cx: &mut JSContext) -> DomRoot<IDBFactory> {
         self.upcast::<GlobalScope>().get_indexeddb(cx)
+    }
+
+    /// <https://w3c.github.io/ServiceWorker/#self-caches>
+    fn Caches(&self, cx: &mut JSContext) -> DomRoot<CacheStorage> {
+        self.upcast::<GlobalScope>().get_caches(cx)
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-window-customelements>

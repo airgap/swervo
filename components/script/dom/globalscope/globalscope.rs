@@ -123,6 +123,7 @@ use crate::dom::file::File;
 use crate::dom::globalscope::script_execution::{
     ErrorReporting, evaluate_script, fill_compile_options,
 };
+use crate::dom::cachestorage::CacheStorage;
 use crate::dom::idbfactory::IDBFactory;
 use crate::dom::media::mediasource::MediaSource;
 use crate::dom::messageport::MessagePort;
@@ -244,6 +245,9 @@ pub(crate) struct GlobalScope {
 
     /// <https://w3c.github.io/IndexedDB/#factory-interface>
     indexeddb: MutNullableDom<IDBFactory>,
+
+    /// The `caches` CacheStorage for this global (SameObject).
+    caches: MutNullableDom<CacheStorage>,
 
     /// <https://w3c.github.io/ServiceWorker/#environment-settings-object-service-worker-object-map>
     worker_map: DomRefCell<HashMapTracedValues<ServiceWorkerId, Dom<ServiceWorker>, FxBuildHasher>>,
@@ -805,6 +809,7 @@ impl GlobalScope {
             eventtarget: EventTarget::new_inherited(),
             registration_map: DomRefCell::new(HashMapTracedValues::new_fx()),
             indexeddb: Default::default(),
+            caches: Default::default(),
             worker_map: DomRefCell::new(HashMapTracedValues::new_fx()),
             media_source_map: DomRefCell::new(HashMapTracedValues::new_fx()),
             console_timers: DomRefCell::new(Default::default()),
@@ -3099,6 +3104,11 @@ impl GlobalScope {
 
     pub(crate) fn get_existing_indexeddb(&self) -> Option<DomRoot<IDBFactory>> {
         self.indexeddb.get()
+    }
+
+    /// Returns the `caches` CacheStorage for this global.
+    pub(crate) fn get_caches(&self, cx: &mut js::context::JSContext) -> DomRoot<CacheStorage> {
+        self.caches.or_init(|| CacheStorage::new(cx, self))
     }
 
     /// Perform a microtask checkpoint.

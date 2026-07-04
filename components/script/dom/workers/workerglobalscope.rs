@@ -69,6 +69,7 @@ use crate::dom::dedicatedworkerglobalscope::DedicatedWorkerGlobalScope;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::globalscope::script_execution::{ErrorReporting, RethrowErrors};
 use crate::dom::htmlscriptelement::{SCRIPT_JS_MIMES, Script};
+use crate::dom::cachestorage::CacheStorage;
 use crate::dom::idbfactory::IDBFactory;
 use crate::dom::performance::performance::Performance;
 use crate::dom::performance::performanceresourcetiming::InitiatorType;
@@ -704,6 +705,11 @@ impl WorkerGlobalScopeMethods<crate::DomTypeHolder> for WorkerGlobalScope {
     /// <https://w3c.github.io/IndexedDB/#factory-interface>
     fn IndexedDB(&self, cx: &mut JSContext) -> DomRoot<IDBFactory> {
         self.upcast::<GlobalScope>().get_indexeddb(cx)
+    }
+
+    /// <https://w3c.github.io/ServiceWorker/#self-caches>
+    fn Caches(&self, cx: &mut JSContext) -> DomRoot<CacheStorage> {
+        self.upcast::<GlobalScope>().get_caches(cx)
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-workerglobalscope-location>

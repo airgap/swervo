@@ -4598,7 +4598,11 @@ class CGMethodPromiseWrapper(CGAbstractExternMethod):
             let cx = &mut cx;
             return exception_to_promise(cx, (*args).rval());
             """,
-            methodName=self.method.identifier.name,
+            # Rust-keyword method names (e.g. `match`) are escaped with a trailing
+            # underscore in the generated specialized method; mirror that here.
+            methodName=(f"{self.method.identifier.name}_"
+                        if self.method.identifier.name in RUST_KEYWORDS
+                        else self.method.identifier.name),
             args=", ".join(arg.name for arg in self.args),
         ))
 
