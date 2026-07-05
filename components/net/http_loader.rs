@@ -39,6 +39,7 @@ use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use net_traits::blob_url_store::UrlWithBlobClaim;
 use net_traits::fetch::headers::get_value_from_header_list;
 use net_traits::http_status::HttpStatus;
+use net_traits::{CustomResponse, CustomResponseMediator, ResourceFetchTiming};
 use net_traits::policy_container::{EmbedderPolicyValue, RequestPolicyContainer};
 use net_traits::pub_domains::{is_same_site, reg_suffix};
 use net_traits::request::{
@@ -851,9 +852,57 @@ fn obtain_response_setup_router_callback(
     Ok(())
 }
 
+/// HTTP fetch Step 3 Substep 1: offer the request to the registered service worker manager for
+/// its origin ("invoke handle fetch"). Returns a response built from the worker's
+/// `FetchEvent#respondWith` payload, or `None` to continue to the network — including when no
+/// manager exists, the manager reports no controlling registration for the URL, the worker
+/// declined to respond, or it failed to answer within the deadline (a hung worker must never
+/// wedge fetch).
+async fn intercept_with_service_worker(
+    request: &Request,
+    context: &FetchContext,
+) -> Option<Response> {
+    // Never offer worker-script loads back to a service worker.
+    if request.destination == Destination::ServiceWorker {
+        return None;
+    }
+    let load_url = request.current_url();
+    let sender = context.sw_managers.lock().get(&load_url.origin()).cloned()?;
+    let (response_chan, response_port) = ipc::channel().ok()?;
+    sender
+        .send(CustomResponseMediator {
+            response_chan,
+            load_url: load_url.clone(),
+        })
+        .ok()?;
+
+    // Bridge the ipc reply into this async context.
+    let (reply_sender, reply_receiver) = tokio::sync::oneshot::channel();
+    let reply_sender = std::sync::Mutex::new(Some(reply_sender));
+    ROUTER.add_typed_route(
+        response_port,
+        Box::new(move |message: Result<Option<CustomResponse>, _>| {
+            if let Some(reply_sender) = reply_sender.lock().unwrap().take() {
+                let _ = reply_sender.send(message.ok().flatten());
+            }
+        }),
+    );
+    let custom = tokio::time::timeout(Duration::from_secs(5), reply_receiver)
+        .await
+        .ok()?
+        .ok()??;
+
+    let mut response = Response::new(load_url, ResourceFetchTiming::new(request.timing_type()));
+    response.headers = custom.headers;
+    response.status = HttpStatus::new(custom.raw_status.0, custom.raw_status.1.into_bytes());
+    *response.body.lock() = ResponseBody::Done(custom.body);
+    Some(response)
+}
+
 /// [HTTP fetch](https://fetch.spec.whatwg.org/#concept-http-fetch)
 #[async_recursion]
 #[allow(clippy::too_many_arguments)]
+
 pub(crate) async fn http_fetch(
     fetch_params: &mut FetchParams,
     cache: &mut CorsCache,
@@ -874,8 +923,8 @@ pub(crate) async fn http_fetch(
 
     // Step 3. If request’s service-workers mode is "all", then
     if request.service_workers_mode == ServiceWorkersMode::All {
-        // TODO: Substep 1
-        // Set response to the result of invoking handle fetch for request.
+        // Substep 1: set response to the result of invoking handle fetch for request.
+        response = intercept_with_service_worker(request, context).await;
 
         // Substep 2
         if let Some(ref res) = response {

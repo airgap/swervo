@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{io, mem, str};
@@ -31,8 +32,9 @@ use net_traits::request::{
 };
 use net_traits::response::{Response, ResponseBody, ResponseType, TerminationReason};
 use net_traits::{
-    FetchTaskTarget, NetworkError, ReferrerPolicy, ResourceAttribute, ResourceFetchTiming,
-    ResourceFetchTimingContainer, ResourceTimeValue, ResourceTimingType, WebSocketDomAction,
+    CustomResponseMediator, FetchTaskTarget, NetworkError, ReferrerPolicy, ResourceAttribute,
+    ResourceFetchTiming, ResourceFetchTimingContainer, ResourceTimeValue, ResourceTimingType,
+    WebSocketDomAction,
     WebSocketNetworkEvent, set_default_accept_language,
 };
 use parking_lot::Mutex;
@@ -41,7 +43,7 @@ use rustls_pki_types::CertificateDer;
 use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::CallbackSetter;
 use servo_base::id::PipelineId;
-use servo_url::{Host, ServoUrl};
+use servo_url::{Host, ImmutableOrigin, ServoUrl};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::mpsc::{UnboundedReceiver as TokioReceiver, UnboundedSender as TokioSender};
 
@@ -94,6 +96,11 @@ pub struct InFlightKeepAliveRecord {
 pub type SharedInflightKeepAliveRecords =
     Arc<Mutex<FxHashMap<PipelineId, Vec<InFlightKeepAliveRecord>>>>;
 
+/// Per-origin senders to registered ServiceWorker managers, shared with the fetch tasks so
+/// main_fetch can offer requests to a controlling service worker (Step 3 of main fetch).
+pub type SharedServiceWorkerManagers =
+    Arc<Mutex<HashMap<ImmutableOrigin, ipc_channel::ipc::IpcSender<CustomResponseMediator>>>>;
+
 #[derive(Clone)]
 pub struct FetchContext {
     pub state: Arc<HttpState>,
@@ -110,6 +117,8 @@ pub struct FetchContext {
     pub ignore_certificate_errors: bool,
     pub preloaded_resources: SharedPreloadedResources,
     pub in_flight_keep_alive_records: SharedInflightKeepAliveRecords,
+    /// Registered ServiceWorker managers by origin (empty when no SW has ever registered).
+    pub sw_managers: SharedServiceWorkerManagers,
 }
 
 #[derive(Default)]

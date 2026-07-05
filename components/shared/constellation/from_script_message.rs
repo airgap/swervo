@@ -32,8 +32,8 @@ use servo_base::Epoch;
 use servo_base::generic_channel::{GenericCallback, GenericReceiver, GenericSender, SendResult};
 use servo_base::id::{
     BroadcastChannelRouterId, BrowsingContextId, HistoryStateId, MessagePortId,
-    MessagePortRouterId, PipelineId, ScriptEventLoopId, ServiceWorkerId,
-    ServiceWorkerRegistrationId, WebViewId,
+    MessagePortRouterId, PipelineId, PipelineNamespaceRequest, ScriptEventLoopId,
+    ServiceWorkerId, ServiceWorkerRegistrationId, WebViewId,
 };
 use servo_canvas_traits::canvas::{CanvasId, CanvasMsg};
 use servo_canvas_traits::webgl::WebGLChan;
@@ -246,6 +246,9 @@ pub struct SWManagerSenders {
     pub paint_api: CrossProcessPaintApi,
     /// The [`SystemFontServiceProxy`] used to communicate with the `SystemFontService`.
     pub system_font_service_sender: SystemFontServiceProxySender,
+    /// Sender for requesting pipeline namespace ids from the constellation — needed when the
+    /// manager runs in its own process, where the namespace installer isn't otherwise primed.
+    pub namespace_request_sender: GenericSender<PipelineNamespaceRequest>,
     /// Sender of messages to the manager.
     pub own_sender: GenericSender<ServiceWorkerMsg>,
     /// Receiver of messages from the constellation.
@@ -436,8 +439,12 @@ pub enum DocumentState {
 /// This trait allows creating a `ServiceWorkerManager` without depending on the `script`
 /// crate.
 pub trait ServiceWorkerManagerFactory {
-    /// Create a `ServiceWorkerManager`.
-    fn create(sw_senders: SWManagerSenders, origin: ImmutableOrigin);
+    /// Create a `ServiceWorkerManager`, returning a handle to its thread (when spawning
+    /// succeeded) so a dedicated manager process can stay alive until the manager exits.
+    fn create(
+        sw_senders: SWManagerSenders,
+        origin: ImmutableOrigin,
+    ) -> Option<std::thread::JoinHandle<()>>;
 }
 
 /// Specifies the information required to load an auxiliary browsing context.
