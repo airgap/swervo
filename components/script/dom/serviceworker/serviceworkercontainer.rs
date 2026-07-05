@@ -372,6 +372,32 @@ impl ServiceWorkerContainerMethods<crate::DomTypeHolder> for ServiceWorkerContai
         SetOncontrollerchange
     );
 
+    /// <https://w3c.github.io/ServiceWorker/#dom-serviceworkercontainer-getregistrations>
+    ///
+    /// Reduced: registrations are per-session (no persistence yet), and this client's container
+    /// learns of its registration when its register job resolves — so the container-local
+    /// registration IS the origin's registration set for now.
+    fn GetRegistrations(&self, cx: &mut JSContext) -> Rc<Promise> {
+        let global = self.global();
+        let promise = Promise::new(cx, &global);
+        let registrations: Vec<DomRoot<ServiceWorkerRegistration>> =
+            self.ready_registration.get().into_iter().collect();
+        promise.resolve_native(cx, &registrations);
+        promise
+    }
+
+    /// <https://w3c.github.io/ServiceWorker/#dom-serviceworkercontainer-startmessages>
+    fn StartMessages(&self) {
+        // Messages from service workers are delivered as soon as they arrive in this engine
+        // rather than being queued until the client opts in, so there is nothing to kick off.
+    }
+
+    // <https://w3c.github.io/ServiceWorker/#dom-serviceworkercontainer-onmessage>
+    event_handler!(message, GetOnmessage, SetOnmessage);
+
+    // <https://w3c.github.io/ServiceWorker/#dom-serviceworkercontainer-onmessageerror>
+    event_handler!(messageerror, GetOnmessageerror, SetOnmessageerror);
+
     /// <https://w3c.github.io/ServiceWorker/#dom-serviceworkercontainer-register> - A
     /// and <https://w3c.github.io/ServiceWorker/#start-register> - B
     fn Register(
