@@ -5,6 +5,7 @@
 use ipc_channel::IpcError;
 use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::GenericSender;
+use servo_base::id::PipelineNamespace;
 use servo_config::opts::{self, Opts};
 use servo_config::prefs;
 use servo_config::prefs::Preferences;
@@ -45,7 +46,21 @@ impl ServiceWorkerUnprivilegedContent {
     where
         SWF: ServiceWorkerManagerFactory,
     {
-        SWF::create(self.senders, self.origin);
+        let multiprocess = opts::get().multiprocess;
+        if multiprocess {
+            // This is the dedicated service-worker process's main: prime the pipeline-namespace
+            // installer so id allocation requests reach the constellation (without this the
+            // manager thread panics on its first id), then keep the process alive until the
+            // manager exits. In single-process mode the installer is already primed and the
+            // manager thread just shares the process.
+            PipelineNamespace::set_installer_sender(
+                self.senders.namespace_request_sender.clone(),
+            );
+        }
+        let join_handle = SWF::create(self.senders, self.origin);
+        if multiprocess && let Some(join_handle) = join_handle {
+            let _ = join_handle.join();
+        }
     }
 
     /// Start the agent-cluster in it's own process.

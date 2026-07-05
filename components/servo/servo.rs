@@ -1387,7 +1387,15 @@ pub fn run_content_process(token: String) {
                 .expect("Failed to join on the fetch thread in the constellation");
         },
         UnprivilegedContent::ServiceWorker(content) => {
+            // The dedicated service-worker process needs its own fetch thread (the worker's
+            // script load and its fetch()/Cache API calls all go through it), just like the
+            // script content process above.
+            let fetch_thread_join_handle = start_fetch_thread();
             content.start::<ServiceWorkerManager>();
+            exit_fetch_thread();
+            fetch_thread_join_handle
+                .join()
+                .expect("Failed to join on the fetch thread in the service worker process");
         },
     }
 }

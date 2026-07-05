@@ -646,7 +646,14 @@ impl ServiceWorkerManager {
 
         // Step 17: Run the Update Registration State algorithm passing registration,
         // "waiting" and registration’s installing worker as the arguments.
-        registration.update_registration_state(RegistrationUpdateTarget::Waiting, Some(new_worker));
+        registration
+            .update_registration_state(RegistrationUpdateTarget::Waiting, Some(new_worker.clone()));
+
+        // Reduced Activate algorithm (https://w3c.github.io/ServiceWorker/#activation-algorithm):
+        // nothing in this engine holds controlled clients back, so the waiting worker becomes
+        // active immediately. Without this, `active_worker` stays None forever and fetch
+        // interception (handle_message_from_resource) can never route a request to the worker.
+        registration.update_registration_state(RegistrationUpdateTarget::Active, Some(new_worker));
 
         // Step 18: Run the Update Registration State algorithm passing registration, "installing" and null as the arguments.
         // TODO: registration.update_registration_state(RegistrationUpdateTarget::Installing, None);
@@ -780,11 +787,15 @@ fn update_serviceworker(
 }
 
 impl ServiceWorkerManagerFactory for ServiceWorkerManager {
-    fn create(sw_senders: SWManagerSenders, origin: ImmutableOrigin) {
+    fn create(
+        sw_senders: SWManagerSenders,
+        origin: ImmutableOrigin,
+    ) -> Option<std::thread::JoinHandle<()>> {
         let (resource_chan, resource_port) = ipc::channel().unwrap();
 
         let SWManagerSenders {
             resource_threads,
+            namespace_request_sender: _,
             own_sender,
             receiver,
             system_font_service_sender,
@@ -807,12 +818,15 @@ impl ServiceWorkerManagerFactory for ServiceWorkerManager {
             ServiceWorkerManager::new(own_sender, from_constellation, resource_port, font_context)
                 .handle_message()
         };
-        if thread::Builder::new()
+        match thread::Builder::new()
             .name("SvcWorkerManager".to_owned())
             .spawn(swmanager_thread)
-            .is_err()
         {
-            warn!("ServiceWorkerManager thread spawning failed");
+            Ok(join_handle) => Some(join_handle),
+            Err(_) => {
+                warn!("ServiceWorkerManager thread spawning failed");
+                None
+            },
         }
     }
 }

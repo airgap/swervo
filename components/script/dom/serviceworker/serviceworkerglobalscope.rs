@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Sender, after};
 use devtools_traits::DevtoolScriptControlMsg;
 use dom_struct::dom_struct;
+use stylo_atoms::Atom;
 use fonts::FontContext;
 use js::context::{JSContext, RawJSContext};
 use js::jsapi::JS_AddInterruptCallback;
@@ -476,6 +477,7 @@ impl ServiceWorkerGlobalScope {
                         true,
                     );
                     _ = global_scope.run_a_classic_script(&mut realm, script, RethrowErrors::No);
+                    global.dispatch_install(&mut realm);
                     global.dispatch_activate(&mut realm);
                 }
 
@@ -562,11 +564,7 @@ impl ServiceWorkerGlobalScope {
                 self.upcast::<WorkerGlobalScope>().process_event(msg, cx);
             },
             Response(mediator) => {
-                // TODO XXXcreativcoder This will eventually use a FetchEvent interface to fire event
-                // when we have the Request and Response dom api's implemented
-                // https://w3c.github.io/ServiceWorker/#fetchevent-interface
-                self.upcast::<EventTarget>().fire_event(cx, atom!("fetch"));
-                let _ = mediator.response_chan.send(None);
+                self.dispatch_fetch_event(cx, mediator);
             },
             WakeUp => {},
         }
@@ -574,6 +572,67 @@ impl ServiceWorkerGlobalScope {
 
     pub(crate) fn event_loop_sender(&self) -> ScriptEventLoopSender {
         ScriptEventLoopSender::ServiceWorker(self.own_sender.clone())
+    }
+
+    /// Handle an intercepted network fetch (<https://w3c.github.io/ServiceWorker/#handle-fetch>,
+    /// reduced): build a `Request` for the load, fire a `FetchEvent`, and ship the
+    /// `respondWith` response back through the mediator — or reply `None` so the network
+    /// proceeds (no respondWith, rejected promise, or a non-Response value).
+    fn dispatch_fetch_event(&self, cx: &mut JSContext, mediator: CustomResponseMediator) {
+        use crate::dom::bindings::codegen::Bindings::RequestBinding::RequestInit;
+        use crate::dom::bindings::codegen::UnionTypes::RequestOrUSVString;
+        use crate::dom::bindings::str::USVString;
+        use crate::realms::enter_auto_realm;
+        use crate::dom::promisenativehandler::PromiseNativeHandler;
+        use crate::dom::request::Request;
+        use crate::dom::serviceworker::fetchevent::{
+            FetchEvent, RespondWithFulfill, RespondWithReject,
+        };
+
+        let request = match Request::constructor(
+            cx,
+            self.upcast::<GlobalScope>(),
+            None,
+            RequestOrUSVString::USVString(USVString(mediator.load_url.to_string())),
+            &RequestInit::empty(),
+        ) {
+            Ok(request) => request,
+            Err(_) => {
+                let _ = mediator.response_chan.send(None);
+                return;
+            },
+        };
+
+        let event = FetchEvent::new(cx, self, atom!("fetch"), &request);
+        event.upcast::<Event>().dispatch(cx, self.upcast(), false);
+
+        match event.take_respond_with() {
+            Some(promise) => {
+                let fulfill = RespondWithFulfill::new(mediator.response_chan.clone());
+                let reject = RespondWithReject::new(mediator.response_chan);
+                let global = self.upcast::<GlobalScope>();
+                let mut realm = enter_auto_realm(cx, global);
+                let realm_cx = &mut realm.current_realm();
+                let handler = PromiseNativeHandler::new(
+                    realm_cx,
+                    global,
+                    Some(Box::new(fulfill)),
+                    Some(Box::new(reject)),
+                );
+                promise.append_native_handler(realm_cx, &handler);
+            },
+            None => {
+                let _ = mediator.response_chan.send(None);
+            },
+        }
+    }
+
+    /// Fire the `install` ExtendableEvent (reduced Install algorithm step 11) — this is where
+    /// service workers precache their app shell (`e.waitUntil(caches.addAll(...))`).
+    fn dispatch_install(&self, cx: &mut CurrentRealm) {
+        let event = ExtendableEvent::new(cx, self, Atom::from("install"), false, false);
+        let event = (*event).upcast::<Event>();
+        event.dispatch(cx, self.upcast(), false);
     }
 
     fn dispatch_activate(&self, cx: &mut CurrentRealm) {

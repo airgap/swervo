@@ -622,6 +622,7 @@ impl ResourceChannelManager {
             CoreResourceMsg::NetworkMediator(mediator_chan, origin) => {
                 self.resource_manager
                     .sw_managers
+                    .lock()
                     .insert(origin, mediator_chan);
             },
             CoreResourceMsg::ListCookies(sender) => {
@@ -718,7 +719,7 @@ pub struct AuthCache {
 
 pub struct CoreResourceManager {
     devtools_sender: Option<Sender<DevtoolsControlMsg>>,
-    sw_managers: HashMap<ImmutableOrigin, IpcSender<CustomResponseMediator>>,
+    sw_managers: crate::fetch::methods::SharedServiceWorkerManagers,
     filemanager: FileManager,
     request_interceptor: RequestInterceptor,
     ca_certificates: CACertificates<'static>,
@@ -786,6 +787,7 @@ impl CoreResourceManager {
         let http_state = http_state.clone();
         let devtools_chan = self.devtools_sender.clone();
         let filemanager = self.filemanager.clone();
+        let sw_managers = self.sw_managers.clone();
         let request_interceptor = self.request_interceptor.clone();
 
         let timing_type = match request_builder.destination {
@@ -848,6 +850,7 @@ impl CoreResourceManager {
                 ignore_certificate_errors,
                 preloaded_resources,
                 in_flight_keep_alive_records,
+                sw_managers,
             };
 
             match res_init_ {
@@ -901,6 +904,7 @@ impl CoreResourceManager {
         let http_state = http_state.clone();
         let devtools_chan = self.devtools_sender.clone();
         let filemanager = self.filemanager.clone();
+        let sw_managers = self.sw_managers.clone();
         let request_interceptor = self.request_interceptor.clone();
 
         let ca_certificates = self.ca_certificates.clone();
@@ -943,6 +947,7 @@ impl CoreResourceManager {
                         ignore_certificate_errors,
                         preloaded_resources,
                         in_flight_keep_alive_records,
+                        sw_managers,
                     };
                     fetch(request, &mut event_sender, &context).await;
                 },

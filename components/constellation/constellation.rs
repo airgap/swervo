@@ -2579,6 +2579,7 @@ where
 
                 let sw_senders = SWManagerSenders {
                     resource_threads: self.public_resource_threads.clone(),
+                    namespace_request_sender: self.namespace_ipc_sender.clone(),
                     own_sender: own_sender.clone(),
                     receiver,
                     paint_api: self.paint_proxy.cross_process_paint_api.clone(),
