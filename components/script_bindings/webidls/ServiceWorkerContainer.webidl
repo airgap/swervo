@@ -6,7 +6,7 @@
 [Pref="dom_serviceworker_enabled", Exposed=(Window,Worker)]
 interface ServiceWorkerContainer : EventTarget {
   readonly attribute ServiceWorker? controller;
-  //readonly attribute Promise<ServiceWorkerRegistration> ready;
+  readonly attribute Promise<ServiceWorkerRegistration> ready;
 
   [NewObject] Promise<ServiceWorkerRegistration> register(USVString scriptURL,
                                                           optional RegistrationOptions options = {});
@@ -17,7 +17,7 @@ interface ServiceWorkerContainer : EventTarget {
   //void startMessages();
 
   // events
-  //attribute EventHandler oncontrollerchange;
+  attribute EventHandler oncontrollerchange;
   //attribute EventHandler onerror;
   //attribute EventHandler onmessage; // event.source of message events is ServiceWorker object
   //attribute EventHandler onmessageerror;
