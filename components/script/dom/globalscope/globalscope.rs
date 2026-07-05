@@ -890,8 +890,8 @@ impl GlobalScope {
         scope: &ServoUrl,
         registration_id: ServiceWorkerRegistrationId,
         installing_worker: Option<ServiceWorkerId>,
-        _waiting_worker: Option<ServiceWorkerId>,
-        _active_worker: Option<ServiceWorkerId>,
+        waiting_worker: Option<ServiceWorkerId>,
+        active_worker: Option<ServiceWorkerId>,
         can_gc: CanGc,
     ) -> DomRoot<ServiceWorkerRegistration> {
         // Step 1
@@ -912,9 +912,17 @@ impl GlobalScope {
             new_registration.set_installing(&worker);
         }
 
-        // TODO: 2.7 (waiting worker)
+        // Step 2.7
+        if let Some(worker_id) = waiting_worker {
+            let worker = self.get_serviceworker(script_url, scope, worker_id, can_gc);
+            new_registration.set_waiting(&worker);
+        }
 
-        // TODO: 2.8 (active worker)
+        // Step 2.8
+        if let Some(worker_id) = active_worker {
+            let worker = self.get_serviceworker(script_url, scope, worker_id, can_gc);
+            new_registration.set_active(&worker);
+        }
 
         // Step 2.9
         registrations.insert(registration_id, Dom::from_ref(&*new_registration));

@@ -617,6 +617,16 @@ impl ServiceWorkerManager {
             Some(new_worker.clone()),
         );
 
+        // Steps 17 + reduced Activate, hoisted above the job-promise resolution so the
+        // registration info snapshot the client receives already carries the active worker
+        // (this engine activates immediately; see the reduced Activate rationale below).
+        registration
+            .update_registration_state(RegistrationUpdateTarget::Waiting, Some(new_worker.clone()));
+        registration.update_registration_state(
+            RegistrationUpdateTarget::Active,
+            Some(new_worker.clone()),
+        );
+
         // Step 7: Invoke Resolve Job Promise with job and registration
         let client = job.client.clone();
         if client
@@ -644,16 +654,10 @@ impl ServiceWorkerManager {
             warn!("Failed to send resolve job promise result to script.");
         }
 
-        // Step 17: Run the Update Registration State algorithm passing registration,
-        // "waiting" and registration’s installing worker as the arguments.
-        registration
-            .update_registration_state(RegistrationUpdateTarget::Waiting, Some(new_worker.clone()));
-
         // Reduced Activate algorithm (https://w3c.github.io/ServiceWorker/#activation-algorithm):
-        // nothing in this engine holds controlled clients back, so the waiting worker becomes
-        // active immediately. Without this, `active_worker` stays None forever and fetch
-        // interception (handle_message_from_resource) can never route a request to the worker.
-        registration.update_registration_state(RegistrationUpdateTarget::Active, Some(new_worker));
+        // nothing in this engine holds controlled clients back, so the waiting worker became
+        // active immediately (hoisted above). Without that, `active_worker` stays None forever
+        // and fetch interception (handle_message_from_resource) can never route a request.
 
         // Step 18: Run the Update Registration State algorithm passing registration, "installing" and null as the arguments.
         // TODO: registration.update_registration_state(RegistrationUpdateTarget::Installing, None);

@@ -25,10 +25,13 @@ use crate::dom::bindings::codegen::Bindings::ServiceWorkerContainerBinding::{
 };
 use crate::dom::bindings::error::Error;
 use crate::dom::bindings::refcounted::Trusted;
+use crate::dom::bindings::codegen::Bindings::ServiceWorkerRegistrationBinding::ServiceWorkerRegistrationMethods;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::bindings::str::USVString;
 use crate::dom::bindings::structuredclone;
+use stylo_atoms::Atom;
+
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::promise::Promise;
@@ -41,6 +44,14 @@ use crate::script_runtime::CanGc;
 pub(crate) struct ServiceWorkerContainer {
     eventtarget: EventTarget,
     controller: MutNullableDom<ServiceWorker>,
+
+    /// The cached `ready` promise (one per container; resolved once a registration for this
+    /// client has an active worker).
+    #[conditional_malloc_size_of]
+    ready_promise: DomRefCell<Option<Rc<Promise>>>,
+    /// The registration `ready` resolves with, once known (this engine activates immediately
+    /// on install, so this is set when a register job resolves with an active worker).
+    ready_registration: MutNullableDom<ServiceWorkerRegistration>,
 
     /// Pending results for
     /// <https://w3c.github.io/ServiceWorker/#algorithms>
@@ -57,6 +68,8 @@ impl ServiceWorkerContainer {
         ServiceWorkerContainer {
             eventtarget: EventTarget::new_inherited(),
             controller: Default::default(),
+            ready_promise: Default::default(),
+            ready_registration: Default::default(),
             pending_algorithm_results: Default::default(),
             callback: Default::default(),
         }
@@ -125,6 +138,23 @@ impl ServiceWorkerContainer {
 
                         // Step 2.4: Resolve equivalentJob’s job promise with convertedValue.
                         promise.resolve_native(cx, &*registration);
+
+                        // This engine activates the worker during install (reduced lifecycle) and
+                        // intercepts by scope regardless of per-client control, so the client is
+                        // effectively claimed: expose the controller, settle `ready`, and announce
+                        // the transition.
+                        if let Some(active) = registration.GetActive() {
+                            self.ready_registration.set(Some(&registration));
+                            if let Some(ready) = self.ready_promise.borrow().as_ref() {
+                                ready.resolve_native(cx, &*registration);
+                            }
+                            let newly_controlled = self.controller.get().is_none();
+                            self.controller.set(Some(&active));
+                            if newly_controlled {
+                                self.upcast::<EventTarget>()
+                                    .fire_event(cx, Atom::from("controllerchange"));
+                            }
+                        }
                     },
                 }
             },
@@ -318,8 +348,29 @@ impl ServiceWorkerContainer {
 impl ServiceWorkerContainerMethods<crate::DomTypeHolder> for ServiceWorkerContainer {
     /// <https://w3c.github.io/ServiceWorker/#service-worker-container-controller-attribute>
     fn GetController(&self) -> Option<DomRoot<ServiceWorker>> {
-        None
+        self.controller.get()
     }
+
+    /// <https://w3c.github.io/ServiceWorker/#navigator-service-worker-ready>
+    fn Ready(&self, cx: &mut JSContext) -> Rc<Promise> {
+        if let Some(promise) = self.ready_promise.borrow().as_ref() {
+            return promise.clone();
+        }
+        let global = self.global();
+        let promise = Promise::new(cx, &global);
+        if let Some(registration) = self.ready_registration.get() {
+            promise.resolve_native(cx, &*registration);
+        }
+        *self.ready_promise.borrow_mut() = Some(promise.clone());
+        promise
+    }
+
+    // <https://w3c.github.io/ServiceWorker/#dom-serviceworkercontainer-oncontrollerchange>
+    event_handler!(
+        controllerchange,
+        GetOncontrollerchange,
+        SetOncontrollerchange
+    );
 
     /// <https://w3c.github.io/ServiceWorker/#dom-serviceworkercontainer-register> - A
     /// and <https://w3c.github.io/ServiceWorker/#start-register> - B
