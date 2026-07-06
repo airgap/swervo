@@ -978,13 +978,21 @@ where
         load_data: &LoadData,
         is_private: bool,
     ) -> Result<Rc<EventLoop>, IpcError> {
-        let registered_domain_name = if load_data
+        // Site isolation (LYK-1379): key content event loops by the full host, not the
+        // registered domain (eTLD+1). The old key grouped `a.example.com` and `b.example.com`
+        // (and every subdomain) into ONE content process, so a cross-subdomain compromise wasn't
+        // contained. Keying by host puts each distinct host in its own process. A sandboxed
+        // (opaque-origin) document stays unshared (`None` → a fresh event loop), as before.
+        let isolation_host = if load_data
             .creation_sandboxing_flag_set
             .contains(SandboxingFlagSet::SANDBOXED_ORIGIN_BROWSING_CONTEXT_FLAG)
         {
             None
         } else {
-            registered_domain_name(&load_data.url)
+            match load_data.url.origin() {
+                ImmutableOrigin::Tuple(_, host, _) => Some(host),
+                ImmutableOrigin::Opaque(_) => None,
+            }
         };
 
         if let Some(event_loop) = self.get_event_loop_for_new_pipeline(
@@ -992,14 +1000,14 @@ where
             webview_id,
             opener,
             parent_pipeline_id,
-            &registered_domain_name,
+            &isolation_host,
         ) {
             return Ok(event_loop);
         }
 
         let event_loop = EventLoop::spawn(self, is_private)?;
-        if let Some(registered_domain_name) = registered_domain_name {
-            self.set_event_loop(&event_loop, registered_domain_name, webview_id, opener);
+        if let Some(isolation_host) = isolation_host {
+            self.set_event_loop(&event_loop, isolation_host, webview_id, opener);
         }
         Ok(event_loop)
     }
