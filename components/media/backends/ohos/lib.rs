@@ -185,7 +185,7 @@ impl Backend for OhosBackend {
     fn create_webrtc(
         &self,
         _signaller: Box<dyn servo_media_webrtc::WebRtcSignaller>,
-    ) -> servo_media_webrtc::WebRtcController {
+    ) -> Result<servo_media_webrtc::WebRtcController, servo_media_webrtc::WebRtcError> {
         todo!()
     }
 

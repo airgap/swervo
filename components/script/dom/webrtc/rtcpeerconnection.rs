@@ -183,7 +183,7 @@ impl RTCPeerConnection {
         window: &Window,
         proto: Option<HandleObject>,
         config: &RTCConfiguration,
-    ) -> DomRoot<RTCPeerConnection> {
+    ) -> Fallible<DomRoot<RTCPeerConnection>> {
         let this = reflect_dom_object_with_proto_and_cx(
             Box::new(RTCPeerConnection::new_inherited()),
             window,
@@ -191,7 +191,13 @@ impl RTCPeerConnection {
             cx,
         );
         let signaller = this.make_signaller();
-        *this.controller.borrow_mut() = Some(ServoMedia::get().create_webrtc(signaller));
+        // The media backend can fail to construct a peer connection (e.g. the GStreamer
+        // `webrtcbin` plugin is absent). Surface that as a `NotSupportedError` instead of
+        // panicking the media/main thread (LYK-1363).
+        match ServoMedia::get().create_webrtc(signaller) {
+            Ok(controller) => *this.controller.borrow_mut() = Some(controller),
+            Err(_) => return Err(Error::NotSupported(None)),
+        }
         if let Some(ref servers) = config.iceServers &&
             let Some(server) = servers.first()
         {
@@ -212,7 +218,7 @@ impl RTCPeerConnection {
                     .configure(String::from(server), policy);
             }
         }
-        this
+        Ok(this)
     }
 
     pub(crate) fn get_webrtc_controller(&self) -> &DomRefCell<Option<WebRtcController>> {
@@ -511,7 +517,7 @@ impl RTCPeerConnectionMethods<crate::DomTypeHolder> for RTCPeerConnection {
         proto: Option<HandleObject>,
         config: &RTCConfiguration,
     ) -> Fallible<DomRoot<RTCPeerConnection>> {
-        Ok(RTCPeerConnection::new(cx, window, proto, config))
+        RTCPeerConnection::new(cx, window, proto, config)
     }
 
     // https://w3c.github.io/webrtc-pc/#dom-rtcpeerconnection-icecandidate

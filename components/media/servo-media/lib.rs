@@ -24,7 +24,7 @@ use streams::device_monitor::MediaDeviceMonitor;
 use streams::registry::MediaStreamId;
 use streams::{MediaOutput, MediaSocket, MediaStreamType};
 pub use traits::*;
-use webrtc::{WebRtcController, WebRtcSignaller};
+use webrtc::{WebRtcController, WebRtcError, WebRtcSignaller};
 
 pub struct ServoMedia(Box<dyn Backend>);
 
@@ -62,7 +62,10 @@ pub trait Backend: Send + Sync {
         id: &ClientContextId,
         options: AudioContextOptions,
     ) -> Result<Arc<Mutex<AudioContext>>, AudioSinkError>;
-    fn create_webrtc(&self, signaller: Box<dyn WebRtcSignaller>) -> WebRtcController;
+    fn create_webrtc(
+        &self,
+        signaller: Box<dyn WebRtcSignaller>,
+    ) -> Result<WebRtcController, WebRtcError>;
     fn can_play_type(&self, media_type: &str) -> SupportsMediaType;
     fn set_capture_mocking(&self, _mock: bool) {}
     /// Allow muting/unmuting the media instances associated with the given client context identifier.

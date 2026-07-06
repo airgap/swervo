@@ -46,7 +46,7 @@ use servo_media_streams::device_monitor::MediaDeviceMonitor;
 use servo_media_streams::registry::MediaStreamId;
 use servo_media_streams::{MediaOutput, MediaSocket, MediaStreamType};
 use servo_media_traits::{BackendMsg, ClientContextId, MediaInstance};
-use servo_media_webrtc::{WebRtcBackend, WebRtcController, WebRtcSignaller};
+use servo_media_webrtc::{WebRtcBackend, WebRtcController, WebRtcError, WebRtcSignaller};
 
 static BACKEND_BASE_TIME: LazyLock<gstreamer::ClockTime> =
     LazyLock::new(|| gstreamer::SystemClock::obtain().time());
@@ -220,7 +220,10 @@ impl Backend for GStreamerBackend {
         Ok(audio_context)
     }
 
-    fn create_webrtc(&self, signaller: Box<dyn WebRtcSignaller>) -> WebRtcController {
+    fn create_webrtc(
+        &self,
+        signaller: Box<dyn WebRtcSignaller>,
+    ) -> Result<WebRtcController, WebRtcError> {
         WebRtcController::new::<Self>(signaller)
     }
 
@@ -334,8 +337,8 @@ impl WebRtcBackend for GStreamerBackend {
     fn construct_webrtc_controller(
         signaller: Box<dyn WebRtcSignaller>,
         thread: WebRtcController,
-    ) -> Self::Controller {
-        webrtc::construct(signaller, thread).expect("WebRTC creation failed")
+    ) -> Result<Self::Controller, WebRtcError> {
+        webrtc::construct(signaller, thread)
     }
 }
 
