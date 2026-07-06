@@ -11,7 +11,7 @@ use servo_media_streams::MediaStreamType;
 use crate::datachannel::{DataChannelEvent, DataChannelId, DataChannelInit, DataChannelMessage};
 use crate::{
     BundlePolicy, DescriptionType, IceCandidate, MediaStreamId, SdpType, SessionDescription,
-    WebRtcBackend, WebRtcControllerBackend, WebRtcSignaller,
+    WebRtcBackend, WebRtcControllerBackend, WebRtcError, WebRtcSignaller,
 };
 
 #[derive(Clone)]
@@ -21,12 +21,17 @@ pub struct WebRtcController {
 }
 
 impl WebRtcController {
-    pub fn new<T: WebRtcBackend>(signaller: Box<dyn WebRtcSignaller>) -> Self {
+    pub fn new<T: WebRtcBackend>(
+        signaller: Box<dyn WebRtcSignaller>,
+    ) -> Result<Self, WebRtcError> {
         let (sender, receiver) = channel();
 
         let t = WebRtcController { sender };
 
-        let mut controller = T::construct_webrtc_controller(signaller, t.clone());
+        // Constructing the backend controller can fail (e.g. the GStreamer `webrtcbin` plugin is
+        // not installed). Propagate that as an error instead of `unwrap()`-panicking the media
+        // thread — the DOM turns it into a `NotSupportedError` on `new RTCPeerConnection()` (LYK-1363).
+        let mut controller = T::construct_webrtc_controller(signaller, t.clone())?;
 
         thread::spawn(move || {
             while let Ok(event) = receiver.recv() {
@@ -37,7 +42,7 @@ impl WebRtcController {
             }
         });
 
-        t
+        Ok(t)
     }
     pub fn configure(&self, stun_server: String, policy: BundlePolicy) {
         let _ = self

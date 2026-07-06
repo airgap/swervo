@@ -90,7 +90,7 @@ pub trait WebRtcBackend {
     fn construct_webrtc_controller(
         signaller: Box<dyn WebRtcSignaller>,
         thread: WebRtcController,
-    ) -> Self::Controller;
+    ) -> Result<Self::Controller, WebRtcError>;
 }
 
 /// <https://www.w3.org/TR/webrtc/#rtcsdptype>
