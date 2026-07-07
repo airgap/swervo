@@ -30,9 +30,9 @@ pub use wgpu_core::id::markers::{
 };
 use wgpu_core::id::{
     AdapterId, BindGroupId, BindGroupLayoutId, BufferId, CommandBufferId, CommandEncoderId,
-    ComputePassEncoderId, ComputePipelineId, DeviceId, PipelineLayoutId, QuerySetId, QueueId,
-    RenderBundleId, RenderPassEncoderId, RenderPipelineId, SamplerId, ShaderModuleId, TextureId,
-    TextureViewId,
+    ComputePassEncoderId, ComputePipelineId, DeviceId, ExternalTextureId, PipelineLayoutId,
+    QuerySetId, QueueId, RenderBundleId, RenderPassEncoderId, RenderPipelineId, SamplerId,
+    ShaderModuleId, TextureId, TextureViewId,
 };
 pub use wgpu_core::id::{
     ComputePassEncoderId as ComputePassId, RenderPassEncoderId as RenderPassId,
@@ -179,6 +179,19 @@ pub enum WebGPURequest {
         sampler_id: SamplerId,
         descriptor: SamplerDescriptor<'static>,
     },
+    /// Import a video frame as an external texture (LYK-1380): create a single RGBA plane texture
+    /// from `data`, upload it, view it, and wrap it as an external texture. All ids are
+    /// caller-allocated. `data` is tightly-packed RGBA8 (`width * height * 4` bytes).
+    CreateExternalTexture {
+        device_id: DeviceId,
+        queue_id: QueueId,
+        external_texture_id: ExternalTextureId,
+        plane_texture_id: TextureId,
+        plane_view_id: TextureViewId,
+        width: u32,
+        height: u32,
+        data: GenericSharedMemory,
+    },
     CreateShaderModule {
         device_id: DeviceId,
         program_id: ShaderModuleId,
@@ -241,6 +254,7 @@ pub enum WebGPURequest {
     DropCommandBuffer(CommandBufferId),
     DropTextureView(TextureViewId),
     DropSampler(SamplerId),
+    DropExternalTexture(ExternalTextureId),
     DropShaderModule(ShaderModuleId),
     DropRenderBundle(RenderBundleId),
     DropQuerySet(QuerySetId),
