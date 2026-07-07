@@ -290,7 +290,11 @@ impl CanvasContext for GPUCanvasContext {
     }
 
     fn reset_bitmap(&self) {
-        warn!("The GPUCanvasContext 'reset_bitmap' is not implemented yet");
+        // Resetting the canvas bitmap is exactly the spec's "replace the drawing buffer" operation:
+        // expire the current texture and set the drawing buffer to a transparent-black image of the
+        // canvas size. Previously a no-op, so a WebGPU canvas kept stale contents across a
+        // width/height reset.
+        self.replace_drawing_buffer();
     }
 
     /// <https://gpuweb.github.io/gpuweb/#ref-for-abstract-opdef-get-a-copy-of-the-image-contents-of-a-context%E2%91%A5>
