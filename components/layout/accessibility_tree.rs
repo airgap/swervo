@@ -17,7 +17,7 @@ use servo_base::print_tree::PrintTree;
 use servo_config::opts::{self, DiagnosticsLogging, DiagnosticsLoggingOption};
 use servo_config::pref;
 use style::dom::OpaqueNode;
-use web_atoms::{LocalName, local_name};
+use web_atoms::{LocalName, local_name, ns};
 
 use crate::ArcRefCell;
 
@@ -63,6 +63,9 @@ struct AccessibilityNode {
     /// Whether this node has been updated in the current tree update. This is reset to `false`
     /// when the node is added to the [`AccessibilityUpdate`] - see [`AccessibilityUpdate::add()`].
     updated: bool,
+    /// Whether an explicit accessible name (`aria-label`/`alt`/`title`) was set from attributes.
+    /// When true, name-from-contents must not override it.
+    explicit_name: bool,
 }
 
 /// A retained, internal representation of the accessibility tree for a document.
@@ -353,16 +356,172 @@ impl AccessibilityTree {
 }
 
 fn role_from_dom_node(dom_node: &ServoLayoutNode<'_>) -> Role {
-    if let Some(dom_element) = dom_node.as_element() {
-        let local_name = dom_element.local_name().to_ascii_lowercase();
-        *HTML_ELEMENT_ROLE_MAPPINGS
-            .get(&local_name)
-            .unwrap_or(&Role::GenericContainer)
-    } else if dom_node.type_id() == Some(LayoutNodeType::Text) {
-        Role::TextRun
-    } else {
-        Role::GenericContainer
+    let Some(element) = dom_node.as_element() else {
+        return if dom_node.type_id() == Some(LayoutNodeType::Text) {
+            Role::TextRun
+        } else {
+            Role::GenericContainer
+        };
+    };
+
+    // An explicit ARIA `role` attribute overrides the native role (first recognised token wins).
+    if let Some(role_attr) = element.attribute_as_str(&ns!(), &local_name!("role")) {
+        if let Some(role) = role_attr.split_whitespace().find_map(aria_role_to_accesskit) {
+            return role;
+        }
     }
+
+    let local_name = element.local_name().to_ascii_lowercase();
+
+    // Elements whose native role depends on their attributes.
+    if local_name == local_name!("input") {
+        return input_role(element);
+    }
+    if local_name == local_name!("a") || local_name == local_name!("area") {
+        // Only a placed anchor (with `href`) is a link; a bare `<a>` is a generic container.
+        return if element.attribute(&ns!(), &local_name!("href")).is_some() {
+            Role::Link
+        } else {
+            Role::GenericContainer
+        };
+    }
+    if local_name == local_name!("img") {
+        // `alt=""` marks the image decorative (presentational).
+        return match element.attribute_as_str(&ns!(), &local_name!("alt")) {
+            Some("") => Role::GenericContainer,
+            _ => Role::Image,
+        };
+    }
+
+    // Static HTML-element → role map for everything else.
+    *HTML_ELEMENT_ROLE_MAPPINGS
+        .get(&local_name)
+        .unwrap_or(&Role::GenericContainer)
+}
+
+/// Map an `<input>`'s `type` to its accessibility role (per HTML-AAM).
+fn input_role<'dom>(element: impl LayoutElement<'dom>) -> Role {
+    let input_type = element
+        .attribute_as_str(&ns!(), &local_name!("type"))
+        .unwrap_or("text")
+        .to_ascii_lowercase();
+    match input_type.as_str() {
+        "checkbox" => Role::CheckBox,
+        "radio" => Role::RadioButton,
+        "button" | "submit" | "reset" | "image" => Role::Button,
+        "range" => Role::Slider,
+        "number" => Role::NumberInput,
+        "email" => Role::EmailInput,
+        "tel" => Role::PhoneNumberInput,
+        "url" => Role::UrlInput,
+        "password" => Role::PasswordInput,
+        "search" => Role::SearchInput,
+        "date" => Role::DateInput,
+        "datetime-local" => Role::DateTimeInput,
+        "time" => Role::TimeInput,
+        "month" => Role::MonthInput,
+        "week" => Role::WeekInput,
+        "color" => Role::ColorWell,
+        "hidden" => Role::GenericContainer,
+        // `text` and any unknown/future type default to a plain text field.
+        _ => Role::TextInput,
+    }
+}
+
+/// Map an ARIA `role` token to an accesskit [`Role`], or `None` if unrecognised.
+fn aria_role_to_accesskit(role: &str) -> Option<Role> {
+    Some(match role {
+        "button" => Role::Button,
+        "link" => Role::Link,
+        "checkbox" => Role::CheckBox,
+        "radio" => Role::RadioButton,
+        "switch" => Role::Switch,
+        "textbox" => Role::TextInput,
+        "searchbox" => Role::SearchInput,
+        "combobox" => Role::ComboBox,
+        "listbox" => Role::ListBox,
+        "option" => Role::ListBoxOption,
+        "list" => Role::List,
+        "listitem" => Role::ListItem,
+        "menu" => Role::Menu,
+        "menubar" => Role::MenuBar,
+        "menuitem" => Role::MenuItem,
+        "menuitemcheckbox" => Role::MenuItemCheckBox,
+        "menuitemradio" => Role::MenuItemRadio,
+        "tab" => Role::Tab,
+        "tablist" => Role::TabList,
+        "tabpanel" => Role::TabPanel,
+        "dialog" | "alertdialog" => Role::Dialog,
+        "alert" => Role::Alert,
+        "status" => Role::Status,
+        "progressbar" => Role::ProgressIndicator,
+        "meter" => Role::Meter,
+        "slider" => Role::Slider,
+        "spinbutton" => Role::SpinButton,
+        "scrollbar" => Role::ScrollBar,
+        "separator" => Role::Splitter,
+        "heading" => Role::Heading,
+        "img" | "image" => Role::Image,
+        "figure" => Role::Figure,
+        "banner" => Role::Banner,
+        "navigation" => Role::Navigation,
+        "main" => Role::Main,
+        "complementary" => Role::Complementary,
+        "contentinfo" => Role::ContentInfo,
+        "region" => Role::Region,
+        "search" => Role::Search,
+        "form" => Role::Form,
+        "article" => Role::Article,
+        "document" => Role::Document,
+        "application" => Role::Application,
+        "table" => Role::Table,
+        "grid" => Role::Grid,
+        "row" => Role::Row,
+        "rowgroup" => Role::RowGroup,
+        "cell" => Role::Cell,
+        "gridcell" => Role::GridCell,
+        "columnheader" => Role::ColumnHeader,
+        "rowheader" => Role::RowHeader,
+        "tree" => Role::Tree,
+        "treegrid" => Role::TreeGrid,
+        "treeitem" => Role::TreeItem,
+        "group" => Role::Group,
+        "radiogroup" => Role::RadioGroup,
+        "toolbar" => Role::Toolbar,
+        "tooltip" => Role::Tooltip,
+        "note" => Role::Note,
+        "log" => Role::Log,
+        "marquee" => Role::Marquee,
+        "timer" => Role::Timer,
+        "term" => Role::Term,
+        "definition" => Role::Definition,
+        "feed" => Role::Feed,
+        "presentation" | "none" => Role::GenericContainer,
+        _ => return None,
+    })
+}
+
+/// The explicit accessible name from attributes, in HTML-AAM precedence: `aria-label`, then
+/// (for images) `alt`, then `title`. (`aria-labelledby` needs cross-tree id resolution — a
+/// follow-up.)
+fn explicit_name<'dom>(element: impl LayoutElement<'dom>) -> Option<String> {
+    let non_empty = |s: &str| {
+        let trimmed = s.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    };
+    element
+        .attribute_as_str(&ns!(), &local_name!("aria-label"))
+        .and_then(non_empty)
+        .or_else(|| {
+            element
+                .attribute_as_str(&ns!(), &local_name!("alt"))
+                .and_then(non_empty)
+        })
+        .or_else(|| {
+            element
+                .attribute_as_str(&ns!(), &local_name!("title"))
+                .and_then(non_empty)
+        })
 }
 
 impl AccessibilityNode {
@@ -376,6 +535,7 @@ impl AccessibilityNode {
             accesskit_node: accesskit::Node::new(role),
             opaque_node: None,
             updated: true,
+            explicit_name: false,
         }
     }
 
@@ -456,8 +616,81 @@ impl AccessibilityNode {
             // FIXME: this should take into account editing selection units (grapheme clusters?)
             damage.insert(self.set_value(&text_content));
         }
+        if let Some(element) = dom_node.as_element() {
+            // Explicit accessible name (aria-label/alt/title). When present it wins over
+            // name-from-contents; `explicit_name` gates that in `update_node_local`.
+            match explicit_name(element) {
+                Some(name) => {
+                    self.explicit_name = true;
+                    damage.insert(self.set_label(&name));
+                },
+                None if self.explicit_name => {
+                    self.explicit_name = false;
+                    damage.insert(self.clear_label());
+                },
+                None => {},
+            }
+            self.apply_states(element);
+        }
 
         damage
+    }
+
+    /// Populate ARIA / native boolean + toggle states from the element's attributes.
+    fn apply_states<'dom>(&mut self, element: impl LayoutElement<'dom>) {
+        let has = |name: &LocalName| element.attribute_as_str(&ns!(), name);
+        if has(&local_name!("disabled")).is_some() ||
+            has(&local_name!("aria-disabled")) == Some("true")
+        {
+            self.accesskit_node.set_disabled();
+            self.updated = true;
+        }
+        if has(&local_name!("required")).is_some() ||
+            has(&local_name!("aria-required")) == Some("true")
+        {
+            self.accesskit_node.set_required();
+            self.updated = true;
+        }
+        if has(&local_name!("readonly")).is_some() ||
+            has(&local_name!("aria-readonly")) == Some("true")
+        {
+            self.accesskit_node.set_read_only();
+            self.updated = true;
+        }
+        match has(&local_name!("aria-expanded")) {
+            Some("true") => {
+                self.accesskit_node.set_expanded(true);
+                self.updated = true;
+            },
+            Some("false") => {
+                self.accesskit_node.set_expanded(false);
+                self.updated = true;
+            },
+            _ => {},
+        }
+        match has(&local_name!("aria-selected")) {
+            Some("true") => {
+                self.accesskit_node.set_selected(true);
+                self.updated = true;
+            },
+            Some("false") => {
+                self.accesskit_node.set_selected(false);
+                self.updated = true;
+            },
+            _ => {},
+        }
+        // Checkbox/radio `checked`, or tri-state `aria-checked`.
+        let toggled = match has(&local_name!("aria-checked")) {
+            Some("true") => Some(accesskit::Toggled::True),
+            Some("false") => Some(accesskit::Toggled::False),
+            Some("mixed") => Some(accesskit::Toggled::Mixed),
+            _ if has(&local_name!("checked")).is_some() => Some(accesskit::Toggled::True),
+            _ => None,
+        };
+        if let Some(toggled) = toggled {
+            self.accesskit_node.set_toggled(toggled);
+            self.updated = true;
+        }
     }
 
     /// Update this node's properties based on changes already made to the accessibility tree.
@@ -470,8 +703,11 @@ impl AccessibilityNode {
         tree: &mut AccessibilityTree,
     ) -> LocalAccessibilityDamage {
         let mut new_damage = LocalAccessibilityDamage::empty();
-        if damage.contains(LocalAccessibilityDamage::SUBTREE_CHANGED) ||
-            damage.contains(LocalAccessibilityDamage::ROLE_CHANGED)
+        // An explicit aria-label/alt/title (set in update_node_from_dom_node) wins over
+        // name-from-contents, so don't recompute it here.
+        if !self.explicit_name &&
+            (damage.contains(LocalAccessibilityDamage::SUBTREE_CHANGED) ||
+                damage.contains(LocalAccessibilityDamage::ROLE_CHANGED))
         {
             if let Some(text) = self.label_from_descendants(tree) {
                 new_damage.insert(self.set_label(text.as_str()));
@@ -804,11 +1040,84 @@ static HTML_ELEMENT_ROLE_MAPPINGS: LazyLock<FxHashMap<LocalName, Role>> = LazyLo
         (local_name!("main"), Role::Main),
         (local_name!("nav"), Role::Navigation),
         (local_name!("p"), Role::Paragraph),
+        // Form controls + labels (input/a/area/img are attribute-dependent, in role_from_dom_node).
+        (local_name!("button"), Role::Button),
+        (local_name!("select"), Role::ComboBox),
+        (local_name!("textarea"), Role::MultilineTextInput),
+        (local_name!("label"), Role::Label),
+        (local_name!("form"), Role::Form),
+        (local_name!("fieldset"), Role::Group),
+        (local_name!("legend"), Role::Legend),
+        (local_name!("output"), Role::Status),
+        (local_name!("progress"), Role::ProgressIndicator),
+        (local_name!("meter"), Role::Meter),
+        // Lists.
+        (local_name!("ul"), Role::List),
+        (local_name!("ol"), Role::List),
+        (local_name!("menu"), Role::List),
+        (local_name!("li"), Role::ListItem),
+        (local_name!("dl"), Role::DescriptionList),
+        (local_name!("dt"), Role::Term),
+        (local_name!("dd"), Role::Definition),
+        // Tables.
+        (local_name!("table"), Role::Table),
+        (local_name!("thead"), Role::RowGroup),
+        (local_name!("tbody"), Role::RowGroup),
+        (local_name!("tfoot"), Role::RowGroup),
+        (local_name!("tr"), Role::Row),
+        (local_name!("td"), Role::Cell),
+        (local_name!("th"), Role::ColumnHeader),
+        (local_name!("caption"), Role::Caption),
+        // Sectioning + grouping.
+        (local_name!("section"), Role::Section),
+        (local_name!("figure"), Role::Figure),
+        (local_name!("figcaption"), Role::Caption),
+        (local_name!("blockquote"), Role::Blockquote),
+        (local_name!("details"), Role::Details),
+        (local_name!("summary"), Role::Button),
+        (local_name!("dialog"), Role::Dialog),
+        // Inline semantics + embedded content.
+        (local_name!("code"), Role::Code),
+        (local_name!("strong"), Role::Strong),
+        (local_name!("em"), Role::Emphasis),
+        (local_name!("abbr"), Role::Abbr),
+        (local_name!("mark"), Role::Mark),
+        (local_name!("time"), Role::Time),
+        (local_name!("video"), Role::Video),
+        (local_name!("audio"), Role::Audio),
+        (local_name!("canvas"), Role::Canvas),
+        (local_name!("iframe"), Role::Iframe),
     ]
     .into_iter()
     .collect()
 });
 
+/// Roles whose accessible name is computed from their contents when no explicit name is given.
 /// <https://w3c.github.io/aria/#namefromcontent>
-static NAME_FROM_CONTENTS_ROLES: LazyLock<FxHashSet<Role>> =
-    LazyLock::new(|| [(Role::Heading)].into_iter().collect());
+static NAME_FROM_CONTENTS_ROLES: LazyLock<FxHashSet<Role>> = LazyLock::new(|| {
+    [
+        Role::Heading,
+        Role::Button,
+        Role::DefaultButton,
+        Role::Link,
+        Role::Cell,
+        Role::GridCell,
+        Role::ColumnHeader,
+        Role::RowHeader,
+        Role::Row,
+        Role::ListItem,
+        Role::ListBoxOption,
+        Role::MenuItem,
+        Role::MenuItemCheckBox,
+        Role::MenuItemRadio,
+        Role::CheckBox,
+        Role::RadioButton,
+        Role::Switch,
+        Role::Tab,
+        Role::TreeItem,
+        Role::Tooltip,
+        Role::Term,
+    ]
+    .into_iter()
+    .collect()
+});
