@@ -66,6 +66,9 @@ struct AccessibilityNode {
     /// Whether an explicit accessible name (`aria-label`/`alt`/`title`) was set from attributes.
     /// When true, name-from-contents must not override it.
     explicit_name: bool,
+    /// The raw `aria-labelledby` idref list, if any. Resolved to a name in a post-pass once the
+    /// whole tree (and its id map) is built, since idrefs may point forward (LYK-1378).
+    labelledby: Option<Box<str>>,
 }
 
 /// A retained, internal representation of the accessibility tree for a document.
@@ -87,6 +90,9 @@ pub struct AccessibilityTree {
     ///
     /// This must be kept in sync with [`Self::opaque_node_to_id`].
     id_to_opaque_node: FxHashMap<NodeId, OpaqueNode>,
+    /// Maps an element's `id` attribute to its accessibility [`NodeId`], rebuilt each update while
+    /// walking the tree. Used to resolve `aria-labelledby` idrefs to their target nodes (LYK-1378).
+    element_id_to_node_id: FxHashMap<Box<str>, NodeId>,
     /// Sent with each [`accesskit::TreeUpdate`]. This allows this tree to be
     /// [grafted](https://docs.rs/accesskit/latest/accesskit/struct.Node.html#method.tree_id) into
     /// an application's tree.
@@ -142,6 +148,7 @@ impl AccessibilityTree {
             nodes: FxHashMap::default(),
             opaque_node_to_id: FxHashMap::default(),
             id_to_opaque_node: FxHashMap::default(),
+            element_id_to_node_id: FxHashMap::default(),
             tree_id,
             root_node_id: None,
             embedder_epoch,
@@ -157,12 +164,90 @@ impl AccessibilityTree {
         rooted_nodes: Option<FxHashSet<OpaqueNode>>,
     ) -> Option<accesskit::TreeUpdate> {
         let mut update = AccessibilityUpdate::new(rooted_nodes);
+        // Rebuilt fresh each walk (ids can be added/removed/changed between reflows).
+        self.element_id_to_node_id.clear();
         let (root_node_id, root_node) = self.get_or_create_node(root_dom_node, &mut update);
         self.root_node_id = Some(root_node_id);
 
         self.update_node_and_descendants_from_dom_node(&root_node, root_dom_node, &mut update);
 
+        // Resolve aria-labelledby now that every node — and every element id — is in the tree, so
+        // forward idrefs resolve too.
+        self.resolve_labelledby(&mut update);
+
         update.finalize(self)
+    }
+
+    /// Resolve `aria-labelledby` for every node that has it: concatenate the accessible text of
+    /// each referenced element (idref order, space-separated) and use it as the accessible name.
+    /// This is the highest-precedence name source, so it overrides aria-label/name-from-contents.
+    fn resolve_labelledby(&mut self, update: &mut AccessibilityUpdate) {
+        let labelled: Vec<(NodeId, Box<str>)> = self
+            .nodes
+            .iter()
+            .filter_map(|(id, node)| node.borrow().labelledby.clone().map(|lb| (*id, lb)))
+            .collect();
+        for (node_id, idrefs) in labelled {
+            let mut name = String::new();
+            for idref in idrefs.split_whitespace() {
+                let Some(&target_id) = self.element_id_to_node_id.get(idref) else {
+                    continue;
+                };
+                if let Some(text) = self.accessible_text_of(target_id) {
+                    if !name.is_empty() {
+                        name.push(' ');
+                    }
+                    name.push_str(&text);
+                }
+            }
+            let name = name.trim();
+            // A broken/empty idref set leaves the lower-precedence name (aria-label/contents) in place.
+            if name.is_empty() {
+                continue;
+            }
+            let node = self.assert_node_for_id(&node_id);
+            let mut node = node.borrow_mut();
+            node.explicit_name = true;
+            if !node.set_label(name).is_empty() {
+                update.add(&mut node);
+            }
+        }
+    }
+
+    /// The text used when an element is referenced by `aria-labelledby`: its own accessible name
+    /// if it has one, else the concatenation of its descendant text (any role — unlike
+    /// name-from-contents, which is role-gated).
+    fn accessible_text_of(&self, node_id: NodeId) -> Option<String> {
+        let node = self.nodes.get(&node_id)?;
+        let node = node.borrow();
+        if let Some(label) = node.accesskit_node.label() {
+            let label = label.trim();
+            if !label.is_empty() {
+                return Some(label.to_owned());
+            }
+        }
+        let mut children = VecDeque::from_iter(node.child_ids().iter().copied());
+        let mut text = String::new();
+        while let Some(child_id) = children.pop_front() {
+            let Some(child) = self.nodes.get(&child_id) else {
+                continue;
+            };
+            let child = child.borrow();
+            match child.role() {
+                Role::TextRun => {
+                    if let Some(child_text) = child.value() {
+                        text.push_str(child_text);
+                    }
+                },
+                _ => {
+                    for id in child.child_ids().iter().rev() {
+                        children.push_front(*id);
+                    }
+                },
+            }
+        }
+        let text = text.trim();
+        (!text.is_empty()).then(|| text.to_owned())
     }
 
     /// Update the given AccessibilityNode from its corresponding DOM node.
@@ -204,6 +289,14 @@ impl AccessibilityTree {
             if let Some(dom_element) = dom_node.as_element() {
                 let local_name = dom_element.local_name().to_ascii_lowercase();
                 node.set_html_tag(&local_name);
+                // Record this element's `id` so aria-labelledby idrefs can resolve to it.
+                if let Some(elem_id) =
+                    dom_element.attribute_as_str(&ns!(), &local_name!("id"))
+                {
+                    if !elem_id.is_empty() {
+                        self.element_id_to_node_id.insert(elem_id.into(), id);
+                    }
+                }
             }
         }
 
@@ -536,6 +629,7 @@ impl AccessibilityNode {
             opaque_node: None,
             updated: true,
             explicit_name: false,
+            labelledby: None,
         }
     }
 
@@ -630,6 +724,11 @@ impl AccessibilityNode {
                 },
                 None => {},
             }
+            // aria-labelledby is resolved later (needs the whole tree's id map); just record it.
+            self.labelledby = element
+                .attribute_as_str(&ns!(), &local_name!("aria-labelledby"))
+                .filter(|value| !value.trim().is_empty())
+                .map(Box::from);
             self.apply_states(element);
         }
 
