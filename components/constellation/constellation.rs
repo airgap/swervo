@@ -1561,6 +1561,9 @@ where
             EmbedderToConstellationMessage::SetAccessibilityActive(webview_id, active) => {
                 self.set_accessibility_active(webview_id, active);
             },
+            EmbedderToConstellationMessage::ForwardAccessibilityAction(webview_id, request) => {
+                self.forward_accessibility_action(webview_id, request);
+            },
         }
     }
 
@@ -3210,6 +3213,29 @@ where
             pipeline_id,
             ScriptThreadMessage::SetAccessibilityActive(pipeline_id, active, epoch),
             "Set accessibility active after closure",
+        );
+    }
+
+    /// Forward an AccessKit action (e.g. a screen reader activating a link/button) to the
+    /// webview's active top-level document, to be dispatched to the DOM (Servo #4344).
+    fn forward_accessibility_action(
+        &mut self,
+        webview_id: WebViewId,
+        request: accesskit::ActionRequest,
+    ) {
+        if !(pref!(accessibility_enabled)) {
+            return;
+        }
+        let Some(webview) = self.webviews.get(&webview_id) else {
+            return;
+        };
+        let Some(pipeline_id) = webview.active_top_level_pipeline_id else {
+            return;
+        };
+        self.send_message_to_pipeline(
+            pipeline_id,
+            ScriptThreadMessage::AccessibilityAction(pipeline_id, request),
+            "Forward accessibility action",
         );
     }
 

@@ -375,6 +375,17 @@ impl Layout for LayoutThread {
         })
     }
 
+    fn query_accessibility_node(
+        &self,
+        node_id: accesskit::NodeId,
+    ) -> Option<UntrustedNodeAddress> {
+        self.accessibility_tree
+            .borrow()
+            .as_ref()?
+            .opaque_for_node_id(node_id)
+            .map(UntrustedNodeAddress::from)
+    }
+
     /// Return the node corresponding to the containing block of the provided node.
     #[servo_tracing::instrument(skip_all)]
     fn query_containing_block_is_descendant(

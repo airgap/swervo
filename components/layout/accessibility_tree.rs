@@ -6,7 +6,7 @@ use std::fmt::Debug;
 use std::sync::atomic::AtomicU64;
 use std::sync::{LazyLock, atomic};
 
-use accesskit::{NodeId, Role};
+use accesskit::{Action, NodeId, Role};
 use bitflags::bitflags;
 use layout_api::{LayoutElement, LayoutNode, LayoutNodeType};
 use log::trace;
@@ -409,6 +409,13 @@ impl AccessibilityTree {
         self.embedder_epoch
     }
 
+    /// The DOM node ([`OpaqueNode`]) backing a given accessibility [`NodeId`], if any. Used to
+    /// resolve an incoming AccessKit action's target node to a DOM node so it can be dispatched
+    /// (LYK-1378 / Servo #4344).
+    pub(crate) fn opaque_for_node_id(&self, node_id: NodeId) -> Option<OpaqueNode> {
+        self.id_to_opaque_node.get(&node_id).copied()
+    }
+
     /// Assert that the tree is a tree without any dangling references or orphaned nodes.
     ///
     /// For accessibility tests only, because it’s expensive.
@@ -789,6 +796,52 @@ impl AccessibilityNode {
         if let Some(toggled) = toggled {
             self.accesskit_node.set_toggled(toggled);
             self.updated = true;
+        }
+
+        // Advertise the actions an assistive technology can invoke on this node, so screen readers
+        // offer activation/focus. The embedder forwards these back to the DOM (Servo #4344).
+        let role = self.accesskit_node.role();
+        let clickable = matches!(
+            role,
+            Role::Button |
+                Role::DefaultButton |
+                Role::Link |
+                Role::CheckBox |
+                Role::RadioButton |
+                Role::Switch |
+                Role::MenuItem |
+                Role::MenuItemCheckBox |
+                Role::MenuItemRadio |
+                Role::Tab |
+                Role::ListBoxOption |
+                Role::TreeItem |
+                Role::ColorWell |
+                Role::ComboBox
+        );
+        let focusable = clickable ||
+            matches!(
+                role,
+                Role::TextInput |
+                    Role::MultilineTextInput |
+                    Role::SearchInput |
+                    Role::NumberInput |
+                    Role::EmailInput |
+                    Role::PasswordInput |
+                    Role::PhoneNumberInput |
+                    Role::UrlInput |
+                    Role::DateInput |
+                    Role::DateTimeInput |
+                    Role::TimeInput |
+                    Role::MonthInput |
+                    Role::WeekInput |
+                    Role::Slider |
+                    Role::SpinButton
+            );
+        if clickable {
+            self.accesskit_node.add_action(Action::Click);
+        }
+        if focusable {
+            self.accesskit_node.add_action(Action::Focus);
         }
     }
 

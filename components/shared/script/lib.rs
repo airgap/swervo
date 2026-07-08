@@ -327,6 +327,9 @@ pub enum ScriptThreadMessage {
     /// may be split across multiple script threads, and the pipelines in a script thread may belong
     /// to multiple webviews. So the simplest approach is to activate it for one pipeline at a time.
     SetAccessibilityActive(PipelineId, bool, Epoch),
+    /// Dispatch an AccessKit action request (screen-reader activation/focus of a page element) to
+    /// the DOM node it targets, in the given pipeline (Servo #4344).
+    AccessibilityAction(PipelineId, accesskit::ActionRequest),
     /// Force a garbage collection in this script thread.
     TriggerGarbageCollection,
 }

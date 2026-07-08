@@ -356,6 +356,12 @@ pub trait Layout {
     ) -> NodeRenderingType;
 
     fn query_containing_block(&self, node: TrustedNodeAddress) -> Option<UntrustedNodeAddress>;
+    /// Resolve an AccessKit accessibility node id to the DOM node backing it, so an incoming
+    /// assistive-technology action can be dispatched to that node (LYK-1378 / Servo #4344).
+    fn query_accessibility_node(
+        &self,
+        node_id: accesskit::NodeId,
+    ) -> Option<UntrustedNodeAddress>;
     fn query_containing_block_is_descendant(
         &self,
         root: TrustedNodeAddress,
