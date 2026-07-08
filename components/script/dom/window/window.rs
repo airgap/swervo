@@ -101,6 +101,7 @@ use webrender_api::units::{DeviceIntSize, DevicePixel, LayoutPixel, LayoutPoint}
 use crate::dom::bindings::codegen::Bindings::DocumentBinding::{
     DocumentMethods, DocumentReadyState, NamedPropertyValue,
 };
+use crate::dom::bindings::codegen::Bindings::ElementBinding::ElementMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLElementBinding::HTMLElementMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLIFrameElementBinding::HTMLIFrameElementMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLOrSVGElementBinding::FocusOptions;
@@ -118,7 +119,8 @@ use crate::dom::bindings::codegen::Bindings::WindowBinding::{
     WindowPostMessageOptions,
 };
 use crate::dom::bindings::codegen::UnionTypes::{
-    RequestOrUSVString, TrustedScriptOrString, TrustedScriptOrStringOrFunction,
+    BooleanOrScrollIntoViewOptions, RequestOrUSVString, TrustedScriptOrString,
+    TrustedScriptOrStringOrFunction,
 };
 use crate::dom::bindings::error::{
     Error, ErrorInfo, ErrorResult, Fallible, javascript_error_info_from_error_info,
@@ -2880,6 +2882,10 @@ impl Window {
         match request.action {
             accesskit::Action::Click => element.Click(cx),
             accesskit::Action::Focus => element.Focus(cx, &FocusOptions::default()),
+            accesskit::Action::Blur => element.Blur(cx),
+            accesskit::Action::ScrollIntoView => element
+                .upcast::<Element>()
+                .ScrollIntoView(cx, BooleanOrScrollIntoViewOptions::Boolean(true)),
             _ => {},
         }
     }

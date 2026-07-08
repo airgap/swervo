@@ -842,6 +842,10 @@ impl AccessibilityNode {
         }
         if focusable {
             self.accesskit_node.add_action(Action::Focus);
+            self.accesskit_node.add_action(Action::Blur);
+        }
+        if clickable || focusable {
+            self.accesskit_node.add_action(Action::ScrollIntoView);
         }
     }
 

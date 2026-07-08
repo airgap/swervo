@@ -3226,10 +3226,27 @@ where
         if !(pref!(accessibility_enabled)) {
             return;
         }
-        let Some(webview) = self.webviews.get(&webview_id) else {
+        let Some(fallback) = self
+            .webviews
+            .get(&webview_id)
+            .map(|webview| webview.active_top_level_pipeline_id)
+        else {
             return;
         };
-        let Some(pipeline_id) = webview.active_top_level_pipeline_id else {
+        // Route to the pipeline whose accessibility tree the action actually targets — its tree id
+        // is a pure function of its pipeline id (`TreeId::from(PipelineId)`), so a subframe's action
+        // reaches the subframe, not the top-level document. Fall back to the active top-level
+        // pipeline if no tree matches (e.g. an action on the webview's own graft wrapper).
+        let Some(pipeline_id) = self
+            .pipelines
+            .iter()
+            .find(|(pipeline_id, pipeline)| {
+                pipeline.webview_id == webview_id &&
+                    accesskit::TreeId::from(**pipeline_id) == request.target_tree
+            })
+            .map(|(pipeline_id, _)| *pipeline_id)
+            .or(fallback)
+        else {
             return;
         };
         self.send_message_to_pipeline(
