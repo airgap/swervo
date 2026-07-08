@@ -2010,6 +2010,9 @@ impl ScriptThread {
             ScriptThreadMessage::SetAccessibilityActive(pipeline_id, active, epoch) => {
                 self.set_accessibility_active(pipeline_id, active, epoch);
             },
+            ScriptThreadMessage::AccessibilityAction(pipeline_id, request) => {
+                self.handle_accessibility_action(cx, pipeline_id, request);
+            },
             ScriptThreadMessage::TriggerGarbageCollection => unsafe {
                 JS_GC(cx, GCReason::API);
             },
@@ -3800,6 +3803,19 @@ impl ScriptThread {
             .window()
             .layout()
             .set_accessibility_active(active, epoch);
+    }
+
+    /// Dispatch an AccessKit action request (screen-reader activation/focus) to the DOM node it
+    /// targets, in the given pipeline's document (Servo #4344).
+    fn handle_accessibility_action(
+        &self,
+        cx: &mut JSContext,
+        pipeline_id: PipelineId,
+        request: accesskit::ActionRequest,
+    ) {
+        if let Some(document) = self.documents.borrow().find_document(pipeline_id) {
+            document.window().dispatch_accessibility_action(cx, request);
+        }
     }
 
     /// Handle a "navigate an iframe" message from the constellation.

@@ -941,6 +941,18 @@ impl WebView {
         self.accesskit_tree_id()
     }
 
+    /// Forward an AccessKit action request (e.g. a screen reader activating or focusing a page
+    /// element) to the engine, to be dispatched to the target DOM node (Servo #4344). A no-op
+    /// unless accessibility is enabled.
+    pub fn handle_accesskit_action(&self, request: accesskit::ActionRequest) {
+        if !pref!(accessibility_enabled) {
+            return;
+        }
+        self.inner().servo.constellation_proxy().send(
+            EmbedderToConstellationMessage::ForwardAccessibilityAction(self.id(), request),
+        );
+    }
+
     pub(crate) fn notify_document_accessibility_tree_id(&self, grafted_tree_id: TreeId) {
         let Some(webview_accesskit_tree_id) = self.inner().accesskit_tree_id else {
             return;

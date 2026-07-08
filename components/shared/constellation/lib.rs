@@ -116,6 +116,9 @@ pub enum EmbedderToConstellationMessage {
     UpdatePinchZoomInfos(PipelineId, PinchZoomInfos),
     /// Activate or deactivate accessibility features for the given `WebView`.
     SetAccessibilityActive(WebViewId, bool),
+    /// Forward an AccessKit action request (e.g. from a screen reader activating a page element)
+    /// to the given `WebView`'s active document, so it can be dispatched to the DOM (Servo #4344).
+    ForwardAccessibilityAction(WebViewId, accesskit::ActionRequest),
 }
 
 pub enum UserContentManagerAction {

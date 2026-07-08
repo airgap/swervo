@@ -1561,6 +1561,9 @@ where
             EmbedderToConstellationMessage::SetAccessibilityActive(webview_id, active) => {
                 self.set_accessibility_active(webview_id, active);
             },
+            EmbedderToConstellationMessage::ForwardAccessibilityAction(webview_id, request) => {
+                self.forward_accessibility_action(webview_id, request);
+            },
         }
     }
 
@@ -3210,6 +3213,46 @@ where
             pipeline_id,
             ScriptThreadMessage::SetAccessibilityActive(pipeline_id, active, epoch),
             "Set accessibility active after closure",
+        );
+    }
+
+    /// Forward an AccessKit action (e.g. a screen reader activating a link/button) to the
+    /// webview's active top-level document, to be dispatched to the DOM (Servo #4344).
+    fn forward_accessibility_action(
+        &mut self,
+        webview_id: WebViewId,
+        request: accesskit::ActionRequest,
+    ) {
+        if !(pref!(accessibility_enabled)) {
+            return;
+        }
+        let Some(fallback) = self
+            .webviews
+            .get(&webview_id)
+            .map(|webview| webview.active_top_level_pipeline_id)
+        else {
+            return;
+        };
+        // Route to the pipeline whose accessibility tree the action actually targets — its tree id
+        // is a pure function of its pipeline id (`TreeId::from(PipelineId)`), so a subframe's action
+        // reaches the subframe, not the top-level document. Fall back to the active top-level
+        // pipeline if no tree matches (e.g. an action on the webview's own graft wrapper).
+        let Some(pipeline_id) = self
+            .pipelines
+            .iter()
+            .find(|(pipeline_id, pipeline)| {
+                pipeline.webview_id == webview_id &&
+                    accesskit::TreeId::from(**pipeline_id) == request.target_tree
+            })
+            .map(|(pipeline_id, _)| *pipeline_id)
+            .or(fallback)
+        else {
+            return;
+        };
+        self.send_message_to_pipeline(
+            pipeline_id,
+            ScriptThreadMessage::AccessibilityAction(pipeline_id, request),
+            "Forward accessibility action",
         );
     }
 

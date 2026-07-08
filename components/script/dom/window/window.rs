@@ -101,7 +101,10 @@ use webrender_api::units::{DeviceIntSize, DevicePixel, LayoutPixel, LayoutPoint}
 use crate::dom::bindings::codegen::Bindings::DocumentBinding::{
     DocumentMethods, DocumentReadyState, NamedPropertyValue,
 };
+use crate::dom::bindings::codegen::Bindings::ElementBinding::ElementMethods;
+use crate::dom::bindings::codegen::Bindings::HTMLElementBinding::HTMLElementMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLIFrameElementBinding::HTMLIFrameElementMethods;
+use crate::dom::bindings::codegen::Bindings::HTMLOrSVGElementBinding::FocusOptions;
 use crate::dom::bindings::codegen::Bindings::HistoryBinding::History_Binding::HistoryMethods;
 use crate::dom::bindings::codegen::Bindings::ImageBitmapBinding::{
     ImageBitmapOptions, ImageBitmapSource,
@@ -116,7 +119,8 @@ use crate::dom::bindings::codegen::Bindings::WindowBinding::{
     WindowPostMessageOptions,
 };
 use crate::dom::bindings::codegen::UnionTypes::{
-    RequestOrUSVString, TrustedScriptOrString, TrustedScriptOrStringOrFunction,
+    BooleanOrScrollIntoViewOptions, RequestOrUSVString, TrustedScriptOrString,
+    TrustedScriptOrStringOrFunction,
 };
 use crate::dom::bindings::error::{
     Error, ErrorInfo, ErrorResult, Fallible, javascript_error_info_from_error_info,
@@ -161,6 +165,7 @@ use crate::dom::location::Location;
 use crate::dom::medialist::MediaList;
 use crate::dom::mediaquerylist::{MediaQueryList, MediaQueryListMatchState};
 use crate::dom::mediaquerylistevent::MediaQueryListEvent;
+use crate::dom::html::htmlelement::HTMLElement;
 use crate::dom::messageevent::MessageEvent;
 use crate::dom::navigator::Navigator;
 use crate::dom::node::{Node, NodeDamage, NodeTraits, from_untrusted_node_address};
@@ -2849,6 +2854,40 @@ impl Window {
             .borrow()
             .query_containing_block(node.to_trusted_node_address())
             .map(|address| unsafe { from_untrusted_node_address(address) })
+    }
+
+    /// Dispatch an AccessKit action (a screen reader activating or focusing a page element) to the
+    /// DOM node it targets, resolved via layout's accessibility node map (Servo #4344).
+    #[expect(unsafe_code)]
+    pub(crate) fn dispatch_accessibility_action(
+        &self,
+        cx: &mut JSContext,
+        request: accesskit::ActionRequest,
+    ) {
+        let Some(address) = self
+            .layout
+            .borrow()
+            .query_accessibility_node(request.target_node)
+        else {
+            return;
+        };
+        let node = unsafe { from_untrusted_node_address(address) };
+        let Some(element) = node.downcast::<HTMLElement>() else {
+            return;
+        };
+        // Enter the document's realm so the dispatched event's JS handlers (onclick, listeners)
+        // actually run — this is the piece the deferred input path gets for free.
+        let mut realm = enter_auto_realm(cx, self.as_global_scope());
+        let cx = &mut realm.current_realm();
+        match request.action {
+            accesskit::Action::Click => element.Click(cx),
+            accesskit::Action::Focus => element.Focus(cx, &FocusOptions::default()),
+            accesskit::Action::Blur => element.Blur(cx),
+            accesskit::Action::ScrollIntoView => element
+                .upcast::<Element>()
+                .ScrollIntoView(cx, BooleanOrScrollIntoViewOptions::Boolean(true)),
+            _ => {},
+        }
     }
 
     /// Query whether a node is part of another node's containing block chain.
