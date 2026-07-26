@@ -71,6 +71,25 @@ impl SVGElement {
     fn as_element(&self) -> &Element {
         self.upcast::<Element>()
     }
+
+    /// An inline svg subtree renders through a cached serialization on its root
+    /// `SVGSVGElement`; that root only observes its OWN attribute/children mutations,
+    /// so a change deep in the subtree (a `<path>`'s `d`, a `<circle>`'s fill) would
+    /// otherwise keep rendering the stale snapshot forever. Called from the generic
+    /// SVG element mutation hooks; walks up to every enclosing svg root (nested svgs
+    /// each hold a cache) and invalidates them.
+    fn invalidate_enclosing_svg_serializations(&self) {
+        use crate::dom::iterators::ShadowIncluding;
+        use crate::dom::svg::svgsvgelement::SVGSVGElement;
+
+        for svg_root in self
+            .upcast::<Node>()
+            .inclusive_ancestors(ShadowIncluding::No)
+            .filter_map(DomRoot::downcast::<SVGSVGElement>)
+        {
+            svg_root.invalidate_cached_serialized_subtree_and_rasterization_result();
+        }
+    }
 }
 
 impl VirtualMethods for SVGElement {
@@ -99,6 +118,14 @@ impl VirtualMethods for SVGElement {
                 },
             }
         }
+        self.invalidate_enclosing_svg_serializations();
+    }
+
+    fn children_changed(&self, cx: &mut JSContext, mutation: &crate::dom::node::ChildrenMutation) {
+        if let Some(super_type) = self.super_type() {
+            super_type.children_changed(cx, mutation);
+        }
+        self.invalidate_enclosing_svg_serializations();
     }
 }
 

@@ -81,10 +81,11 @@ impl SVGSVGElement {
 
     pub(crate) fn serialize_and_cache_subtree(&self, cx: &mut js::context::JSContext) {
         let mut cloned_nodes = self.process_use_elements(cx);
-        // Order matters: lowering `<foreignObject>` first means the `<image>` elements it
-        // inserts (which carry the foreignObject's `mask`/`clip-path`/`filter` attributes)
-        // are seen by the external-reference pass below.
+        // Order matters: lowering `<foreignObject>` and `<image href>` first means the
+        // `<image>` elements those passes insert (which carry `mask`/`clip-path`/`filter`
+        // attributes) are seen by the external-reference pass below.
         cloned_nodes.extend(self.process_foreign_objects(cx));
+        cloned_nodes.extend(self.process_image_elements(cx));
         cloned_nodes.extend(self.process_external_references(cx));
 
         let serialize_result = self
@@ -265,6 +266,102 @@ impl SVGSVGElement {
         inserted_nodes
     }
 
+    /// Re-embed each `<image>` element whose href points at a fetched external resource as a
+    /// sibling `<image>` with the decoded raster as a `data:` href. The rasterized document
+    /// cannot fetch (no network, no base URL), so external hrefs render nothing without this;
+    /// `SVGImageElement` fetches its href through the image cache and invalidates this svg's
+    /// cached serialization when pixels arrive. data: hrefs pass through untouched.
+    fn process_image_elements(&self, cx: &mut JSContext) -> Vec<DomRoot<Node>> {
+        use crate::dom::svg::svgimageelement::SVGImageElement;
+
+        let root_node = self.upcast::<Node>();
+        let image_elements: Vec<DomRoot<SVGImageElement>> = root_node
+            .traverse_preorder(ShadowIncluding::No)
+            .filter_map(DomRoot::downcast::<SVGImageElement>)
+            .collect();
+
+        let mut inserted_nodes = Vec::new();
+        for image_element in image_elements {
+            let element = image_element.upcast::<Element>();
+            let href = element.get_string_attribute(&local_name!("href"));
+            let effective_href = if href.str().is_empty() {
+                element
+                    .get_attribute_string_value_with_namespace(&ns!(xlink), &local_name!("href"))
+                    .unwrap_or_default()
+            } else {
+                href.to_string()
+            };
+            // Nothing to do: no href, or one the rasterizer can already consume.
+            if effective_href.is_empty() || effective_href.starts_with("data:") {
+                continue;
+            }
+            let Some(snapshot) = image_element.get_raster_image_data() else {
+                continue;
+            };
+            let Some(data_url) = png_data_url(snapshot) else {
+                continue;
+            };
+
+            let element_node = image_element.upcast::<Node>();
+            let document = element_node.owner_doc();
+            let replacement = Element::create(
+                cx,
+                QualName::new(None, ns!(svg), LocalName::from("image")),
+                None,
+                &document,
+                ElementCreator::ScriptCreated,
+                CustomElementCreationMode::Synchronous,
+                None,
+            );
+            for name in [
+                "x",
+                "y",
+                "width",
+                "height",
+                "mask",
+                "clip-path",
+                "filter",
+                "transform",
+                "opacity",
+                // Case-sensitive SVG name: must go through the namespace-explicit accessor —
+                // the namespace-less getters debug-assert lowercase ASCII.
+                "preserveAspectRatio",
+            ] {
+                let attr_name = LocalName::from(name);
+                let Some(value) =
+                    element.get_attribute_string_value_with_namespace(&ns!(), &attr_name)
+                else {
+                    continue;
+                };
+                replacement.set_attribute_from_parser(
+                    cx,
+                    QualName::new(None, ns!(), attr_name),
+                    DOMString::from(value),
+                    None,
+                );
+            }
+            replacement.set_attribute_from_parser(
+                cx,
+                QualName::new(None, ns!(), LocalName::from("href")),
+                DOMString::from(data_url),
+                None,
+            );
+
+            // Same paint slot; the original's unresolvable href renders nothing there.
+            let Some(parent) = element_node.GetParentNode() else {
+                continue;
+            };
+            let replacement_node = DomRoot::from_ref(replacement.upcast::<Node>());
+            if parent
+                .InsertBefore(cx, &replacement_node, Some(element_node))
+                .is_ok()
+            {
+                inserted_nodes.push(replacement_node);
+            }
+        }
+        inserted_nodes
+    }
+
     fn lower_foreign_object_to_image(
         &self,
         cx: &mut JSContext,
@@ -297,16 +394,7 @@ impl SVGSVGElement {
         // Encode the img's decoded raster as a data: URI the standalone rasterized document
         // can consume. Not loaded yet -> skip; the load-completion hook on HTMLImageElement
         // invalidates this svg's cached serialization, so we re-run once pixels exist.
-        let mut snapshot = image_element.get_raster_image_data()?;
-        let mut data_url = String::from("data:image/png;base64,");
-        let mut encoder = base64::write::EncoderStringWriter::from_consumer(
-            &mut data_url,
-            &base64::engine::general_purpose::STANDARD,
-        );
-        snapshot
-            .encode_for_mime_type(&EncodedImageType::Png, None, &mut encoder)
-            .ok()?;
-        encoder.into_inner();
+        let data_url = png_data_url(image_element.get_raster_image_data()?)?;
 
         let document = foreign_object_node.owner_doc();
         let image_svg_element = Element::create(
@@ -400,6 +488,22 @@ impl SVGSVGElement {
         *self.cached_serialized_data_url.borrow_mut() = None;
         self.upcast::<Node>().dirty(NodeDamage::Other);
     }
+}
+
+/// Encode a decoded raster as a `data:image/png;base64,…` URI (the canvas-toDataURL
+/// encoding path). The standalone rasterized SVG document can consume data: URIs but
+/// cannot fetch anything else.
+fn png_data_url(mut snapshot: pixels::Snapshot) -> Option<String> {
+    let mut data_url = String::from("data:image/png;base64,");
+    let mut encoder = base64::write::EncoderStringWriter::from_consumer(
+        &mut data_url,
+        &base64::engine::general_purpose::STANDARD,
+    );
+    snapshot
+        .encode_for_mime_type(&EncodedImageType::Png, None, &mut encoder)
+        .ok()?;
+    encoder.into_inner();
+    Some(data_url)
 }
 
 /// Extract `id` from a `url(#id)` attribute value (quotes and whitespace tolerated).
