@@ -78,6 +78,7 @@ use crate::dom::node::virtualmethods::VirtualMethods;
 use crate::dom::node::{BindContext, MoveContext, Node, NodeDamage, NodeTraits, UnbindContext};
 use crate::dom::performance::performanceresourcetiming::InitiatorType;
 use crate::dom::promise::Promise;
+use crate::dom::svg::svgsvgelement::SVGSVGElement;
 use crate::dom::window::Window;
 use crate::fetch::{RequestWithGlobalScope, create_a_potential_cors_request};
 use crate::microtask::{Microtask, MicrotaskRunnable};
@@ -476,6 +477,16 @@ impl HTMLImageElement {
         LoadBlocker::terminate(&self.current_request.borrow().blocker, cx);
         // Mark the node dirty
         self.upcast::<Node>().dirty(NodeDamage::Other);
+        // An <img> inside an inline <svg> (foreignObject) is baked into the svg's serialized
+        // rasterization; that snapshot was taken without these pixels, so force a re-serialize.
+        if let Some(svg_root) = self
+            .upcast::<Node>()
+            .inclusive_ancestors(ShadowIncluding::No)
+            .filter_map(DomRoot::downcast::<SVGSVGElement>)
+            .next()
+        {
+            svg_root.invalidate_cached_serialized_subtree_and_rasterization_result();
+        }
         self.resolve_image_decode_promises();
     }
 

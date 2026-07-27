@@ -757,6 +757,19 @@ impl ComputedValuesExt for ComputedValues {
             return true;
         }
 
+        // From <https://drafts.fxtf.org/css-masking-1/#the-mask>:
+        // > A computed value of other than none results in the creation of a stacking context
+        // > the same way that CSS opacity does.
+        if self
+            .get_svg()
+            .mask_image
+            .0
+            .iter()
+            .any(|image| !matches!(image, style::values::computed::Image::None))
+        {
+            return true;
+        }
+
         // From <https://www.w3.org/TR/CSS2/visuren.html#z-index>, values different than `auto`
         // make the box establish a stacking context.
         if self.z_index_applies(fragment_flags) &&

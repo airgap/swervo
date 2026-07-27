@@ -389,6 +389,28 @@ impl DisplayListBuilder<'_> {
     /// `define_clip_image_mask` instead of a rectangle/rounded-rect clip. Because the mask's
     /// `ImageKey` is only known here (after rasterization), this is created directly on the
     /// WebRender builder during box painting rather than via the `StackingContextTreeClipStore`.
+    /// Like [`Self::add_image_mask_clip`], but with an explicit spatial node and parent
+    /// clip chain — used when attaching a CSS `mask-image` clip to the WebRender stacking
+    /// context of a box that establishes one (mask creates a stacking context per
+    /// css-masking-1, and WR only honors image-mask clips on stacking-context surfaces).
+    fn add_image_mask_clip_for_stacking_context(
+        &mut self,
+        spatial: ScrollTreeNodeId,
+        parent_clip_chain_id: Option<ClipChainId>,
+        image: wr::ImageKey,
+        rect: units::LayoutRect,
+    ) -> ClipChainId {
+        let spatial_id = self.spatial_id(spatial);
+        let mask_clip_id = self.wr().define_clip_image_mask(
+            spatial_id,
+            wr::ImageMask { image, rect },
+            &[],
+            wr::FillRule::Nonzero,
+        );
+        self.wr()
+            .define_clip_chain(parent_clip_chain_id, [mask_clip_id])
+    }
+
     fn add_image_mask_clip(
         &mut self,
         state: &TraversalState,
@@ -456,12 +478,14 @@ impl DisplayListBuilder<'_> {
         let style = fragment.style();
         let effects = style.get_effects();
         let transform_style = style.used_transform_style(fragment.base.flags);
+        let has_mask = fragment.has_mask_image();
         if effects.filter.0.is_empty() &&
             effects.opacity == 1.0 &&
             effects.mix_blend_mode == ComputedMixBlendMode::Normal &&
             !style.has_effective_transform_or_perspective(FragmentFlags::empty()) &&
             style.get_svg().clip_path == ClipPath::None &&
-            transform_style == TransformStyle::Flat
+            transform_style == TransformStyle::Flat &&
+            !has_mask
         {
             return false;
         }
@@ -493,10 +517,21 @@ impl DisplayListBuilder<'_> {
         // should be used for primitives, but `None` is used for stacking contexts and
         // clip chains. We convert to the `Option<ClipChainId>` representation here. Just
         // passing Some(ClipChainId::INVALID) causes a panic.
-        let clip_chain_id = match stacking_context.clip_id {
+        let mut clip_chain_id = match stacking_context.clip_id {
             ClipId::INVALID => None,
             clip_id => Some(self.clip_chain_id(clip_id)),
         };
+        // CSS `mask-image` (css-masking-1): the mask clips the element's ENTIRE rendering
+        // — decorations and descendants — so it rides this stacking context's clip chain.
+        // Pending rasterization leaves the context unmasked this frame; the rasterization
+        // machinery triggers a repaint when the mask image is ready.
+        if has_mask &&
+            let Some(mask_chain) =
+                BuilderForBoxFragment::new(&fragment.with_style(), stacking_context.containing_block_origin)
+                    .build_mask_clip_chain(self, stacking_context.scroll_tree_node_id, clip_chain_id)
+        {
+            clip_chain_id = Some(mask_chain);
+        }
 
         self.wr().push_stacking_context(
             spatial_id,
@@ -730,6 +765,7 @@ impl DisplayListBuilder<'_> {
 }
 
 impl PaintTraversalHandler for DisplayListBuilder<'_> {
+
     /// A tuple composed of the number of real WebRender stacking contexts pushed
     /// and the previous `Self::current_reference_frame_scroll_node_id` value of
     /// the `DisplayListBuilder` when a stacking context was visited (or `None` if
@@ -1546,7 +1582,8 @@ impl<'a> BuilderForBoxFragment<'a> {
     fn build_mask_clip_chain(
         &self,
         builder: &mut DisplayListBuilder,
-        state: &TraversalState,
+        spatial_id: ScrollTreeNodeId,
+        parent_clip_chain_id: Option<ClipChainId>,
     ) -> Option<ClipChainId> {
         let style = self.fragment.style();
         let node = self.fragment.base.tag.map(|tag| tag.node);
@@ -1583,7 +1620,12 @@ impl<'a> BuilderForBoxFragment<'a> {
                 continue;
             };
             // mask-clip / mask-origin: border-box (the MVP default).
-            return Some(builder.add_image_mask_clip(state, image_key, self.border_rect));
+            return Some(builder.add_image_mask_clip_for_stacking_context(
+                spatial_id,
+                parent_clip_chain_id,
+                image_key,
+                self.border_rect,
+            ));
         }
         None
     }
@@ -1729,27 +1771,9 @@ impl<'a> BuilderForBoxFragment<'a> {
             return;
         }
 
-        // CSS `mask-image`: WebRender only honors an image-mask clip on a stacking-context
-        // surface (a leaf primitive's image-mask clip is silently dropped — the `cs_clip_image`
-        // path was removed upstream), so if this box has a mask we wrap its own painted content
-        // (background, box-shadow, border) in a stacking context whose clip is the mask's alpha.
-        // Descendant fragments are painted outside this SC and are not yet masked.
-        let mask_clip_chain = self.build_mask_clip_chain(builder, state);
-        if let Some(chain) = mask_clip_chain {
-            let spatial_id = builder.spatial_id(state.spatial_id);
-            builder.wr().push_stacking_context(
-                spatial_id,
-                PrimitiveFlags::empty(),
-                Some(chain),
-                webrender_api::TransformStyle::Flat,
-                wr::MixBlendMode::Normal,
-                &[],
-                &[],
-                RasterSpace::Screen,
-                StackingContextFlags::empty(),
-                None,
-            );
-        }
+        // CSS `mask-image` establishes a stacking context (css-masking-1); its clip is
+        // attached to that stacking context's surface in
+        // `push_webrender_stacking_context_if_necessary`, wrapping decorations AND descendants.
 
         // CSS `background-clip: text` clips ONLY the background to the descendant text glyphs, so
         // (unlike `mask-image`) its stacking context wraps just the background paint — not the
@@ -1781,9 +1805,6 @@ impl<'a> BuilderForBoxFragment<'a> {
             self.build_border(builder, state);
         }
 
-        if mask_clip_chain.is_some() {
-            builder.wr().pop_stacking_context();
-        }
 
         let overflow = self
             .fragment

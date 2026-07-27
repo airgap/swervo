@@ -2,13 +2,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::collections::HashSet;
+
 use base64::Engine as _;
 use cssparser::{Parser, ParserInput};
 use dom_struct::dom_struct;
-use html5ever::{LocalName, Prefix, local_name, ns};
+use html5ever::{LocalName, Prefix, QualName, local_name, ns};
 use js::context::JSContext;
 use js::rust::HandleObject;
 use layout_api::SVGElementData;
+use pixels::EncodedImageType;
 use script_bindings::cell::DomRefCell;
 use servo_url::ServoUrl;
 use style::attr::AttrValue;
@@ -26,8 +29,10 @@ use crate::dom::bindings::root::{DomRoot, LayoutDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::document::Document;
 use crate::dom::element::attributes::storage::AttrRef;
-use crate::dom::element::{AttributeMutation, Element};
+use crate::dom::element::{AttributeMutation, CustomElementCreationMode, Element, ElementCreator};
+use crate::dom::html::htmlimageelement::HTMLImageElement;
 use crate::dom::iterators::ShadowIncluding;
+use crate::dom::text::Text;
 use crate::dom::node::virtualmethods::VirtualMethods;
 use crate::dom::node::{
     ChildrenMutation, CloneChildrenFlag, Node, NodeDamage, NodeTraits, UnbindContext,
@@ -75,7 +80,13 @@ impl SVGSVGElement {
     }
 
     pub(crate) fn serialize_and_cache_subtree(&self, cx: &mut js::context::JSContext) {
-        let cloned_nodes = self.process_use_elements(cx);
+        let mut cloned_nodes = self.process_use_elements(cx);
+        // Order matters: lowering `<foreignObject>` and `<image href>` first means the
+        // `<image>` elements those passes insert (which carry `mask`/`clip-path`/`filter`
+        // attributes) are seen by the external-reference pass below.
+        cloned_nodes.extend(self.process_foreign_objects(cx));
+        cloned_nodes.extend(self.process_image_elements(cx));
+        cloned_nodes.extend(self.process_external_references(cx));
 
         let serialize_result = self
             .upcast::<Node>()
@@ -144,18 +155,411 @@ impl SVGSVGElement {
         Some(cloned_node)
     }
 
+    /// Inline elements referenced from this subtree via `url(#id)` in `mask`, `clip-path`,
+    /// `filter`, paint, and marker attributes but defined OUTSIDE it (the common pattern is a
+    /// single hidden `<svg><defs>` at document root holding every mask — Discord, GitHub, …).
+    /// The subtree is serialized as a standalone SVG document, so without this the rasterizer
+    /// can't resolve those ids and drops the reference entirely (an unmasked rect renders as a
+    /// square where the page expects a circle). Referenced elements are cloned in, recursively
+    /// (a cloned mask may itself reference a gradient), and removed after serialization.
+    fn process_external_references(&self, cx: &mut JSContext) -> Vec<DomRoot<Node>> {
+        let reference_attributes: Vec<LocalName> = [
+            "mask",
+            "clip-path",
+            "filter",
+            "fill",
+            "stroke",
+            "marker-start",
+            "marker-mid",
+            "marker-end",
+        ]
+        .iter()
+        .map(|name| LocalName::from(*name))
+        .collect();
+
+        let root_node = self.upcast::<Node>();
+        let document = root_node.owner_doc();
+        let mut cloned_nodes = Vec::new();
+        let mut processed_ids: HashSet<String> = HashSet::new();
+        // Worklist of subtrees still to scan: starts at this svg element, grows with each
+        // clone (whose content can reference further external definitions).
+        let mut pending: Vec<DomRoot<Node>> = vec![DomRoot::from_ref(root_node)];
+
+        while let Some(scan_root) = pending.pop() {
+            let mut referenced_ids: Vec<String> = Vec::new();
+            for node in scan_root.traverse_preorder(ShadowIncluding::No) {
+                let Some(element) = node.downcast::<Element>() else {
+                    continue;
+                };
+                for attr_name in &reference_attributes {
+                    if !element.has_attribute(attr_name) {
+                        continue;
+                    }
+                    let value = element.get_string_attribute(attr_name);
+                    if let Some(id) = parse_url_fragment_reference(&value.str()) {
+                        referenced_ids.push(id);
+                    }
+                }
+            }
+
+            for id in referenced_ids {
+                if !processed_ids.insert(id.clone()) {
+                    continue;
+                }
+                let Some(referenced_element) = document.GetElementById(cx, DOMString::from(id))
+                else {
+                    continue;
+                };
+                let referenced_node = referenced_element.upcast::<Node>();
+                // Already inside this svg element: it serializes with the subtree as-is.
+                if root_node.is_inclusive_ancestor_of(referenced_node) {
+                    continue;
+                }
+                // Same guard as `<use>`: only inline definitions that live in some svg.
+                let has_svg_ancestor = referenced_node
+                    .inclusive_ancestors(ShadowIncluding::No)
+                    .any(|ancestor| ancestor.is::<SVGSVGElement>());
+                if !has_svg_ancestor {
+                    continue;
+                }
+                let cloned_node = Node::clone(
+                    cx,
+                    referenced_node,
+                    None,
+                    CloneChildrenFlag::CloneChildren,
+                    None,
+                );
+                let _ = root_node.AppendChild(cx, &cloned_node);
+                pending.push(cloned_node.clone());
+                cloned_nodes.push(cloned_node);
+            }
+        }
+
+        cloned_nodes
+    }
+
+    /// Lower each `<foreignObject>` whose content is effectively a single `<img>` (optionally
+    /// inside wrapper elements — the universal avatar pattern) into an SVG `<image>` carrying
+    /// the foreignObject's geometry and effect attributes, with the img's already-decoded
+    /// raster embedded as a `data:image/png` href. The rasterizer skips `<foreignObject>`
+    /// entirely (it cannot lay out HTML), so without this every masked avatar simply
+    /// disappears. The `<image>` is inserted in the foreignObject's sibling position to
+    /// preserve SVG paint order, and removed after serialization.
+    fn process_foreign_objects(&self, cx: &mut JSContext) -> Vec<DomRoot<Node>> {
+        // Native foreignObject layout (LYK-136 stage 3) builds real boxes for the HTML
+        // content on top of the raster; lowering it into the raster too would double-paint.
+        // Instead, synthesize each foreignObject's standalone mask document (phase 2): the
+        // mask-image presentation hint composites the native content through the svg mask.
+        if servo_config::pref!(dom_svg_foreignobject_native) {
+            self.synthesize_native_foreign_object_masks(cx);
+            return Vec::new();
+        }
+        let root_node = self.upcast::<Node>();
+        let foreign_object_name = LocalName::from("foreignObject");
+        // Collect first: lowering mutates the tree mid-traversal otherwise.
+        let foreign_objects: Vec<DomRoot<Element>> = root_node
+            .traverse_preorder(ShadowIncluding::No)
+            .filter_map(DomRoot::downcast::<Element>)
+            .filter(|element| {
+                element.local_name() == &foreign_object_name && *element.namespace() == ns!(svg)
+            })
+            .collect();
+
+        let mut inserted_nodes = Vec::new();
+        for foreign_object in foreign_objects {
+            if let Some(image_node) = self.lower_foreign_object_to_image(cx, &foreign_object) {
+                inserted_nodes.push(image_node);
+            }
+        }
+        inserted_nodes
+    }
+
+    /// Re-embed each `<image>` element whose href points at a fetched external resource as a
+    /// sibling `<image>` with the decoded raster as a `data:` href. The rasterized document
+    /// cannot fetch (no network, no base URL), so external hrefs render nothing without this;
+    /// `SVGImageElement` fetches its href through the image cache and invalidates this svg's
+    /// cached serialization when pixels arrive. data: hrefs pass through untouched.
+    fn process_image_elements(&self, cx: &mut JSContext) -> Vec<DomRoot<Node>> {
+        use crate::dom::svg::svgimageelement::SVGImageElement;
+
+        let root_node = self.upcast::<Node>();
+        let image_elements: Vec<DomRoot<SVGImageElement>> = root_node
+            .traverse_preorder(ShadowIncluding::No)
+            .filter_map(DomRoot::downcast::<SVGImageElement>)
+            .collect();
+
+        let mut inserted_nodes = Vec::new();
+        for image_element in image_elements {
+            let element = image_element.upcast::<Element>();
+            let href = element.get_string_attribute(&local_name!("href"));
+            let effective_href = if href.str().is_empty() {
+                element
+                    .get_attribute_string_value_with_namespace(&ns!(xlink), &local_name!("href"))
+                    .unwrap_or_default()
+            } else {
+                href.to_string()
+            };
+            // Nothing to do: no href, or one the rasterizer can already consume.
+            if effective_href.is_empty() || effective_href.starts_with("data:") {
+                continue;
+            }
+            let Some(snapshot) = image_element.get_raster_image_data() else {
+                continue;
+            };
+            let Some(data_url) = png_data_url(snapshot) else {
+                continue;
+            };
+
+            let element_node = image_element.upcast::<Node>();
+            let document = element_node.owner_doc();
+            let replacement = Element::create(
+                cx,
+                QualName::new(None, ns!(svg), LocalName::from("image")),
+                None,
+                &document,
+                ElementCreator::ScriptCreated,
+                CustomElementCreationMode::Synchronous,
+                None,
+            );
+            for name in [
+                "x",
+                "y",
+                "width",
+                "height",
+                "mask",
+                "clip-path",
+                "filter",
+                "transform",
+                "opacity",
+                // Case-sensitive SVG name: must go through the namespace-explicit accessor —
+                // the namespace-less getters debug-assert lowercase ASCII.
+                "preserveAspectRatio",
+            ] {
+                let attr_name = LocalName::from(name);
+                let Some(value) =
+                    element.get_attribute_string_value_with_namespace(&ns!(), &attr_name)
+                else {
+                    continue;
+                };
+                replacement.set_attribute_from_parser(
+                    cx,
+                    QualName::new(None, ns!(), attr_name),
+                    DOMString::from(value),
+                    None,
+                );
+            }
+            replacement.set_attribute_from_parser(
+                cx,
+                QualName::new(None, ns!(), LocalName::from("href")),
+                DOMString::from(data_url),
+                None,
+            );
+
+            // Same paint slot; the original's unresolvable href renders nothing there.
+            let Some(parent) = element_node.GetParentNode() else {
+                continue;
+            };
+            let replacement_node = DomRoot::from_ref(replacement.upcast::<Node>());
+            if parent
+                .InsertBefore(cx, &replacement_node, Some(element_node))
+                .is_ok()
+            {
+                inserted_nodes.push(replacement_node);
+            }
+        }
+        inserted_nodes
+    }
+
+
+    /// Phase 2 of native foreignObject rendering (LYK-136): for each foreignObject child
+    /// carrying `mask="url(#id)"`, build a standalone SVG document — the referenced mask
+    /// plus a white rect covering the foreignObject's rect with that mask applied — and
+    /// store it on the element. The mask-image presentation hint feeds it to the CSS
+    /// mask-image pipeline (rasterize for_mask -> WR image-mask on the box), so the native
+    /// HTML content clips exactly like the rasterized path. Nested references inside the
+    /// mask (gradients) are not chased yet; objectBoundingBox masks are exact, and
+    /// userSpaceOnUse is approximated by a viewBox anchored at the foreignObject rect.
+    fn synthesize_native_foreign_object_masks(&self, cx: &mut JSContext) {
+        use crate::dom::svg::svgelement::SVGElement;
+
+        let root_node = self.upcast::<Node>();
+        let document = root_node.owner_doc();
+        let foreign_object_name = LocalName::from("foreignObject");
+        let foreign_objects: Vec<DomRoot<Element>> = root_node
+            .traverse_preorder(ShadowIncluding::No)
+            .filter_map(DomRoot::downcast::<Element>)
+            .filter(|element| {
+                element.local_name() == &foreign_object_name && *element.namespace() == ns!(svg)
+            })
+            .collect();
+
+        for foreign_object in foreign_objects {
+            let Some(svg_element) = foreign_object.downcast::<SVGElement>() else {
+                continue;
+            };
+            let mask_document_url = (|| -> Option<ServoUrl> {
+                let mask_value = foreign_object
+                    .get_attribute_string_value_with_namespace(&ns!(), &local_name!("mask"))?;
+                let id = parse_url_fragment_reference(&mask_value)?;
+                let referenced = document.GetElementById(cx, DOMString::from(id.clone()))?;
+                let referenced_node = referenced.upcast::<Node>();
+                referenced_node
+                    .inclusive_ancestors(ShadowIncluding::No)
+                    .any(|ancestor| ancestor.is::<SVGSVGElement>())
+                    .then_some(())?;
+                let mask_xml: String = referenced_node
+                    .xml_serialize(TraversalScope::IncludeNode)
+                    .ok()?
+                    .into();
+                let attr = |name: &LocalName| {
+                    foreign_object
+                        .get_attribute_string_value_with_namespace(&ns!(), name)
+                        .unwrap_or_default()
+                };
+                let x = attr(&local_name!("x"));
+                let y = attr(&local_name!("y"));
+                let width = attr(&local_name!("width"));
+                let height = attr(&local_name!("height"));
+                if width.is_empty() || height.is_empty() {
+                    return None;
+                }
+                let x = if x.is_empty() { "0".to_owned() } else { x };
+                let y = if y.is_empty() { "0".to_owned() } else { y };
+                let doc = format!(
+                    concat!(
+                        "<svg xmlns=\"http://www.w3.org/2000/svg\" ",
+                        "xmlns:xlink=\"http://www.w3.org/1999/xlink\" ",
+                        "width=\"{w}\" height=\"{h}\" viewBox=\"{x} {y} {w} {h}\">{mask}",
+                        "<rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" ",
+                        "fill=\"white\" mask=\"url(#{id})\"/></svg>"
+                    ),
+                    w = width,
+                    h = height,
+                    x = x,
+                    y = y,
+                    mask = mask_xml,
+                    id = id,
+                );
+                let data_url = format!(
+                    "data:image/svg+xml;base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(doc)
+                );
+                ServoUrl::parse(&data_url).ok()
+            })();
+            svg_element.set_native_mask_document(mask_document_url);
+        }
+    }
+
+    fn lower_foreign_object_to_image(
+        &self,
+        cx: &mut JSContext,
+        foreign_object: &Element,
+    ) -> Option<DomRoot<Node>> {
+        let foreign_object_node = foreign_object.upcast::<Node>();
+
+        // The content must be effectively a single image: exactly one <img> among the
+        // descendants and no non-whitespace text. Wrapper elements (divs) are tolerated;
+        // any styling they carry is beyond what this lowering can represent.
+        let mut image_element: Option<DomRoot<HTMLImageElement>> = None;
+        for node in foreign_object_node
+            .traverse_preorder(ShadowIncluding::No)
+            .skip(1)
+        {
+            if let Some(image) = node.downcast::<HTMLImageElement>() {
+                if image_element.is_some() {
+                    return None;
+                }
+                image_element = Some(DomRoot::from_ref(image));
+            } else if node.is::<Text>() &&
+                node.GetTextContent()
+                    .is_some_and(|text| !text.str().trim().is_empty())
+            {
+                return None;
+            }
+        }
+        let image_element = image_element?;
+
+        // Encode the img's decoded raster as a data: URI the standalone rasterized document
+        // can consume. Not loaded yet -> skip; the load-completion hook on HTMLImageElement
+        // invalidates this svg's cached serialization, so we re-run once pixels exist.
+        let data_url = png_data_url(image_element.get_raster_image_data()?)?;
+
+        let document = foreign_object_node.owner_doc();
+        let image_svg_element = Element::create(
+            cx,
+            QualName::new(None, ns!(svg), LocalName::from("image")),
+            None,
+            &document,
+            ElementCreator::ScriptCreated,
+            CustomElementCreationMode::Synchronous,
+            None,
+        );
+        // Carry the foreignObject's geometry and effects over to the replacement <image>.
+        // set_attribute_from_parser: the element is freshly created (no collisions) and SVG
+        // attribute names are case-sensitive (`preserveAspectRatio`), which the lowercase-only
+        // `set_attribute` path asserts against.
+        for name in [
+            "x",
+            "y",
+            "width",
+            "height",
+            "mask",
+            "clip-path",
+            "filter",
+            "transform",
+            "opacity",
+        ] {
+            let attr_name = LocalName::from(name);
+            if foreign_object.has_attribute(&attr_name) {
+                let value = foreign_object.get_string_attribute(&attr_name);
+                image_svg_element.set_attribute_from_parser(
+                    cx,
+                    QualName::new(None, ns!(), attr_name),
+                    value,
+                    None,
+                );
+            }
+        }
+        // An HTML <img> with explicit dimensions fills its box; SVG <image> letterboxes by
+        // default. "none" matches the HTML behavior the foreignObject content actually had.
+        image_svg_element.set_attribute_from_parser(
+            cx,
+            QualName::new(None, ns!(), LocalName::from("preserveAspectRatio")),
+            DOMString::from("none"),
+            None,
+        );
+        image_svg_element.set_attribute_from_parser(
+            cx,
+            QualName::new(None, ns!(), LocalName::from("href")),
+            DOMString::from(data_url),
+            None,
+        );
+
+        // Insert in the foreignObject's paint-order slot (the foreignObject itself renders
+        // nothing in the rasterizer, so no double paint).
+        let parent = foreign_object_node.GetParentNode()?;
+        let image_node = DomRoot::from_ref(image_svg_element.upcast::<Node>());
+        parent
+            .InsertBefore(cx, &image_node, Some(foreign_object_node))
+            .ok()?;
+        Some(image_node)
+    }
+
     fn cleanup_cloned_nodes(&self, cx: &mut JSContext, cloned_nodes: &[DomRoot<Node>]) {
         if cloned_nodes.is_empty() {
             return;
         }
-        let root_node = self.upcast::<Node>();
 
+        // Nodes from the reference pass hang off this svg root; lowered foreignObject
+        // images sit at arbitrary depths — remove each from its actual parent.
         for cloned_node in cloned_nodes {
-            let _ = root_node.RemoveChild(cx, cloned_node);
+            if let Some(parent) = cloned_node.GetParentNode() {
+                let _ = parent.RemoveChild(cx, cloned_node);
+            }
         }
     }
 
-    fn invalidate_cached_serialized_subtree_and_rasterization_result(&self) {
+    pub(crate) fn invalidate_cached_serialized_subtree_and_rasterization_result(&self) {
         let owner_window = self.owner_window();
         owner_window
             .image_cache()
@@ -172,6 +576,37 @@ impl SVGSVGElement {
         *self.cached_serialized_data_url.borrow_mut() = None;
         self.upcast::<Node>().dirty(NodeDamage::Other);
     }
+}
+
+/// Encode a decoded raster as a `data:image/png;base64,…` URI (the canvas-toDataURL
+/// encoding path). The standalone rasterized SVG document can consume data: URIs but
+/// cannot fetch anything else.
+fn png_data_url(mut snapshot: pixels::Snapshot) -> Option<String> {
+    let mut data_url = String::from("data:image/png;base64,");
+    let mut encoder = base64::write::EncoderStringWriter::from_consumer(
+        &mut data_url,
+        &base64::engine::general_purpose::STANDARD,
+    );
+    snapshot
+        .encode_for_mime_type(&EncodedImageType::Png, None, &mut encoder)
+        .ok()?;
+    encoder.into_inner();
+    Some(data_url)
+}
+
+/// Extract `id` from a `url(#id)` attribute value (quotes and whitespace tolerated).
+/// Returns `None` for non-fragment urls and the `none` keyword.
+fn parse_url_fragment_reference(value: &str) -> Option<String> {
+    let inner = value
+        .trim()
+        .strip_prefix("url(")?
+        .strip_suffix(")")?
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'');
+    inner
+        .strip_prefix('#')
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
 }
 
 impl<'dom> LayoutDom<'dom, SVGSVGElement> {

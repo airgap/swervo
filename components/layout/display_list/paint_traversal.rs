@@ -468,6 +468,13 @@ impl<'a, Handler: PaintTraversalHandler> PaintTraversal<'a, Handler> {
                     self.handler.visit_iframe(state, iframe_fragment);
                 },
                 Fragment::Box(box_fragment) => {
+                    // A child that establishes a stacking context or container (e.g. masked
+                    // native foreignObject content, LYK-136) is painted when the stacking
+                    // context tree visits it — the same deferral the block-level descendants
+                    // phase applies. Painting it here too would double-paint it, unmasked.
+                    if box_fragment.stacking_context_type().is_some() {
+                        continue;
+                    }
                     self.traverse_stacking_container(
                         &state.without_text_decorations(),
                         &box_fragment.with_style(),
