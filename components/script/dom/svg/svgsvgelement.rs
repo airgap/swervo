@@ -246,6 +246,11 @@ impl SVGSVGElement {
     /// disappears. The `<image>` is inserted in the foreignObject's sibling position to
     /// preserve SVG paint order, and removed after serialization.
     fn process_foreign_objects(&self, cx: &mut JSContext) -> Vec<DomRoot<Node>> {
+        // Native foreignObject layout (LYK-136 stage 3) builds real boxes for the HTML
+        // content on top of the raster; lowering it into the raster too would double-paint.
+        if servo_config::pref!(dom_svg_foreignobject_native) {
+            return Vec::new();
+        }
         let root_node = self.upcast::<Node>();
         let foreign_object_name = LocalName::from("foreignObject");
         // Collect first: lowering mutates the tree mid-traversal otherwise.

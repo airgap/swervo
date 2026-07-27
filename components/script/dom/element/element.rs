@@ -1187,6 +1187,26 @@ impl<'dom> LayoutDom<'dom, Element> {
                 .push(declaration, Importance::Normal);
         };
 
+        // Native <foreignObject> layout (LYK-136 stage 3): when the pref is on, the replaced
+        // <svg> builds a widget IFC over its children — foreignObject becomes a block and
+        // every other svg child collapses (they render via the raster, never as boxes).
+        // Done as presentation hints rather than UA-sheet rules because camelCase SVG type
+        // selectors don't match through the stylesheet path (selector names are lowercased
+        // at parse; svg local names are matched case-sensitively). Author styles still win.
+        if *self.namespace() == ns!(svg) &&
+            servo_config::pref!(dom_svg_foreignobject_native)
+        {
+            if *self.local_name() == LocalName::from("foreignObject") {
+                push(PropertyDeclaration::Display(
+                    style::values::specified::Display::Block,
+                ));
+            } else if *self.local_name() != local_name!("svg") {
+                push(PropertyDeclaration::Display(
+                    style::values::specified::Display::None,
+                ));
+            }
+        }
+
         // TODO(xiaochengh): This is probably not enough. When the root element doesn't have a `lang`,
         // we should check the browser settings and system locale.
         if let Some(lang) = self.get_lang_attr_val_for_layout() {

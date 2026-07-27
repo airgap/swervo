@@ -1,4 +1,5 @@
 @namespace url(http://www.w3.org/1999/xhtml);
+@namespace svg url(http://www.w3.org/2000/svg);
 
 /* https://html.spec.whatwg.org/multipage#hidden-elements */
 area, base, basefont, datalist, head, link, meta, noembed,
@@ -421,3 +422,12 @@ marquee {
   vertical-align: text-bottom;
   white-space: nowrap;
 }
+
+/* Native <foreignObject> layout (pref dom_svg_foreignobject_native, LYK-136): when the
+ * replaced <svg> builds a widget IFC over its children, only foreignObject subtrees may
+ * contribute boxes — shape/def elements collapse. Inert without the pref (a replaced svg
+ * never descends). foreignObject geometry attributes are SVG2 presentation attributes. */
+*|foreignObject {
+  display: block;
+}
+
