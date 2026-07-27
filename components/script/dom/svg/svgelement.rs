@@ -8,7 +8,9 @@ use js::context::JSContext;
 use js::rust::HandleObject;
 use script_bindings::codegen::GenericBindings::ElementBinding::ScrollLogicalPosition;
 use script_bindings::codegen::GenericBindings::WindowBinding::ScrollBehavior;
+use script_bindings::cell::DomRefCell;
 use script_bindings::str::DOMString;
+use servo_url::ServoUrl;
 use stylo_dom::ElementState;
 
 use crate::dom::bindings::codegen::Bindings::HTMLOrSVGElementBinding::FocusOptions;
@@ -30,6 +32,12 @@ use crate::dom::scrolling_box::{ScrollAxisState, ScrollRequirement};
 pub(crate) struct SVGElement {
     element: Element,
     style_decl: MutNullableDom<CSSStyleDeclaration>,
+    /// For a `<foreignObject>` rendered natively (dom_svg_foreignobject_native): the
+    /// data: URL of the standalone mask document synthesized from its `mask` attribute,
+    /// consumed as a `mask-image` presentation hint so the native content composites
+    /// through the svg mask via the CSS mask-image path (LYK-136 stage 3 phase 2).
+    #[no_trace]
+    native_mask_document: DomRefCell<Option<ServoUrl>>,
 }
 
 impl SVGElement {
@@ -50,6 +58,7 @@ impl SVGElement {
         SVGElement {
             element: Element::new_inherited_with_state(state, tag_name, ns!(svg), prefix, document),
             style_decl: Default::default(),
+            native_mask_document: DomRefCell::new(None),
         }
     }
 
@@ -72,6 +81,17 @@ impl SVGElement {
         self.upcast::<Element>()
     }
 
+    /// Store (or clear) the synthesized mask document for a natively-rendered
+    /// foreignObject; dirties the node so the mask-image presentation hint re-cascades.
+    pub(crate) fn set_native_mask_document(&self, url: Option<ServoUrl>) {
+        use crate::dom::node::NodeDamage;
+        if *self.native_mask_document.borrow() == url {
+            return;
+        }
+        *self.native_mask_document.borrow_mut() = url;
+        self.upcast::<Node>().dirty(NodeDamage::Other);
+    }
+
     /// An inline svg subtree renders through a cached serialization on its root
     /// `SVGSVGElement`; that root only observes its OWN attribute/children mutations,
     /// so a change deep in the subtree (a `<path>`'s `d`, a `<circle>`'s fill) would
@@ -89,6 +109,14 @@ impl SVGElement {
         {
             svg_root.invalidate_cached_serialized_subtree_and_rasterization_result();
         }
+    }
+}
+
+impl<'dom> crate::dom::bindings::root::LayoutDom<'dom, SVGElement> {
+    /// Layout-side read of the synthesized foreignObject mask document (LYK-136 phase 2).
+    #[expect(unsafe_code)]
+    pub(crate) fn native_mask_document(self) -> Option<ServoUrl> {
+        unsafe { self.unsafe_get().native_mask_document.borrow_for_layout().clone() }
     }
 }
 

@@ -510,6 +510,18 @@ impl BoxFragment {
             .contains(FragmentFlags::IS_FLEX_OR_GRID_ITEM)
     }
 
+    /// Whether any `mask-image` layer is set. Masked boxes paint as stacking containers:
+    /// the mask must clip the box's entire subtree, and WebRender only honors an
+    /// image-mask clip on a stacking-context surface (LYK-136).
+    pub(crate) fn has_mask_image(&self) -> bool {
+        self.style()
+            .get_svg()
+            .mask_image
+            .0
+            .iter()
+            .any(|image| !matches!(image, style::values::computed::Image::None))
+    }
+
     /// Whether or this box is for replaced content.
     pub(crate) fn is_replaced(&self) -> bool {
         self.base.flags.contains(FragmentFlags::IS_REPLACED)

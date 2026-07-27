@@ -248,7 +248,10 @@ impl SVGSVGElement {
     fn process_foreign_objects(&self, cx: &mut JSContext) -> Vec<DomRoot<Node>> {
         // Native foreignObject layout (LYK-136 stage 3) builds real boxes for the HTML
         // content on top of the raster; lowering it into the raster too would double-paint.
+        // Instead, synthesize each foreignObject's standalone mask document (phase 2): the
+        // mask-image presentation hint composites the native content through the svg mask.
         if servo_config::pref!(dom_svg_foreignobject_native) {
+            self.synthesize_native_foreign_object_masks(cx);
             return Vec::new();
         }
         let root_node = self.upcast::<Node>();
@@ -365,6 +368,86 @@ impl SVGSVGElement {
             }
         }
         inserted_nodes
+    }
+
+
+    /// Phase 2 of native foreignObject rendering (LYK-136): for each foreignObject child
+    /// carrying `mask="url(#id)"`, build a standalone SVG document — the referenced mask
+    /// plus a white rect covering the foreignObject's rect with that mask applied — and
+    /// store it on the element. The mask-image presentation hint feeds it to the CSS
+    /// mask-image pipeline (rasterize for_mask -> WR image-mask on the box), so the native
+    /// HTML content clips exactly like the rasterized path. Nested references inside the
+    /// mask (gradients) are not chased yet; objectBoundingBox masks are exact, and
+    /// userSpaceOnUse is approximated by a viewBox anchored at the foreignObject rect.
+    fn synthesize_native_foreign_object_masks(&self, cx: &mut JSContext) {
+        use crate::dom::svg::svgelement::SVGElement;
+
+        let root_node = self.upcast::<Node>();
+        let document = root_node.owner_doc();
+        let foreign_object_name = LocalName::from("foreignObject");
+        let foreign_objects: Vec<DomRoot<Element>> = root_node
+            .traverse_preorder(ShadowIncluding::No)
+            .filter_map(DomRoot::downcast::<Element>)
+            .filter(|element| {
+                element.local_name() == &foreign_object_name && *element.namespace() == ns!(svg)
+            })
+            .collect();
+
+        for foreign_object in foreign_objects {
+            let Some(svg_element) = foreign_object.downcast::<SVGElement>() else {
+                continue;
+            };
+            let mask_document_url = (|| -> Option<ServoUrl> {
+                let mask_value = foreign_object
+                    .get_attribute_string_value_with_namespace(&ns!(), &local_name!("mask"))?;
+                let id = parse_url_fragment_reference(&mask_value)?;
+                let referenced = document.GetElementById(cx, DOMString::from(id.clone()))?;
+                let referenced_node = referenced.upcast::<Node>();
+                referenced_node
+                    .inclusive_ancestors(ShadowIncluding::No)
+                    .any(|ancestor| ancestor.is::<SVGSVGElement>())
+                    .then_some(())?;
+                let mask_xml: String = referenced_node
+                    .xml_serialize(TraversalScope::IncludeNode)
+                    .ok()?
+                    .into();
+                let attr = |name: &LocalName| {
+                    foreign_object
+                        .get_attribute_string_value_with_namespace(&ns!(), name)
+                        .unwrap_or_default()
+                };
+                let x = attr(&local_name!("x"));
+                let y = attr(&local_name!("y"));
+                let width = attr(&local_name!("width"));
+                let height = attr(&local_name!("height"));
+                if width.is_empty() || height.is_empty() {
+                    return None;
+                }
+                let x = if x.is_empty() { "0".to_owned() } else { x };
+                let y = if y.is_empty() { "0".to_owned() } else { y };
+                let doc = format!(
+                    concat!(
+                        "<svg xmlns=\"http://www.w3.org/2000/svg\" ",
+                        "xmlns:xlink=\"http://www.w3.org/1999/xlink\" ",
+                        "width=\"{w}\" height=\"{h}\" viewBox=\"{x} {y} {w} {h}\">{mask}",
+                        "<rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" ",
+                        "fill=\"white\" mask=\"url(#{id})\"/></svg>"
+                    ),
+                    w = width,
+                    h = height,
+                    x = x,
+                    y = y,
+                    mask = mask_xml,
+                    id = id,
+                );
+                let data_url = format!(
+                    "data:image/svg+xml;base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(doc)
+                );
+                ServoUrl::parse(&data_url).ok()
+            })();
+            svg_element.set_native_mask_document(mask_document_url);
+        }
     }
 
     fn lower_foreign_object_to_image(

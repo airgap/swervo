@@ -1200,6 +1200,19 @@ impl<'dom> LayoutDom<'dom, Element> {
                 push(PropertyDeclaration::Display(
                     style::values::specified::Display::Block,
                 ));
+                // Phase 2: composite the native content through the svg mask — the
+                // serializer synthesized a standalone mask document; feed it to the
+                // CSS mask-image pipeline (rasterize for_mask -> WR image-mask).
+                if let Some(url) = self
+                    .downcast::<crate::dom::svg::svgelement::SVGElement>()
+                    .and_then(|svg| svg.native_mask_document())
+                {
+                    push(PropertyDeclaration::MaskImage(
+                        style::properties::longhands::mask_image::SpecifiedValue(
+                            vec![specified::Image::for_cascade(url.into_url().into())].into(),
+                        ),
+                    ));
+                }
             } else if *self.local_name() != local_name!("svg") {
                 push(PropertyDeclaration::Display(
                     style::values::specified::Display::None,
