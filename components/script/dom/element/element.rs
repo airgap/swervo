@@ -1200,6 +1200,14 @@ impl<'dom> LayoutDom<'dom, Element> {
                 push(PropertyDeclaration::Display(
                     style::values::specified::Display::Block,
                 ));
+                // foreignObject establishes a containing block (an svg viewport); expressing
+                // it as position:relative keeps absolutely-positioned content (Discord's
+                // avatarStack) hoisting no further than the foreignObject box. Hoisting past
+                // it into the replaced svg's widget drops the boxes un-laid-out — the SC tree
+                // then found hoisted boxes with no fragment and the renderer panicked.
+                push(PropertyDeclaration::Position(
+                    style::values::specified::PositionProperty::Relative,
+                ));
                 // Phase 2: composite the native content through the svg mask — the
                 // serializer synthesized a standalone mask document; feed it to the
                 // CSS mask-image pipeline (rasterize for_mask -> WR image-mask).

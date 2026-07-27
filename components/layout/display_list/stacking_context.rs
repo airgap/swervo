@@ -524,7 +524,15 @@ impl Fragment {
                 let shared_fragment = fragment.borrow();
                 let fragment_ref = match shared_fragment.fragment.as_ref() {
                     Some(fragment_ref) => fragment_ref,
-                    None => unreachable!("Found hoisted box with missing fragment."),
+                    None => {
+                        // A hoisted absolutely-positioned box whose fragment was never laid
+                        // out (e.g. hoisted through a replaced element's widget, where the
+                        // positioning context is dropped). Skipping it renders a gap;
+                        // panicking here took down the whole renderer (Discord's avatar
+                        // foreignObject content, LYK-136).
+                        log::warn!("Skipping hoisted box with missing fragment.");
+                        return;
+                    },
                 };
 
                 fragment_ref.build_stacking_context_tree(
