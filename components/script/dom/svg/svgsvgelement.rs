@@ -130,12 +130,28 @@ impl SVGSVGElement {
         use_element: &Element,
     ) -> Option<DomRoot<Node>> {
         let href = use_element.get_string_attribute(&local_name!("href"));
-        let href_view = href.str();
-        let id_str = href_view.strip_prefix("#")?;
+        let effective_href = if href.str().is_empty() {
+            use_element
+                .get_attribute_string_value_with_namespace(&ns!(xlink), &local_name!("href"))
+                .unwrap_or_default()
+        } else {
+            href.to_string()
+        };
+        let id_str = effective_href.strip_prefix('#')?;
+        if id_str.is_empty() {
+            return None;
+        }
         let id = DOMString::from(id_str);
         let document = self.upcast::<Node>().owner_doc();
         let referenced_element = document.GetElementById(cx, id)?;
         let referenced_node = referenced_element.upcast::<Node>();
+        let root_node = self.upcast::<Node>();
+        // Already inside this svg: it serializes with the subtree and the rasterizer resolves
+        // the reference itself. Cloning it in anyway PAINTED it — a bare <path> appended at
+        // the root is normal content, not a definition (dark blob behind every guild icon).
+        if root_node.is_inclusive_ancestor_of(referenced_node) {
+            return None;
+        }
         let has_svg_ancestor = referenced_node
             .inclusive_ancestors(ShadowIncluding::No)
             .any(|ancestor| ancestor.is::<SVGSVGElement>());
@@ -149,10 +165,21 @@ impl SVGSVGElement {
             CloneChildrenFlag::CloneChildren,
             None,
         );
-        let root_node = self.upcast::<Node>();
-        let _ = root_node.AppendChild(cx, &cloned_node);
+        // Park the clone inside a <defs> wrapper so it is resolvable by id but never paints.
+        let defs = Element::create(
+            cx,
+            QualName::new(None, ns!(svg), LocalName::from("defs")),
+            None,
+            &document,
+            ElementCreator::ScriptCreated,
+            CustomElementCreationMode::Synchronous,
+            None,
+        );
+        let defs_node = DomRoot::from_ref(defs.upcast::<Node>());
+        let _ = defs_node.AppendChild(cx, &cloned_node);
+        let _ = root_node.AppendChild(cx, &defs_node);
 
-        Some(cloned_node)
+        Some(defs_node)
     }
 
     /// Inline elements referenced from this subtree via `url(#id)` in `mask`, `clip-path`,
@@ -411,6 +438,16 @@ impl SVGSVGElement {
                     .xml_serialize(TraversalScope::IncludeNode)
                     .ok()?
                     .into();
+                // Inline the mask's own reference closure (its <use href="#id"> targets,
+                // gradients, nested masks, …) — they live outside the mask element (the
+                // guild-icon pattern keeps the squircle path in a sibling <defs>) and a
+                // dangling reference rasterizes the mask all-black: content vanishes.
+                let closure_xml = serialize_reference_closure(cx, referenced_node);
+                let defs_xml = if closure_xml.is_empty() {
+                    String::new()
+                } else {
+                    format!("<defs>{}</defs>", closure_xml)
+                };
                 let attr = |name: &LocalName| {
                     foreign_object
                         .get_attribute_string_value_with_namespace(&ns!(), name)
@@ -429,7 +466,7 @@ impl SVGSVGElement {
                     concat!(
                         "<svg xmlns=\"http://www.w3.org/2000/svg\" ",
                         "xmlns:xlink=\"http://www.w3.org/1999/xlink\" ",
-                        "width=\"{w}\" height=\"{h}\" viewBox=\"{x} {y} {w} {h}\">{mask}",
+                        "width=\"{w}\" height=\"{h}\" viewBox=\"{x} {y} {w} {h}\">{mask}{defs}",
                         "<rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" ",
                         "fill=\"white\" mask=\"url(#{id})\"/></svg>"
                     ),
@@ -438,6 +475,7 @@ impl SVGSVGElement {
                     x = x,
                     y = y,
                     mask = mask_xml,
+                    defs = defs_xml,
                     id = id,
                 );
                 let data_url = format!(
@@ -592,6 +630,88 @@ fn png_data_url(mut snapshot: pixels::Snapshot) -> Option<String> {
         .ok()?;
     encoder.into_inner();
     Some(data_url)
+}
+
+/// Serialize the transitive same-document reference closure of `subtree` — every element
+/// reached through `url(#id)` paint/effect attributes or `href="#id"`/`xlink:href="#id"`
+/// (`<use>`) from inside `subtree`, excluding elements already within it. The synthesized
+/// standalone mask document embeds the result inside `<defs>` (referenced-only definitions
+/// must not paint on their own). Cycles and duplicates are cut by the id set; targets are
+/// required to live inside some `<svg>`, mirroring `process_external_references`.
+fn serialize_reference_closure(cx: &mut JSContext, subtree: &Node) -> String {
+    let reference_attributes: Vec<LocalName> = [
+        "mask",
+        "clip-path",
+        "filter",
+        "fill",
+        "stroke",
+        "marker-start",
+        "marker-mid",
+        "marker-end",
+    ]
+    .iter()
+    .map(|name| LocalName::from(*name))
+    .collect();
+
+    let document = subtree.owner_doc();
+    let mut processed_ids: HashSet<String> = HashSet::new();
+    let mut serialized = String::new();
+    let mut pending: Vec<DomRoot<Node>> = vec![DomRoot::from_ref(subtree)];
+
+    while let Some(scan_root) = pending.pop() {
+        let mut referenced_ids: Vec<String> = Vec::new();
+        for node in scan_root.traverse_preorder(ShadowIncluding::No) {
+            let Some(element) = node.downcast::<Element>() else {
+                continue;
+            };
+            for attr_name in &reference_attributes {
+                if !element.has_attribute(attr_name) {
+                    continue;
+                }
+                let value = element.get_string_attribute(attr_name);
+                if let Some(id) = parse_url_fragment_reference(&value.str()) {
+                    referenced_ids.push(id);
+                }
+            }
+            let href = element.get_string_attribute(&local_name!("href"));
+            let effective_href = if href.str().is_empty() {
+                element
+                    .get_attribute_string_value_with_namespace(&ns!(xlink), &local_name!("href"))
+                    .unwrap_or_default()
+            } else {
+                href.to_string()
+            };
+            if let Some(id) = effective_href.strip_prefix('#') {
+                if !id.is_empty() {
+                    referenced_ids.push(id.to_owned());
+                }
+            }
+        }
+
+        for id in referenced_ids {
+            if !processed_ids.insert(id.clone()) {
+                continue;
+            }
+            let Some(referenced_element) = document.GetElementById(cx, DOMString::from(id)) else {
+                continue;
+            };
+            let referenced_node = referenced_element.upcast::<Node>();
+            if subtree.is_inclusive_ancestor_of(referenced_node) {
+                continue;
+            }
+            let has_svg_ancestor = referenced_node
+                .inclusive_ancestors(ShadowIncluding::No)
+                .any(|ancestor| ancestor.is::<SVGSVGElement>());
+            if !has_svg_ancestor {
+                continue;
+            }
+            if let Ok(xml) = referenced_node.xml_serialize(TraversalScope::IncludeNode) {
+                serialized.push_str(&String::from(xml));
+            }
+            pending.push(DomRoot::from_ref(referenced_node));
+        }
+    }
+    serialized
 }
 
 /// Extract `id` from a `url(#id)` attribute value (quotes and whitespace tolerated).

@@ -1208,6 +1208,93 @@ impl<'dom> LayoutDom<'dom, Element> {
                 push(PropertyDeclaration::Position(
                     style::values::specified::PositionProperty::Relative,
                 ));
+                // Geometry: x/y/width/height are user units in the enclosing svg viewport's
+                // coordinate system. The widget BFC lays this block out inside the replaced
+                // svg's content box, so express the fo rect as width/height plus top/left
+                // margins, scaled by the viewBox->viewport ratio when the svg carries numeric
+                // width/height attributes (a CSS-sized svg falls back to scale 1, matching
+                // the 1:1 common case). Without this the block fills the svg's content box at
+                // its origin — every viewBox-offset icon rendered shifted with its mask
+                // stretched to the wrong rect. Percentage/unparseable geometry is left alone.
+                fn parse_svg_length(value: &str) -> Option<f32> {
+                    let value = value.trim();
+                    let value = value.strip_suffix("px").unwrap_or(value).trim();
+                    let parsed: f32 = value.parse().ok()?;
+                    parsed.is_finite().then_some(parsed)
+                }
+                fn parse_view_box(value: &str) -> Option<[f32; 4]> {
+                    let mut numbers = value
+                        .split(|c: char| c.is_ascii_whitespace() || c == ',')
+                        .filter(|part| !part.is_empty())
+                        .map(str::parse::<f32>);
+                    let mut view_box = [0.0f32; 4];
+                    for slot in &mut view_box {
+                        *slot = numbers.next()?.ok()?;
+                        if !slot.is_finite() {
+                            return None;
+                        }
+                    }
+                    numbers.next().is_none().then_some(view_box)
+                }
+                let attr_num = |element: LayoutDom<Element>, name: &str| -> Option<f32> {
+                    element
+                        .get_attr_val_for_layout(&ns!(), &LocalName::from(name))
+                        .and_then(parse_svg_length)
+                };
+                let mut svg_ancestor = None;
+                let mut current = self.upcast::<Node>().composed_parent_node_ref();
+                while let Some(node) = current {
+                    if let Some(element) = node.downcast::<Element>() {
+                        if *element.namespace() == ns!(svg) &&
+                            *element.local_name() == local_name!("svg")
+                        {
+                            svg_ancestor = Some(element);
+                            break;
+                        }
+                    }
+                    current = node.composed_parent_node_ref();
+                }
+                if let (Some(svg), Some(fo_width), Some(fo_height)) = (
+                    svg_ancestor,
+                    attr_num(self, "width"),
+                    attr_num(self, "height"),
+                ) {
+                    let view_box = svg
+                        .get_attr_val_for_layout(&ns!(), &LocalName::from("viewBox"))
+                        .and_then(parse_view_box);
+                    let [min_x, min_y, vb_width, vb_height] =
+                        view_box.unwrap_or([0.0, 0.0, 0.0, 0.0]);
+                    let scale = |viewport: Option<f32>, view_box_extent: f32| -> f32 {
+                        match viewport {
+                            Some(v) if view_box_extent > 0.0 => v / view_box_extent,
+                            _ => 1.0,
+                        }
+                    };
+                    let scale_x = scale(attr_num(svg, "width"), vb_width);
+                    let scale_y = scale(attr_num(svg, "height"), vb_height);
+                    let fo_x = attr_num(self, "x").unwrap_or(0.0);
+                    let fo_y = attr_num(self, "y").unwrap_or(0.0);
+                    let px_size = |v: f32| {
+                        specified::Size::LengthPercentage(NonNegative(
+                            specified::LengthPercentage::Length(specified::NoCalcLength::from_px(
+                                v.max(0.0),
+                            )),
+                        ))
+                    };
+                    let px_margin = |v: f32| {
+                        specified::Margin::LengthPercentage(specified::LengthPercentage::Length(
+                            specified::NoCalcLength::from_px(v),
+                        ))
+                    };
+                    push(PropertyDeclaration::Width(px_size(fo_width * scale_x)));
+                    push(PropertyDeclaration::Height(px_size(fo_height * scale_y)));
+                    push(PropertyDeclaration::MarginLeft(px_margin(
+                        (fo_x - min_x) * scale_x,
+                    )));
+                    push(PropertyDeclaration::MarginTop(px_margin(
+                        (fo_y - min_y) * scale_y,
+                    )));
+                }
                 // Phase 2: composite the native content through the svg mask — the
                 // serializer synthesized a standalone mask document; feed it to the
                 // CSS mask-image pipeline (rasterize for_mask -> WR image-mask).
