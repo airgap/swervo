@@ -350,6 +350,15 @@ impl PlatformFontMethods for PlatformFont {
             }
         }
 
+        // Chrome (Skia's `SimpleFontData::PlatformInit`) rounds ascent, descent and line gap to
+        // whole pixels individually, and `line-height: normal` and baselines follow from those.
+        // Unrounded, every normal-height line drifted a fraction of a pixel from Chrome's
+        // (13.33px Liberation Sans: 15.33px lines here, 15px there), compounding down a page.
+        let line_gap = line_height - max_ascent - max_descent;
+        max_ascent = max_ascent.round();
+        max_descent = max_descent.round();
+        line_height = max_ascent + max_descent + line_gap.round();
+
         // 'leading' is supposed to be the vertical distance between two baselines,
         // reflected by the height attribute in freetype. On OS X (w/ CTFont),
         // leading represents the distance between the bottom of a line descent to
