@@ -1537,6 +1537,15 @@ impl DocumentEventHandler {
             return flags.into();
         }
 
+        // <https://w3c.github.io/clipboard-apis/#clipboard-actions>: the platform's cut, copy and
+        // paste shortcuts run the clipboard actions, firing cut/copy/paste at the focus, whose
+        // default action edits text controls.
+        if keyboard_event.event.state == KeyState::Down &&
+            let Some(action) = clipboard_action_for_shortcut(&keyboard_event.event)
+        {
+            return self.handle_editing_action(cx, None, action);
+        }
+
         // https://w3c.github.io/uievents/#keys-cancelable-keys
         // it MUST prevent the respective beforeinput and input
         // (and keypress if supported) events from being generated
@@ -3023,5 +3032,29 @@ impl Element {
         shadow_root
             .Host()
             .inclusive_ancestor_element_in_non_ua_shadow_root()
+    }
+}
+
+/// The clipboard action of a cut, copy or paste shortcut: Ctrl (Command on macOS) with X, C or V.
+fn clipboard_action_for_shortcut(
+    event: &keyboard_types::KeyboardEvent,
+) -> Option<EditingActionEvent> {
+    let command = if cfg!(target_os = "macos") {
+        keyboard_types::Modifiers::META
+    } else {
+        keyboard_types::Modifiers::CONTROL
+    };
+    if !event.modifiers.contains(command) || event.modifiers.contains(keyboard_types::Modifiers::ALT)
+    {
+        return None;
+    }
+    let Key::Character(character) = &event.key else {
+        return None;
+    };
+    match character.to_ascii_lowercase().as_str() {
+        "x" => Some(EditingActionEvent::Cut),
+        "c" => Some(EditingActionEvent::Copy),
+        "v" => Some(EditingActionEvent::Paste),
+        _ => None,
     }
 }
