@@ -408,6 +408,11 @@ pub(crate) struct Window {
         HashMapTracedValues<PendingImageRasterizationKey, Vec<Dom<Node>>, FxBuildHasher>,
     >,
 
+    /// Inline `<svg>`s layout asked to have serialized. Serializing creates DOM nodes, which can
+    /// trigger a GC, so it waits for a rendering reflow: query reflows run while callers (e.g.
+    /// ResizeObserver) hold DOM borrows that tracing would then trip over.
+    pending_svg_serialization: DomRefCell<Vec<Dom<SVGSVGElement>>>,
+
     /// Directory to store unminified css for this window if unminify-css
     /// opt is enabled.
     unminified_css_dir: DomRefCell<Option<String>>,
@@ -2595,6 +2600,7 @@ impl Window {
         }
 
         debug!("script: performing reflow for goal {reflow_goal:?}");
+        let updates_the_rendering = reflow_goal == ReflowGoal::UpdateTheRendering;
         let marker = if self.need_emit_timeline_marker(TimelineMarkerType::Reflow) {
             Some(TimelineMarker::start("Reflow".to_owned()))
         } else {
@@ -2668,6 +2674,7 @@ impl Window {
             reflow_result.pending_rasterization_images,
             reflow_result.pending_svg_elements_for_serialization,
         );
+        self.serialize_pending_svgs(cx, updates_the_rendering);
 
         if let Some(iframe_sizes) = reflow_result.iframe_sizes {
             document
@@ -3643,11 +3650,34 @@ impl Window {
             }
         }
 
+        let mut pending_svgs = self.pending_svg_serialization.borrow_mut();
         for node in pending_svg_element_for_serialization.into_iter() {
             let node = unsafe { from_untrusted_node_address(node) };
             let svg = node.downcast::<SVGSVGElement>().unwrap();
+            if !pending_svgs.iter().any(|pending| std::ptr::eq(&**pending, svg)) {
+                pending_svgs.push(Dom::from_ref(svg));
+            }
+        }
+    }
+
+    /// Serialize the inline `<svg>`s layout queued, if this reflow updates the rendering;
+    /// otherwise make sure a rendering update follows to do it.
+    fn serialize_pending_svgs(&self, cx: &mut JSContext, updates_the_rendering: bool) {
+        if !updates_the_rendering {
+            for svg in self.pending_svg_serialization.borrow().iter() {
+                svg.upcast::<Node>().dirty(NodeDamage::Other);
+            }
+            return;
+        }
+        let pending_svgs: Vec<DomRoot<SVGSVGElement>> = self
+            .pending_svg_serialization
+            .borrow_mut()
+            .drain(..)
+            .map(|svg| DomRoot::from_ref(&*svg))
+            .collect();
+        for svg in pending_svgs {
             svg.serialize_and_cache_subtree(cx);
-            node.dirty(NodeDamage::Other);
+            svg.upcast::<Node>().dirty(NodeDamage::Other);
         }
     }
 
@@ -3807,6 +3837,7 @@ impl Window {
             pending_image_callbacks: Default::default(),
             pending_layout_images: Default::default(),
             pending_images_for_rasterization: Default::default(),
+            pending_svg_serialization: Default::default(),
             unminified_css_dir: DomRefCell::new(if unminify_css {
                 Some(unminified_path("unminified-css"))
             } else {
