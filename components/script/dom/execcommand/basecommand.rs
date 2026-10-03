@@ -30,6 +30,7 @@ use crate::dom::execcommand::commands::fontsize::{
 use crate::dom::execcommand::commands::forecolor::execute_forecolor_command;
 use crate::dom::execcommand::commands::hilitecolor::execute_hilitecolor_command;
 use crate::dom::execcommand::commands::insertparagraph::execute_insert_paragraph_command;
+use crate::dom::execcommand::commands::inserttext::execute_insert_text_command;
 use crate::dom::execcommand::commands::italic::execute_italic_command;
 use crate::dom::execcommand::commands::removeformat::execute_removeformat_command;
 use crate::dom::execcommand::commands::strikethrough::execute_strikethrough_command;
@@ -703,6 +704,7 @@ impl CommandName {
             CommandName::InsertParagraph => {
                 execute_insert_paragraph_command(cx, document, selection)
             },
+            CommandName::InsertText => execute_insert_text_command(cx, document, selection, value),
             CommandName::Italic => execute_italic_command(cx, document, selection),
             CommandName::RemoveFormat => execute_removeformat_command(cx, document, selection),
             CommandName::Strikethrough => execute_strikethrough_command(cx, document, selection),

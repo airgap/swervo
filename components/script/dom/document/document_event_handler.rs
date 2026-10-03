@@ -48,6 +48,7 @@ use style::Atom;
 use style_traits::CSSPixel;
 use webrender_api::ExternalScrollId;
 
+use crate::dom::execcommand::basecommand::CommandName;
 #[cfg(feature = "gamepad")]
 use crate::dom::bindings::codegen::Bindings::PermissionStatusBinding::PermissionName;
 use crate::dom::bindings::inheritance::{ElementTypeId, HTMLElementTypeId, NodeTypeId};
@@ -1572,6 +1573,19 @@ impl DocumentEventHandler {
             flags = event.flags();
         }
 
+        // Keys typed into an editing host (contenteditable) edit it. Text controls edit
+        // themselves in their keydown handling.
+        if keyboard_event.event.state == KeyState::Down &&
+            !keyboard_event.event.is_composing &&
+            !flags.contains(EventFlags::Canceled) &&
+            target
+                .downcast::<Node>()
+                .is_some_and(|node| node.editing_host_of().is_some()) &&
+            let Some((command, data)) = typing_command(&keyboard_event.event)
+        {
+            self.window.Document().edit_by_typing(cx, command, data);
+        }
+
         flags.into()
     }
 
@@ -3057,4 +3071,20 @@ fn clipboard_action_for_shortcut(
         "v" => Some(EditingActionEvent::Paste),
         _ => None,
     }
+}
+
+/// The editing command a key performs in an editing host, with the text it inserts.
+fn typing_command(event: &keyboard_types::KeyboardEvent) -> Option<(CommandName, Option<DOMString>)> {
+    if event
+        .modifiers
+        .intersects(keyboard_types::Modifiers::CONTROL | keyboard_types::Modifiers::META)
+    {
+        return None;
+    }
+    Some(match &event.key {
+        Key::Character(text) => (CommandName::InsertText, Some(DOMString::from(text.as_str()))),
+        Key::Named(NamedKey::Enter) => (CommandName::InsertParagraph, None),
+        Key::Named(NamedKey::Backspace) => (CommandName::Delete, None),
+        _ => return None,
+    })
 }
