@@ -1317,7 +1317,9 @@ impl InlineFormattingContextLayout<'_> {
             LineItem::BlockLevel(..) => true,
             _ => false,
         });
-        if editable_or_block_level ||
+        // A clamped line can hold no items (an empty preserved line in `pre-wrap`).
+        if line_items.is_empty() ||
+            editable_or_block_level ||
             (!clamped && line_items.iter().map(width).sum::<Au>() <= available)
         {
             return;
