@@ -154,6 +154,7 @@ use crate::dom::focusevent::FocusEvent;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::hashchangeevent::HashChangeEvent;
 use crate::dom::history::History;
+use crate::dom::html::htmlallcollection::HTMLAllCollection;
 use crate::dom::html::htmlanchorelement::HTMLAnchorElement;
 use crate::dom::html::htmlareaelement::HTMLAreaElement;
 use crate::dom::html::htmlbaseelement::HTMLBaseElement;
@@ -411,6 +412,7 @@ pub(crate) struct Document {
     scripts: MutNullableDom<HTMLCollection>,
     anchors: MutNullableDom<HTMLCollection>,
     applets: MutNullableDom<HTMLCollection>,
+    all: MutNullableDom<HTMLAllCollection>,
     /// Information about the `<iframes>` in this [`Document`].
     iframes: RefCell<IFrameCollection>,
     /// Shared locks used for style attributes, author-origin stylesheets, and user and
@@ -3766,6 +3768,7 @@ impl Document {
             scripts: Default::default(),
             anchors: Default::default(),
             applets: Default::default(),
+            all: Default::default(),
             iframes: RefCell::new(IFrameCollection::new()),
             shared_style_locks,
             stylesheets: DomRefCell::new(DocumentStylesheetSet::new()),
@@ -5979,6 +5982,12 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
     fn Applets(&self, cx: &mut JSContext) -> DomRoot<HTMLCollection> {
         self.applets
             .or_init(|| HTMLCollection::always_empty(cx, &self.window, self.upcast()))
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-document-all>
+    fn All(&self, cx: &mut JSContext) -> DomRoot<HTMLAllCollection> {
+        self.all
+            .or_init(|| HTMLAllCollection::new(cx, &self.window, self))
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-document-location>

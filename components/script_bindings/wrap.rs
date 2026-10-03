@@ -34,6 +34,7 @@ pub(crate) struct WrapConfig {
     pub(crate) weak_referenceable: bool,
     pub(crate) proxy_handler: Option<*const c_void>,
     pub(crate) prototype_id: PrototypeList::ID,
+    /// For proxies, `None` selects SpiderMonkey's default proxy class.
     pub(crate) class: Option<&'static JSClass>,
     // this function has to be more general because we do not have the correct type for globalscope.
     pub(crate) proto_object_fn: ProtoObjectFn,
@@ -80,7 +81,9 @@ pub(crate) unsafe fn wrap<T: MutDomObject, D: DomTypes>(
                     handler,
                     Handle::undefined(),
                     canonical_proto.get(),
-                    ptr::null(),
+                    config
+                        .class
+                        .map_or(ptr::null(), |class| class as *const JSClass),
                     false,
                 ));
             };

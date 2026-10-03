@@ -523,8 +523,8 @@ where
 }
 
 /// Returns whether `value` is an array-like object (Array, FileList,
-/// HTMLCollection, HTMLFormControlsCollection, HTMLOptionsCollection,
-/// NodeList, DOMTokenList).
+/// HTMLAllCollection, HTMLCollection, HTMLFormControlsCollection,
+/// HTMLOptionsCollection, NodeList, DOMTokenList).
 pub fn is_array_like<D: crate::DomTypes>(
     cx: &mut js::context::JSContext,
     value: HandleValue,
@@ -542,11 +542,13 @@ pub fn is_array_like<D: crate::DomTypes>(
     };
 
     unsafe {
-        // TODO: HTMLAllCollection
         if root_from_object::<D::DOMTokenList>(object, cx.raw_cx()).is_ok() {
             return true;
         }
         if root_from_object::<D::FileList>(object, cx.raw_cx()).is_ok() {
+            return true;
+        }
+        if root_from_object::<D::HTMLAllCollection>(object, cx.raw_cx()).is_ok() {
             return true;
         }
         if root_from_object::<D::HTMLCollection>(object, cx.raw_cx()).is_ok() {

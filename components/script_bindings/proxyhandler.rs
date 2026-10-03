@@ -14,13 +14,15 @@ use js::context::{JSContext, RawJSContext};
 use js::conversions::{ToJSValConvertible, jsstr_to_string};
 use js::glue::{GetProxyHandler, GetProxyHandlerFamily, GetProxyPrivate, SetProxyPrivate};
 use js::jsapi::{
-    DOMProxyShadowsResult, GetObjectRealmOrNull, GetRealmPrincipals, GetStaticPrototype,
+    CallArgs, DOMProxyShadowsResult, GetObjectRealmOrNull, GetRealmPrincipals, GetStaticPrototype,
     Handle as RawHandle, HandleId as RawHandleId, HandleObject as RawHandleObject,
-    HandleValue as RawHandleValue, HandleValueArray, IsWindowProxy, JSErrNum, JSFunctionSpec,
+    HandleValue as RawHandleValue, HandleValueArray, IsWindowProxy, JSCLASS_DELAY_METADATA_BUILDER,
+    JSCLASS_EMULATES_UNDEFINED, JSCLASS_IS_PROXY, JSCLASS_RESERVED_SLOTS_MASK,
+    JSCLASS_RESERVED_SLOTS_SHIFT, JSClass, JSClass_NON_NATIVE, JSErrNum, JSFunctionSpec,
     JSITER_HIDDEN, JSITER_OWNONLY, JSITER_SYMBOLS, JSObject, JSPROP_READONLY, JSPropertySpec,
     JSString, MutableHandleIdVector as RawMutableHandleIdVector,
     MutableHandleObject as RawMutableHandleObject, ObjectOpResult, PropertyDescriptor,
-    SetDOMProxyInformation, SymbolCode, jsid,
+    ProxyClassExtension, ProxyClassOps, ProxyObjectOps, SetDOMProxyInformation, SymbolCode, jsid,
 };
 use js::jsid::SymbolId;
 use js::jsval::{ObjectValue, UndefinedValue};
@@ -29,7 +31,7 @@ use js::rust::wrappers2::{
     AppendToIdVector, Call, GetObjectProto, GetPropertyKeys, GetWellKnownSymbol,
     InvokeGetOwnPropertyDescriptor, JS_AlreadyHasOwnPropertyById, JS_AtomizeAndPinString,
     JS_DefineFunctions, JS_DefineProperties, JS_DefinePropertyById, JS_DeletePropertyById,
-    JS_GetOwnPropertyDescriptorById, JS_IdToValue, JS_IsExceptionPending,
+    JS_GetOwnPropertyDescriptorById, JS_GetProperty, JS_IdToValue, JS_IsExceptionPending,
     JS_NewObjectWithGivenProto, JS_ValueToSource, RUST_INTERNED_STRING_TO_JSID, RUST_JSID_IS_VOID,
     SetDataPropertyDescriptor, SetPropertyIgnoringNamedGetter, int_to_jsid,
 };
@@ -170,6 +172,73 @@ pub(crate) unsafe extern "C" fn is_extensible(
     succeeded: *mut bool,
 ) -> bool {
     *succeeded = true;
+    true
+}
+
+/// The proxy class of `HTMLAllCollection` reflectors.
+///
+/// `JSCLASS_EMULATES_UNDEFINED` is how SpiderMonkey models the [[IsHTMLDDA]] internal slot
+/// (<https://tc39.es/ecma262/#sec-IsHTMLDDA-internal-slot>): `document.all` is falsy, has
+/// `typeof` "undefined" and is `== null`, yet is never `=== undefined`. Real pages depend on
+/// that last distinction (polymer-resin only passes a binding value through untouched when
+/// `value || value === document.all` is false), so a missing `document.all` breaks them.
+/// Otherwise this matches SpiderMonkey's default `js::ProxyClass`. Gecko likewise hardcodes the
+/// flag for this one interface rather than offering an IDL annotation anyone could reach for.
+pub(crate) static HTML_ALL_COLLECTION_PROXY_CLASS: JSClass = JSClass {
+    name: c"HTMLAllCollection".as_ptr(),
+    flags: JSClass_NON_NATIVE |
+        JSCLASS_IS_PROXY |
+        JSCLASS_DELAY_METADATA_BUILDER |
+        JSCLASS_EMULATES_UNDEFINED |
+        ((2 & JSCLASS_RESERVED_SLOTS_MASK) << JSCLASS_RESERVED_SLOTS_SHIFT),
+    cOps: &raw const ProxyClassOps,
+    spec: ptr::null(),
+    ext: &raw const ProxyClassExtension,
+    oOps: &raw const ProxyObjectOps,
+};
+
+/// The custom [[Call]] of `HTMLAllCollection`
+/// (<https://html.spec.whatwg.org/multipage/#HTMLAllCollection-call>), whose steps are exactly
+/// those of its `item()` method, so it calls the prototype's `item` with the same arguments.
+///
+/// # Safety
+/// `cx` must point to a valid, non-null JSContext and `args` to valid CallArgs.
+pub(crate) unsafe extern "C" fn html_all_collection_call(
+    cx: *mut RawJSContext,
+    proxy: RawHandleObject,
+    args: *const CallArgs,
+) -> bool {
+    // SAFETY: it is safe to construct a JSContext from engine hook.
+    let mut cx = JSContext::from_ptr(NonNull::new(cx).unwrap());
+    let cx = &mut cx;
+    let args = &*args;
+    let proxy = HandleObject::from_raw(proxy);
+
+    // Look `item` up on the prototype: a named property "item" on the collection itself must
+    // not be able to hijack the call.
+    rooted!(&in(cx) let mut proto = ptr::null_mut::<JSObject>());
+    if !GetObjectProto(cx, proxy, proto.handle_mut()) {
+        return false;
+    }
+    rooted!(&in(cx) let mut item = UndefinedValue());
+    if !JS_GetProperty(cx, proto.handle(), c"item".as_ptr(), item.handle_mut()) {
+        return false;
+    }
+    rooted!(&in(cx) let thisv = ObjectValue(proxy.get()));
+    Call(
+        cx,
+        thisv.handle(),
+        item.handle(),
+        &HandleValueArray {
+            length_: args.argc_ as usize,
+            elements_: args.argv_,
+        },
+        MutableHandleValue::from_raw(args.rval()),
+    )
+}
+
+/// `HTMLAllCollection` reflectors are callable (see [`html_all_collection_call`]).
+pub(crate) unsafe extern "C" fn html_all_collection_is_callable(_obj: *mut JSObject) -> bool {
     true
 }
 

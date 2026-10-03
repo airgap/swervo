@@ -3386,7 +3386,9 @@ class CGWrapMethod(CGAbstractMethod):
             proxy_handler = "None"
         prototype_id = f"PrototypeList::ID::{self.descriptor.name}"
         proto_object_fn = "GetProtoObject::<D>"
-        if self.descriptor.proxy:
+        if self.descriptor.interface.identifier.name == "HTMLAllCollection":
+            c = "Some(&crate::proxyhandler::HTML_ALL_COLLECTION_PROXY_CLASS)"
+        elif self.descriptor.proxy:
             c = "None"
         else:
             c = "Some(&Class.get().base)"
@@ -4075,6 +4077,14 @@ class CGDefineProxyHandler(CGAbstractMethod):
             assert not self.descriptor.operations['NamedGetter']
             customSet = 'Some(proxyhandler::maybe_cross_origin_set_rawcx::<D>)'
 
+        # HTMLAllCollection's [[Call]] has no WebIDL syntax, so it is hardcoded here like its
+        # proxy class (see `HTML_ALL_COLLECTION_PROXY_CLASS`).
+        customCall = 'None'
+        customIsCallable = 'None'
+        if self.descriptor.interface.identifier.name == "HTMLAllCollection":
+            customCall = 'Some(proxyhandler::html_all_collection_call)'
+            customIsCallable = 'Some(proxyhandler::html_all_collection_is_callable)'
+
         getOwnEnumerablePropertyKeys = "own_property_keys::<D>"
         if self.descriptor.interface.getExtendedAttribute("LegacyUnenumerableNamedProperties") or \
            self.descriptor.isMaybeCrossOriginObject():
@@ -4099,7 +4109,7 @@ let traps = ProxyTraps {{
     has: None,
     get: Some(get::<D>),
     set: {customSet},
-    call: None,
+    call: {customCall},
     construct: None,
     hasOwn: Some(hasOwn::<D>),
     getOwnEnumerablePropertyKeys: Some({getOwnEnumerablePropertyKeys}),
@@ -4112,7 +4122,7 @@ let traps = ProxyTraps {{
     trace: Some({TRACE_HOOK_NAME}::<D>),
     finalize: Some({FINALIZE_HOOK_NAME}::<D>),
     objectMoved: None,
-    isCallable: None,
+    isCallable: {customIsCallable},
     isConstructor: None,
 }};
 
