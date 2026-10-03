@@ -1177,12 +1177,19 @@ impl Fragment {
             fragment.justification_adjustment,
         );
 
+        // <https://compat.spec.whatwg.org/#the-webkit-text-fill-color>: glyphs are filled with
+        // `-webkit-text-fill-color` (`currentcolor` by default); shadows and decorations keep
+        // `color`. Gradient headings set it transparent over `background-clip: text`.
+        let fill_color = parent_style
+            .get_inherited_text()
+            .clone__webkit_text_fill_color()
+            .resolve_to_absolute(&color);
         builder.wr().push_text(
             &common,
             glyph_bounds,
             &glyphs,
             fragment.font_key,
-            rgba(color),
+            rgba(fill_color),
             None,
         );
 
