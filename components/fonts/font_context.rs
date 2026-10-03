@@ -45,7 +45,9 @@ use style::shared_lock::SharedRwLockReadGuard;
 use style::stylesheets::{
     CssRule, CustomMediaMap, DocumentStyleSheet, FontFaceRule, StylesheetInDocument,
 };
-use style::values::computed::font::{FamilyName, FontFamilyNameSyntax, SingleFontFamily};
+use style::values::computed::font::{
+    FamilyName, FontFamilyNameSyntax, FontStyle, SingleFontFamily,
+};
 use url::Url;
 use uuid::Uuid;
 use webrender_api::{FontInstanceFlags, FontInstanceKey, FontKey, FontVariation};
@@ -939,9 +941,10 @@ impl FontContext {
         // loading the list of web font `src`s we may be running in the context of the router thread, which
         // means we won't be able to seend IPC messages to the FontCacheThread.
         //
-        // TODO: This is completely wrong. The specification says that `local()` font-family should match
-        // against full PostScript names, but this is matching against font family names. This works...
-        // sometimes.
+        // TODO: The specification says that `local()` matches full font names and PostScript
+        // names, but the font service is only queried by family. A full name is usually the
+        // family plus the face's style ("Open Sans Light Italic" is family "Open Sans Light"),
+        // so the face is chosen by the style words in the name; see `face_named_by`.
         let mut local_fonts = HashMap::new();
         for source in sources.iter() {
             if let Source::Local(family_name) = source {
@@ -952,10 +955,11 @@ impl FontContext {
                             name: family_name.name.clone(),
                             syntax: FontFamilyNameSyntax::Quoted,
                         });
-                        self.system_font_service_proxy
-                            .find_matching_font_templates(None, &family)
-                            .first()
-                            .cloned()
+                        face_named_by(
+                            &family_name.name,
+                            self.system_font_service_proxy
+                                .find_matching_font_templates(None, &family),
+                        )
                     });
             }
         }
@@ -1224,4 +1228,43 @@ impl Hash for FontGroupCacheKey {
     {
         self.style.hash.hash(hasher)
     }
+}
+
+/// The face among `faces` (one family's) that a `local()` full name like "Open Sans Light Italic"
+/// names: italic if the name says italic or oblique, upright otherwise, and the weight closest to
+/// the one its weight word gives (400 without one). Taking the family's first face instead picked
+/// an italic for `local('Open Sans Light')`, so mdBook's sidebar rendered in italics.
+fn face_named_by(name: &str, faces: Vec<FontTemplateRef>) -> Option<FontTemplateRef> {
+    let words = name.to_ascii_lowercase().replace([' ', '-', '_'], "");
+    let italic = words.contains("italic") || words.contains("oblique");
+    const WEIGHT_WORDS: [(&str, f32); 13] = [
+        ("extralight", 200.),
+        ("ultralight", 200.),
+        ("semibold", 600.),
+        ("demibold", 600.),
+        ("extrabold", 800.),
+        ("ultrabold", 800.),
+        ("hairline", 100.),
+        ("thin", 100.),
+        ("light", 300.),
+        ("medium", 500.),
+        ("bold", 700.),
+        ("black", 900.),
+        ("heavy", 900.),
+    ];
+    let weight = WEIGHT_WORDS
+        .iter()
+        .find(|(word, _)| words.contains(word))
+        .map_or(400., |(_, weight)| *weight);
+    faces.into_iter().min_by(|a, b| {
+        let mismatch = |face: &FontTemplateRef| {
+            let descriptor = face.descriptor();
+            let style_mismatch = (descriptor.style.0 != FontStyle::NORMAL) != italic;
+            let weight_distance = (descriptor.weight.0.value() - weight).abs();
+            (style_mismatch, weight_distance)
+        };
+        mismatch(a)
+            .partial_cmp(&mismatch(b))
+            .expect("font weights are finite")
+    })
 }

@@ -57,6 +57,10 @@ listing, plaintext, pre, xmp {
 }
 
 dialog:not([open]) { display: none; }
+/* https://html.spec.whatwg.org/multipage/#flow-content-3: closed popovers are hidden. The Popover
+ * API isn't implemented yet, so this keeps them out of the page flow (Notion scrolled its page
+ * to a closed language menu laid out inline). */
+[popover]:not(:popover-open):not(dialog[open]) { display: none; }
 dialog {
   position: absolute;
   inset-inline-start: 0; inset-inline-end: 0;

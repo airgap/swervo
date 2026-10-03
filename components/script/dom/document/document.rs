@@ -3830,7 +3830,14 @@ impl Document {
             declarative_refresh: Default::default(),
             resize_observers: Default::default(),
             fonts: Default::default(),
-            visibility_state: Cell::new(DocumentVisibilityState::Hidden),
+            // <https://html.spec.whatwg.org/multipage/#initialise-the-document-object>: the
+            // navigable's system visibility state. Pages size, animate and play only when
+            // visible, and nothing later flips a normal load to visible.
+            visibility_state: Cell::new(if has_browsing_context {
+                DocumentVisibilityState::Visible
+            } else {
+                DocumentVisibilityState::Hidden
+            }),
             status_code,
             is_initial_about_blank: Cell::new(is_initial_about_blank),
             allow_declarative_shadow_roots: Cell::new(allow_declarative_shadow_roots),
