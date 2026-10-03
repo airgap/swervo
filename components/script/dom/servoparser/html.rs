@@ -128,14 +128,13 @@ impl Tokenizer {
 }
 
 /// <https://html.spec.whatwg.org/multipage/#html-fragment-serialisation-algorithm>
-/// Supplies CSS declarations (`;`-terminated) to prepend to an element's `style` attribute as
-/// it is serialized, without mutating the DOM.
-pub(crate) type StylePrefix<'a> = &'a dyn Fn(&Element) -> Option<String>;
+/// Rewrites an element's attributes as it is serialized, without mutating the DOM.
+pub(crate) type AttributeRewrite<'a> = &'a dyn Fn(&Element, &mut Vec<(QualName, AttrValue)>);
 
 fn start_element<S: Serializer>(
     element: &Element,
     serializer: &mut S,
-    style_prefix: Option<StylePrefix<'_>>,
+    attribute_rewrite: Option<AttributeRewrite<'_>>,
 ) -> io::Result<()> {
     let name = QualName::new(
         None,
@@ -162,15 +161,8 @@ fn start_element<S: Serializer>(
         (qname, value)
     }));
 
-    if let Some(declarations) = style_prefix.and_then(|style_prefix| style_prefix(element)) {
-        let style_name = QualName::new(None, ns!(), local_name!("style"));
-        match attributes.iter_mut().find(|(name, _)| *name == style_name) {
-            // Prepended, so the element's own inline declarations still win.
-            Some((_, value)) => {
-                *value = AttrValue::String(format!("{declarations}{}", &**value));
-            },
-            None => attributes.push((style_name, AttrValue::String(declarations))),
-        }
+    if let Some(attribute_rewrite) = attribute_rewrite {
+        attribute_rewrite(element, &mut attributes);
     }
 
     let attr_refs = attributes.iter().map(|(qname, value)| {
@@ -309,7 +301,7 @@ pub(crate) fn serialize_html_fragment<S: Serializer>(
     traversal_scope: TraversalScope,
     serialize_shadow_roots: bool,
     shadow_roots: Vec<DomRoot<ShadowRoot>>,
-    style_prefix: Option<StylePrefix<'_>>,
+    attribute_rewrite: Option<AttributeRewrite<'_>>,
 ) -> io::Result<()> {
     let iter = SerializationIterator::new(
         cx,
@@ -322,7 +314,7 @@ pub(crate) fn serialize_html_fragment<S: Serializer>(
     for cmd in iter {
         match cmd {
             SerializationCommand::OpenElement(n) => {
-                start_element(&n, serializer, style_prefix)?;
+                start_element(&n, serializer, attribute_rewrite)?;
             },
             SerializationCommand::CloseElement(name) => {
                 serializer.end_elem(name)?;
@@ -394,24 +386,24 @@ pub(crate) fn serialize_html_fragment<S: Serializer>(
 
 pub(crate) struct HtmlSerialize<'a> {
     node: &'a Node,
-    style_prefix: Option<StylePrefix<'a>>,
+    attribute_rewrite: Option<AttributeRewrite<'a>>,
 }
 
 impl<'a> HtmlSerialize<'a> {
     pub(crate) fn new(node: &'a Node) -> HtmlSerialize<'a> {
         HtmlSerialize {
             node,
-            style_prefix: None,
+            attribute_rewrite: None,
         }
     }
 
-    pub(crate) fn with_style_prefix(
+    pub(crate) fn with_attribute_rewrite(
         node: &'a Node,
-        style_prefix: StylePrefix<'a>,
+        attribute_rewrite: AttributeRewrite<'a>,
     ) -> HtmlSerialize<'a> {
         HtmlSerialize {
             node,
-            style_prefix: Some(style_prefix),
+            attribute_rewrite: Some(attribute_rewrite),
         }
     }
 }
@@ -432,7 +424,7 @@ impl Serialize for HtmlSerialize<'_> {
             traversal_scope,
             false,
             vec![],
-            self.style_prefix,
+            self.attribute_rewrite,
         )
     }
 }

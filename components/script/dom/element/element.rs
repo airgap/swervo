@@ -25,7 +25,10 @@ use js::jsapi::{Heap, JSObject};
 use js::jsval::JSVal;
 use js::realm::CurrentRealm;
 use js::rust::HandleObject;
-use layout_api::{LayoutDamage, QueryMsg, ScrollContainerQueryFlags, StyleData, with_layout_state};
+use layout_api::{
+    LayoutDamage, QueryMsg, SVG_PAINT_PROPERTIES, ScrollContainerQueryFlags, StyleData,
+    with_layout_state,
+};
 use net_traits::ReferrerPolicy;
 use net_traits::request::{CorsSettings, CredentialsMode};
 use script_bindings::cell::{DomRefCell, Ref, RefMut};
@@ -1319,6 +1322,18 @@ impl<'dom> LayoutDom<'dom, Element> {
                             vec![specified::Image::for_cascade(url.into_url().into())].into(),
                         ),
                     ));
+                }
+            }
+        }
+
+        if *self.namespace() == ns!(svg) {
+            for property in SVG_PAINT_PROPERTIES {
+                if let Some(AttrValue::Declaration { block, lock, .. }) =
+                    self.get_attr_for_layout(&ns!(), &LocalName::from(property.name()))
+                {
+                    for declaration in block.read_with(&lock.read()).declarations() {
+                        push(declaration.clone());
+                    }
                 }
             }
         }

@@ -3,6 +3,15 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use dom_struct::dom_struct;
+use layout_api::SVG_PAINT_PROPERTIES;
+use servo_arc::Arc as ServoArc;
+use style::attr::AttrValue;
+use style::properties::{
+    Importance, LonghandId, PropertyDeclarationBlock, PropertyId, SourcePropertyDeclaration,
+    parse_one_declaration_into,
+};
+use style::stylesheets::{CssRuleType, Origin, UrlExtraData};
+use style_traits::ParsingMode;
 use html5ever::{LocalName, Prefix, local_name, ns};
 use js::context::JSContext;
 use js::rust::HandleObject;
@@ -120,9 +129,63 @@ impl<'dom> crate::dom::bindings::root::LayoutDom<'dom, SVGElement> {
     }
 }
 
+/// The paint property an SVG presentation attribute named `name` sets, if any.
+pub(crate) fn presentation_attribute_property(name: &LocalName) -> Option<LonghandId> {
+    SVG_PAINT_PROPERTIES
+        .into_iter()
+        .find(|property| property.name() == &**name)
+}
+
 impl VirtualMethods for SVGElement {
     fn super_type(&self) -> Option<&dyn VirtualMethods> {
         Some(self.as_element() as &dyn VirtualMethods)
+    }
+
+    fn attribute_affects_presentational_hints(&self, attr: AttrRef<'_>) -> bool {
+        if attr.namespace() == &ns!() && presentation_attribute_property(attr.local_name()).is_some()
+        {
+            return true;
+        }
+        self.super_type()
+            .unwrap()
+            .attribute_affects_presentational_hints(attr)
+    }
+
+    /// Presentation attributes (`fill="white"`) are parsed as their CSS property and enter the
+    /// cascade as presentational hints, below every author rule and above inheritance.
+    /// <https://svgwg.org/svg2-draft/styling.html#PresentationAttributes>. Browsers accept
+    /// `var()` in them, which Discord relies on; the value can't smuggle in other declarations.
+    fn parse_plain_attribute(&self, name: &LocalName, value: DOMString) -> AttrValue {
+        let Some(property) = presentation_attribute_property(name) else {
+            return self
+                .super_type()
+                .unwrap()
+                .parse_plain_attribute(name, value);
+        };
+        let document = self.owner_document();
+        let mut declarations = SourcePropertyDeclaration::default();
+        let parsed = parse_one_declaration_into(
+            &mut declarations,
+            PropertyId::NonCustom(property.into()),
+            &value.str(),
+            Origin::Author,
+            &UrlExtraData(document.base_url().get_arc()),
+            None,
+            // `stroke-width="2"`: presentation attributes take unitless lengths.
+            ParsingMode::ALLOW_UNITLESS_LENGTH,
+            document.quirks_mode(),
+            CssRuleType::Style,
+        );
+        let mut block = PropertyDeclarationBlock::new();
+        if parsed.is_ok() {
+            block.extend(declarations.drain(), Importance::Normal);
+        }
+        let lock = document.style_shared_author_lock();
+        AttrValue::Declaration {
+            serialization: String::from(value).into(),
+            block: ServoArc::new(lock.wrap(block)),
+            lock: lock.clone(),
+        }
     }
 
     fn attribute_mutated(
