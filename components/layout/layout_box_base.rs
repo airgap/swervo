@@ -12,9 +12,11 @@ use euclid::Point2D;
 use layout_api::LayoutDamage;
 use malloc_size_of_derive::MallocSizeOf;
 use servo_arc::Arc as ServoArc;
+use style::Zero;
 use style::computed_values::position::T as Position;
 use style::logical_geometry::WritingMode;
 use style::properties::ComputedValues;
+use style::values::computed::ContainerType;
 use style::values::specified::align::AlignFlags;
 use style_traits::CSSPixel;
 
@@ -28,7 +30,9 @@ use crate::fragment_tree::{
 };
 use crate::geom::LogicalSides1D;
 use crate::positioned::{PositioningContext, relative_adjustement};
-use crate::sizing::{ComputeInlineContentSizes, InlineContentSizesResult, SizeConstraint};
+use crate::sizing::{
+    ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, SizeConstraint,
+};
 use crate::traversal::ElementDamageSet;
 use crate::{ConstraintSpace, ContainingBlock, ContainingBlockSize};
 
@@ -111,8 +115,18 @@ impl LayoutBoxBase {
             // TODO: Should we keep multiple caches for various block sizes?
         }
 
-        let result =
-            layout_box.compute_inline_content_sizes_with_fixup(layout_context, constraint_space);
+        // <https://drafts.csswg.org/css-conditional-5/#container-type>: a size container has
+        // inline-size containment, so its intrinsic inline size is that of an empty box.
+        let result = if self.style.clone_container_type().intersects(
+            ContainerType::INLINE_SIZE | ContainerType::SIZE,
+        ) {
+            InlineContentSizesResult {
+                sizes: ContentSizes::zero(),
+                depends_on_block_constraints: false,
+            }
+        } else {
+            layout_box.compute_inline_content_sizes_with_fixup(layout_context, constraint_space)
+        };
         *cache = Some(Box::new((constraint_space.block_size, result)));
         result
     }

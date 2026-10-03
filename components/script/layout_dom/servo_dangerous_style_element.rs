@@ -13,7 +13,7 @@ use embedder_traits::UntrustedNodeAddress;
 use euclid::default::Size2D;
 use html5ever::{LocalName, Namespace, local_name, ns};
 use js::jsapi::JSObject;
-use layout_api::{DangerousStyleElement, LayoutDamage, LayoutNode};
+use layout_api::{DangerousStyleElement, LayoutDamage, LayoutElement, LayoutNode};
 use script_bindings::root::DomRoot;
 use selectors::Element as _;
 use selectors::attr::{AttrSelectorOperation, CaseSensitivity, NamespaceConstraint};
@@ -465,8 +465,17 @@ impl<'dom> style::dom::TElement for ServoDangerousStyleElement<'dom> {
         self.element.namespace()
     }
 
-    fn query_container_size(&self, _display: &Display) -> Size2D<Option<app_units::Au>> {
-        todo!();
+    /// The container's content box from the last layout. Layout lays the page out again
+    /// when a container's size changes, so queries see its final size.
+    fn query_container_size(&self, display: &Display) -> Size2D<Option<app_units::Au>> {
+        layout_api::CONTAINER_QUERIED.store(true, Ordering::Relaxed);
+        let size = (!display.is_none())
+            .then(|| self.layout_element().as_node().layout_data()?.content_box_size())
+            .flatten();
+        Size2D::new(
+            size.map(|size| size.width),
+            size.map(|size| size.height),
+        )
     }
 
     fn has_selector_flags(&self, flags: ElementSelectorFlags) -> bool {

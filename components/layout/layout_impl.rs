@@ -6,6 +6,7 @@
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::fmt::Debug;
 use std::rc::Rc;
 use std::sync::{Arc, LazyLock};
@@ -37,7 +38,7 @@ use profile_traits::time::{
     self as profile_time, TimerMetadata, TimerMetadataFrameType, TimerMetadataReflowType,
 };
 use profile_traits::{path, time_profile};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use script::layout_dom::{
     ServoDangerousStyleDocument, ServoDangerousStyleElement, ServoLayoutElement, ServoLayoutNode,
 };
@@ -60,6 +61,7 @@ use style::font_metrics::FontMetrics;
 use style::global_style_data::GLOBAL_STYLE_DATA;
 use style::invalidation::element::restyle_hints::RestyleHint;
 use style::invalidation::stylesheets::StylesheetInvalidationSet;
+use style::values::computed::ContainerType;
 use style::media_queries::{MediaList, MediaType};
 use style::properties::style_structs::Font;
 use style::properties::{ComputedValues, LonghandId, NonCustomPropertyId, PropertyId, ShorthandId};
@@ -96,6 +98,7 @@ use crate::query::{
     process_resolved_font_style_query, process_resolved_style_request,
     process_scroll_container_query,
 };
+use crate::fragment_tree::Fragment;
 use crate::traversal::{RecalcStyle, compute_damage_and_rebuild_box_tree};
 use crate::{BoxTree, FragmentTree};
 
@@ -178,6 +181,14 @@ pub struct LayoutThread {
     /// layout requests a display list, it is produced unconditionally, even when the
     /// layout trees remain the same.
     need_new_display_list: Cell<bool>,
+
+    /// The content box sizes of the `container-type` boxes in the last layout. Container
+    /// queries were evaluated against these, see [`Self::relayout_if_container_sizes_changed`].
+    container_sizes: RefCell<FxHashMap<OpaqueNode, euclid::default::Size2D<Au>>>,
+
+    /// Whether this document's styles have evaluated container queries or units against a
+    /// container. Until then layout doesn't look for containers.
+    uses_container_queries: Cell<bool>,
 
     /// Whether or not cumulative containing blocks offsets have been set into the
     /// [`FragmentTree`]. This typically happens during [`StackingContextTree`]
@@ -835,6 +846,8 @@ impl LayoutThread {
             device_has_changed: false,
             need_containing_block_calculation: Cell::new(false),
             need_new_display_list: Cell::new(false),
+            container_sizes: Default::default(),
+            uses_container_queries: Cell::new(false),
             need_new_stacking_context_tree: Cell::new(false),
             box_tree: Default::default(),
             fragment_tree: Default::default(),
@@ -1154,6 +1167,116 @@ impl LayoutThread {
         self.stylist.flush(guards)
     }
 
+    /// Container queries match against each container's size from the previous layout. When
+    /// this layout changed a container's size, its descendants are restyled and the page is
+    /// laid out once more, so the styles shown match the containers' final sizes (Blink and
+    /// Gecko also lay out again). One extra pass: a query that resizes its own container
+    /// settles on the next layout.
+    fn relayout_if_container_sizes_changed(
+        &self,
+        layout_context: &LayoutContext,
+        root_element: ServoDangerousStyleElement<'_>,
+        root_node: ServoLayoutNode<'_>,
+        rayon_pool: Option<&rayon::ThreadPool>,
+    ) {
+        // The flag is process-wide; a document that didn't query may take it, which only
+        // costs it the container walk below.
+        if layout_api::CONTAINER_QUERIED.swap(false, Ordering::Relaxed) ||
+            self.stylist
+                .iter_origins()
+                .any(|(data, _)| data.has_container_queries())
+        {
+            self.uses_container_queries.set(true);
+        }
+        if !self.uses_container_queries.get() {
+            return;
+        }
+        let sizes = self.container_box_sizes();
+        let changed: FxHashSet<OpaqueNode> = {
+            let previous = self.container_sizes.borrow();
+            sizes
+                .iter()
+                .filter(|(node, size)| previous.get(*node) != Some(*size))
+                .map(|(node, _)| *node)
+                .collect()
+        };
+        *self.container_sizes.borrow_mut() = sizes;
+        if changed.is_empty() || !mark_container_descendants_for_restyle(root_element, &changed) {
+            return;
+        }
+
+        let traversal = RecalcStyle::new(layout_context);
+        let token = {
+            let shared =
+                DomTraversal::<ServoDangerousStyleElement>::shared_context(&traversal);
+            RecalcStyle::pre_traverse(root_element, shared)
+        };
+        if !token.should_traverse() {
+            return;
+        }
+        let dirty_root = driver::traverse_dom(&traversal, token, rayon_pool).as_node();
+
+        let mut box_tree = self.box_tree.borrow_mut();
+        let mut layout_roots = Vec::new();
+        let damage = {
+            let box_tree = &mut *box_tree;
+            let mut compute_damage_and_build_box_tree = || {
+                compute_damage_and_rebuild_box_tree(
+                    box_tree,
+                    layout_context,
+                    dirty_root.layout_node(),
+                    root_node,
+                    LayoutDamage::empty(),
+                    &mut layout_roots,
+                )
+            };
+            if let Some(pool) = rayon_pool {
+                pool.install(compute_damage_and_build_box_tree)
+            } else {
+                compute_damage_and_build_box_tree()
+            }
+        };
+        if damage.is_empty() {
+            return;
+        }
+        self.need_new_stacking_context_tree.set(true);
+        self.need_new_display_list.set(true);
+
+        let box_tree = &*box_tree;
+        let viewport_size = self.stylist.device().au_viewport_size();
+        let run_layout = || {
+            box_tree
+                .as_ref()
+                .unwrap()
+                .layout(layout_context, viewport_size)
+        };
+        let fragment_tree = Rc::new(if let Some(pool) = rayon_pool {
+            pool.install(run_layout)
+        } else {
+            run_layout()
+        });
+        *self.fragment_tree.borrow_mut() = Some(fragment_tree);
+        *self.container_sizes.borrow_mut() = self.container_box_sizes();
+    }
+
+    /// The content box sizes of the `container-type` boxes in the current fragment tree.
+    fn container_box_sizes(&self) -> FxHashMap<OpaqueNode, euclid::default::Size2D<Au>> {
+        let mut sizes = FxHashMap::default();
+        if let Some(fragment_tree) = &*self.fragment_tree.borrow() {
+            fragment_tree.find(|fragment, _, _| {
+                if let Fragment::Box(box_fragment) | Fragment::Float(box_fragment) = fragment &&
+                    let Some(tag) = box_fragment.base.tag &&
+                    tag.pseudo_element_chain.primary.is_none() &&
+                    box_fragment.style().clone_container_type() != ContainerType::NORMAL
+                {
+                    sizes.insert(tag.node, box_fragment.content_rect().size.to_untyped());
+                }
+                None::<()>
+            });
+        }
+        sizes
+    }
+
     #[servo_tracing::instrument(skip_all)]
     fn restyle_and_build_trees(
         &mut self,
@@ -1313,6 +1436,13 @@ impl LayoutThread {
                 .into_iter()
                 .all(|layout_root| layout_root.try_layout(&layout_context))
             {
+                drop(box_tree);
+                self.relayout_if_container_sizes_changed(
+                    &layout_context,
+                    dangerous_root_element,
+                    root_node,
+                    rayon_pool,
+                );
                 return (
                     ReflowPhasesRun::RanLayout,
                     std::mem::take(&mut *layout_context.iframe_sizes.lock()),
@@ -1320,10 +1450,10 @@ impl LayoutThread {
             }
         }
 
-        let box_tree = &*box_tree;
+        let box_tree_ref = &*box_tree;
         let viewport_size = self.stylist.device().au_viewport_size();
         let run_layout = || {
-            box_tree
+            box_tree_ref
                 .as_ref()
                 .unwrap()
                 .layout(recalc_style_traversal.context(), viewport_size)
@@ -1335,6 +1465,13 @@ impl LayoutThread {
         });
 
         *self.fragment_tree.borrow_mut() = Some(fragment_tree);
+        drop(box_tree);
+        self.relayout_if_container_sizes_changed(
+            &layout_context,
+            dangerous_root_element,
+            root_node,
+            rayon_pool,
+        );
 
         if self.debug.is_enabled(DiagnosticsLoggingOption::StyleTree) {
             println!(
@@ -1933,4 +2070,30 @@ impl ReflowPhases {
             },
         }
     }
+}
+
+/// Marks the descendants of the elements in `containers` for restyle, and their ancestors as
+/// having dirty descendants so the style traversal reaches them. Returns whether any container
+/// was found under `element`.
+#[expect(unsafe_code)]
+fn mark_container_descendants_for_restyle(
+    element: ServoDangerousStyleElement<'_>,
+    containers: &FxHashSet<OpaqueNode>,
+) -> bool {
+    let mut marked = false;
+    if containers.contains(&element.as_node().opaque()) &&
+        let Some(mut data) = element.mutate_data()
+    {
+        data.hint.insert(RestyleHint::RESTYLE_DESCENDANTS);
+        marked = true;
+    }
+    for child in element.traversal_children() {
+        if let Some(child) = child.as_element() &&
+            mark_container_descendants_for_restyle(child, containers)
+        {
+            unsafe { element.set_dirty_descendants() };
+            marked = true;
+        }
+    }
+    marked
 }

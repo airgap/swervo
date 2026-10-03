@@ -76,8 +76,18 @@ use style_traits::CSSPixel;
 use webrender_api::units::{DeviceIntSize, LayoutPoint, LayoutVector2D};
 use webrender_api::{ExternalScrollId, ImageKey};
 
+/// Set when styling evaluated a container query or container-relative unit against a container,
+/// which happens only when a page has containers. Layout then checks after each layout whether
+/// a container changed size, see `LayoutThread::relayout_if_container_sizes_changed`.
+pub static CONTAINER_QUERIED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 pub trait GenericLayoutDataTrait: Any + MallocSizeOfTrait + Send + Sync + 'static {
     fn as_any(&self) -> &dyn Any;
+
+    /// The physical size of the content box of the node's first box in the most recent
+    /// layout, if it has one. Container queries evaluate against it.
+    fn content_box_size(&self) -> Option<euclid::default::Size2D<Au>>;
 }
 
 pub trait LayoutDataTrait: GenericLayoutDataTrait + Default {}
