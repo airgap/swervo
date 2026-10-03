@@ -18,6 +18,7 @@ use style::traversal::{DomTraversal, PerLevelTraversalData, recalc_style_at};
 use crate::BoxTree;
 use crate::context::LayoutContext;
 use crate::dom::{DOMLayoutData, NodeExt};
+use crate::dom_traversal::is_foreign_object;
 use crate::layout_root::LayoutRoot;
 
 pub struct RecalcStyle<'a> {
@@ -204,6 +205,15 @@ pub(crate) fn compute_damage_and_rebuild_box_tree_below_dirty_root<'dom>(
     if !element_damage.is_empty() && svg_paint_is_stale(layout_context, node) {
         element_damage |= LayoutDamage::BoxDamage;
     }
+    // Descendants' computed paint is baked into the enclosing `<svg>`'s serialization as well,
+    // but only the root's is fingerprinted: re-serialize when a descendant restyles.
+    if !element_damage.is_empty() {
+        if let Some(svg) = enclosing_serialized_svg(node) {
+            layout_context
+                .image_resolver
+                .queue_svg_element_for_serialization(svg);
+        }
+    }
 
     let has_dirty_descendants;
     #[expect(unsafe_code)]
@@ -255,6 +265,37 @@ fn svg_paint_is_stale(layout_context: &LayoutContext, node: ServoLayoutNode<'_>)
     }
     let style = node.style(&layout_context.style_context);
     svg_data.source_paint_signature.as_deref() != Some(svg_paint_signature(&style).as_str())
+}
+
+/// The `<svg>` whose rasterized serialization paints `node`, when `node` is an svg element
+/// below it (not inside a `<foreignObject>`, whose HTML content lays out normally) and that
+/// serialization exists.
+#[expect(unsafe_code)]
+fn enclosing_serialized_svg(node: ServoLayoutNode<'_>) -> Option<ServoLayoutNode<'_>> {
+    let element = node.as_element()?;
+    if !element.is_svg_element() || is_foreign_object(&element) {
+        return None;
+    }
+    // The outermost svg of the contiguous svg-namespace ancestor chain is the replaced one;
+    // nested `<svg>`s are serialized as part of it.
+    let mut enclosing_svg = None;
+    let mut ancestor = unsafe { node.dangerous_flat_tree_parent() };
+    while let Some(current) = ancestor {
+        let Some(current_element) = current.as_element() else {
+            break;
+        };
+        if !current_element.is_svg_element() || is_foreign_object(&current_element) {
+            break;
+        }
+        if current.as_svg().is_some() {
+            enclosing_svg = Some(current);
+        }
+        ancestor = unsafe { current.dangerous_flat_tree_parent() };
+    }
+    enclosing_svg.filter(|svg| {
+        svg.as_svg()
+            .is_some_and(|data| matches!(data.source, Some(Ok(_))))
+    })
 }
 
 enum BoxDamageAction<'a> {

@@ -286,23 +286,87 @@ pub(crate) fn default_system_generic_font_family(
     .into()
 }
 
-/// Families that Skia (and so Chrome) accepts in place of one another when fontconfig substitutes
-/// one for another: they share metrics, so a page laid out against one lays out the same with any.
-/// The Latin and office groups of Skia's `kFontEquivMap`; its CJK groups are not mirrored.
-const METRIC_COMPATIBLE_FAMILIES: &[&[&str]] = &[
-    &["Arial", "Arimo", "Liberation Sans"],
-    &["Times New Roman", "Tinos", "Liberation Serif"],
-    &["Courier New", "Cousine", "Liberation Mono"],
-    &["Symbol", "Symbol Neu"],
-    &["Cambria", "Caladea"],
-    &["Calibri", "Carlito"],
+/// Skia's `kFontEquivMap` (Chrome's fontconfig matcher): families accepted in place of one
+/// another when fontconfig substitutes one for another, because they share metrics. A family's
+/// class is its *first* entry (a few CJK families are listed twice), as in Skia's
+/// `GetFontEquivClass`.
+const FONT_EQUIVALENCE_CLASSES: &[(&str, &str)] = &[
+    ("sans", "Arial"),
+    ("sans", "Arimo"),
+    ("sans", "Liberation Sans"),
+    ("serif", "Times New Roman"),
+    ("serif", "Tinos"),
+    ("serif", "Liberation Serif"),
+    ("mono", "Courier New"),
+    ("mono", "Cousine"),
+    ("mono", "Liberation Mono"),
+    ("symbol", "Symbol"),
+    ("symbol", "Symbol Neu"),
+    ("pgothic", "MS PGothic"),
+    ("pgothic", "ＭＳ Ｐゴシック"),
+    ("pgothic", "Noto Sans CJK JP"),
+    ("pgothic", "IPAPGothic"),
+    ("pgothic", "MotoyaG04Gothic"),
+    ("gothic", "MS Gothic"),
+    ("gothic", "ＭＳ ゴシック"),
+    ("gothic", "Noto Sans Mono CJK JP"),
+    ("gothic", "IPAGothic"),
+    ("gothic", "MotoyaG04GothicMono"),
+    ("pmincho", "MS PMincho"),
+    ("pmincho", "ＭＳ Ｐ明朝"),
+    ("pmincho", "Noto Serif CJK JP"),
+    ("pmincho", "IPAPMincho"),
+    ("pmincho", "MotoyaG04Mincho"),
+    ("mincho", "MS Mincho"),
+    ("mincho", "ＭＳ 明朝"),
+    ("mincho", "Noto Serif CJK JP"),
+    ("mincho", "IPAMincho"),
+    ("mincho", "MotoyaG04MinchoMono"),
+    ("simsun", "Simsun"),
+    ("simsun", "宋体"),
+    ("simsun", "Noto Serif CJK SC"),
+    ("simsun", "MSung GB18030"),
+    ("simsun", "Song ASC"),
+    ("nsimsun", "NSimsun"),
+    ("nsimsun", "新宋体"),
+    ("nsimsun", "Noto Serif CJK SC"),
+    ("nsimsun", "MSung GB18030"),
+    ("nsimsun", "N Song ASC"),
+    ("simhei", "Simhei"),
+    ("simhei", "黑体"),
+    ("simhei", "Noto Sans CJK SC"),
+    ("simhei", "MYingHeiGB18030"),
+    ("simhei", "MYingHeiB5HK"),
+    ("pmingliu", "PMingLiU"),
+    ("pmingliu", "新細明體"),
+    ("pmingliu", "Noto Serif CJK TC"),
+    ("pmingliu", "MSung B5HK"),
+    ("mingliu", "MingLiU"),
+    ("mingliu", "細明體"),
+    ("mingliu", "Noto Serif CJK TC"),
+    ("mingliu", "MSung B5HK"),
+    ("pmingliuhk", "PMingLiU_HKSCS"),
+    ("pmingliuhk", "新細明體_HKSCS"),
+    ("pmingliuhk", "Noto Serif CJK TC"),
+    ("pmingliuhk", "MSung B5HK"),
+    ("mingliuhk", "MingLiU_HKSCS"),
+    ("mingliuhk", "細明體_HKSCS"),
+    ("mingliuhk", "Noto Serif CJK TC"),
+    ("mingliuhk", "MSung B5HK"),
+    ("cambria", "Cambria"),
+    ("cambria", "Caladea"),
+    ("calibri", "Calibri"),
+    ("calibri", "Carlito"),
 ];
 
 fn is_metric_compatible(requested: &str, matched: &str) -> bool {
-    METRIC_COMPATIBLE_FAMILIES.iter().any(|group| {
-        group.iter().any(|family| family.eq_ignore_ascii_case(requested)) &&
-            group.iter().any(|family| family.eq_ignore_ascii_case(matched))
-    })
+    let class_of = |family: &str| {
+        FONT_EQUIVALENCE_CLASSES
+            .iter()
+            .find(|(_, name)| name.eq_ignore_ascii_case(family))
+            .map(|(class, _)| *class)
+    };
+    class_of(requested).is_some_and(|class| class_of(matched) == Some(class))
 }
 
 /// Blink's `AlternateFamilyName`: the name Chrome retries when a family can't be found. It is
@@ -374,15 +438,21 @@ fn acceptable_fontconfig_substitute(name: &str) -> Option<String> {
         if font_match.is_null() {
             return None;
         }
-        let acceptable = (0..)
-            .map_while(|index| pattern_family(font_match, index))
-            .any(|matched| {
-                post_config_family
-                    .as_deref()
-                    .is_some_and(|post_config| post_config.eq_ignore_ascii_case(&matched)) ||
-                    matched.eq_ignore_ascii_case(name) ||
-                    is_metric_compatible(name, &matched)
-            });
+        // Skia lets these generic-sounding names take whatever fontconfig picks
+        // (`IsFallbackFontAllowed`).
+        let fallback_allowed = ["sans", "serif", "monospace"]
+            .iter()
+            .any(|generic| generic.eq_ignore_ascii_case(name));
+        let acceptable = fallback_allowed ||
+            (0..)
+                .map_while(|index| pattern_family(font_match, index))
+                .any(|matched| {
+                    post_config_family
+                        .as_deref()
+                        .is_some_and(|post_config| post_config.eq_ignore_ascii_case(&matched)) ||
+                        matched.eq_ignore_ascii_case(name) ||
+                        is_metric_compatible(name, &matched)
+                });
         let family = if acceptable {
             pattern_family(font_match, 0)
         } else {

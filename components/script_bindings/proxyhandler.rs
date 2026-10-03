@@ -11,7 +11,7 @@ use std::ptr;
 use std::ptr::NonNull;
 
 use js::context::{JSContext, RawJSContext};
-use js::conversions::{ToJSValConvertible, jsstr_to_string};
+use js::conversions::{ConversionResult, FromJSValConvertible, ToJSValConvertible, jsstr_to_string};
 use js::glue::{GetProxyHandler, GetProxyHandlerFamily, GetProxyPrivate, SetProxyPrivate};
 use js::jsapi::{
     CallArgs, DOMProxyShadowsResult, GetObjectRealmOrNull, GetRealmPrincipals, GetStaticPrototype,
@@ -31,7 +31,7 @@ use js::rust::wrappers2::{
     AppendToIdVector, Call, GetObjectProto, GetPropertyKeys, GetWellKnownSymbol,
     InvokeGetOwnPropertyDescriptor, JS_AlreadyHasOwnPropertyById, JS_AtomizeAndPinString,
     JS_DefineFunctions, JS_DefineProperties, JS_DefinePropertyById, JS_DeletePropertyById,
-    JS_GetOwnPropertyDescriptorById, JS_GetProperty, JS_IdToValue, JS_IsExceptionPending,
+    JS_GetOwnPropertyDescriptorById, JS_IdToValue, JS_IsExceptionPending,
     JS_NewObjectWithGivenProto, JS_ValueToSource, RUST_INTERNED_STRING_TO_JSID, RUST_JSID_IS_VOID,
     SetDataPropertyDescriptor, SetPropertyIgnoringNamedGetter, int_to_jsid,
 };
@@ -41,7 +41,10 @@ use js::rust::{
 };
 
 use crate::DomTypes;
-use crate::conversions::{is_dom_proxy, jsid_to_string, native_from_object};
+use crate::codegen::GenericBindings::HTMLAllCollectionBinding::HTMLAllCollection_Binding::HTMLAllCollectionMethods;
+use crate::conversions::{
+    StringificationBehavior, is_dom_proxy, jsid_to_string, native_from_object, root_from_object,
+};
 use crate::error::Error;
 use crate::interfaces::{DomHelpers, GlobalScopeHelpers};
 use crate::principals::ServoJSPrincipalsRef;
@@ -198,12 +201,13 @@ pub(crate) static HTML_ALL_COLLECTION_PROXY_CLASS: JSClass = JSClass {
 };
 
 /// The custom [[Call]] of `HTMLAllCollection`
-/// (<https://html.spec.whatwg.org/multipage/#HTMLAllCollection-call>), whose steps are exactly
-/// those of its `item()` method, so it calls the prototype's `item` with the same arguments.
+/// (<https://html.spec.whatwg.org/multipage/#HTMLAllCollection-call>): the steps of `item()`,
+/// performed on the collection itself whatever `thisArgument` is, and independent of any
+/// script-visible `item` property.
 ///
 /// # Safety
 /// `cx` must point to a valid, non-null JSContext and `args` to valid CallArgs.
-pub(crate) unsafe extern "C" fn html_all_collection_call(
+pub(crate) unsafe extern "C" fn html_all_collection_call<D: DomTypes>(
     cx: *mut RawJSContext,
     proxy: RawHandleObject,
     args: *const CallArgs,
@@ -212,29 +216,29 @@ pub(crate) unsafe extern "C" fn html_all_collection_call(
     let mut cx = JSContext::from_ptr(NonNull::new(cx).unwrap());
     let cx = &mut cx;
     let args = &*args;
-    let proxy = HandleObject::from_raw(proxy);
+    let collection = root_from_object::<D::HTMLAllCollection>(proxy.get(), cx.raw_cx())
+        .expect("only HTMLAllCollection reflectors get this trap");
 
-    // Look `item` up on the prototype: a named property "item" on the collection itself must
-    // not be able to hijack the call.
-    rooted!(&in(cx) let mut proto = ptr::null_mut::<JSObject>());
-    if !GetObjectProto(cx, proxy, proto.handle_mut()) {
-        return false;
-    }
-    rooted!(&in(cx) let mut item = UndefinedValue());
-    if !JS_GetProperty(cx, proto.handle(), c"item".as_ptr(), item.handle_mut()) {
-        return false;
-    }
-    rooted!(&in(cx) let thisv = ObjectValue(proxy.get()));
-    Call(
-        cx,
-        thisv.handle(),
-        item.handle(),
-        &HandleValueArray {
-            length_: args.argc_ as usize,
-            elements_: args.argv_,
-        },
-        MutableHandleValue::from_raw(args.rval()),
-    )
+    // Step 1. An absent argument reads as undefined.
+    let first_argument = HandleValue::from_raw(args.get(0));
+    let name_or_index = if first_argument.get().is_undefined() {
+        None
+    } else {
+        // Step 2.
+        match DOMString::safe_from_jsval(cx, first_argument, StringificationBehavior::Default) {
+            Ok(ConversionResult::Success(name_or_index)) => Some(name_or_index),
+            Ok(ConversionResult::Failure(_)) => {
+                unreachable!("DOMString conversion either succeeds or throws")
+            },
+            Err(()) => return false,
+        }
+    };
+
+    // Steps 3-4.
+    collection
+        .Item(cx, name_or_index)
+        .to_jsval(cx.raw_cx(), MutableHandleValue::from_raw(args.rval()));
+    true
 }
 
 /// `HTMLAllCollection` reflectors are callable (see [`html_all_collection_call`]).

@@ -141,7 +141,7 @@ fn traverse_children_of<'dom>(
     }
 }
 
-fn is_foreign_object<'dom>(element: &impl LayoutElement<'dom>) -> bool {
+pub(crate) fn is_foreign_object<'dom>(element: &impl LayoutElement<'dom>) -> bool {
     element.is_svg_element() && *element.local_name() == LocalName::from("foreignObject")
 }
 

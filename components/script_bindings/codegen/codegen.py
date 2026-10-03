@@ -4082,7 +4082,7 @@ class CGDefineProxyHandler(CGAbstractMethod):
         customCall = 'None'
         customIsCallable = 'None'
         if self.descriptor.interface.identifier.name == "HTMLAllCollection":
-            customCall = 'Some(proxyhandler::html_all_collection_call)'
+            customCall = 'Some(proxyhandler::html_all_collection_call::<D>)'
             customIsCallable = 'Some(proxyhandler::html_all_collection_is_callable)'
 
         getOwnEnumerablePropertyKeys = "own_property_keys::<D>"
