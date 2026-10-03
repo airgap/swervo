@@ -55,6 +55,7 @@ use crate::dom::event::Event;
 use crate::dom::event::event::{EventBubbles, EventCancelable, EventComposed};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::filelist::FileList;
+use crate::dom::html::htmlbuttonelement::HTMLButtonElement;
 use crate::dom::html::htmldatalistelement::HTMLDataListElement;
 use crate::dom::html::htmlelement::HTMLElement;
 use crate::dom::html::htmlfieldsetelement::HTMLFieldSetElement;
@@ -868,6 +869,11 @@ impl HTMLInputElement {
     fn handle_key_reaction(&self, cx: &mut JSContext, action: KeyReaction, event: &Event) {
         match action {
             KeyReaction::TriggerDefaultAction => {
+                // Enter commits an edit like blurring does (browsers fire `change` before
+                // submitting).
+                self.owner_document()
+                    .focus_handler()
+                    .fire_change_if_edited_since_focus(cx, self.upcast());
                 self.implicit_submission(cx);
                 event.mark_as_handled();
             },
@@ -1855,19 +1861,26 @@ impl HTMLInputElement {
         if self.upcast::<Element>().click_in_progress() {
             return;
         }
-        let submit_button = node
+        // <https://html.spec.whatwg.org/multipage/#default-button>: the form's first submit
+        // button in tree order, which is usually a `<button>` (default type submit).
+        let default_button = node
             .traverse_preorder(ShadowIncluding::No)
-            .filter_map(DomRoot::downcast::<HTMLInputElement>)
-            .filter(|input| matches!(*input.input_type(), InputType::Submit(_)))
-            .find(|r| r.form_owner() == owner);
-        match submit_button {
+            .find(|node| {
+                if let Some(input) = node.downcast::<HTMLInputElement>() {
+                    matches!(*input.input_type(), InputType::Submit(_) | InputType::Image(_)) &&
+                        input.form_owner() == owner
+                } else if let Some(button) = node.downcast::<HTMLButtonElement>() {
+                    button.is_submit_button() && button.form_owner() == owner
+                } else {
+                    false
+                }
+            });
+        match default_button {
             Some(ref button) => {
-                if button.is_instance_activatable() {
+                if !button.downcast::<Element>().unwrap().is_actually_disabled() {
                     // spec does not actually say to set the not trusted flag,
                     // but we can get here from synthetic keydown events
-                    button
-                        .upcast::<Node>()
-                        .fire_synthetic_pointer_event_not_trusted(cx, atom!("click"));
+                    button.fire_synthetic_pointer_event_not_trusted(cx, atom!("click"));
                 }
             },
             None => {
