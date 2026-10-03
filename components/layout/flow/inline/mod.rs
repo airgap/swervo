@@ -83,7 +83,7 @@ use app_units::{Au, MAX_AU};
 use atomic_refcell::AtomicRef;
 use bitflags::bitflags;
 use construct::InlineFormattingContextBuilder;
-use fonts::{FontMetrics, FontRef, ShapedTextSlice};
+use fonts::{FontMetrics, FontRef, ShapedTextSlice, ShapedTextSlicer, ShapingOptions};
 use icu_locid::LanguageIdentifier;
 use icu_locid::subtags::{Language, language};
 use icu_properties::{self, LineBreak as ICULineBreak};
@@ -105,6 +105,9 @@ use style::computed_values::white_space_collapse::T as WhiteSpaceCollapse;
 use style::computed_values::word_break::T as WordBreak;
 use style::context::{QuirksMode, SharedStyleContext};
 use style::properties::ComputedValues;
+use style::values::computed::Overflow;
+use style::values::specified::box_::DisplayInside;
+use style::values::specified::text::TextOverflowSide;
 use style::properties::style_structs::InheritedText;
 use style::values::computed::BaselineShift;
 use style::values::generics::box_::BaselineShiftKeyword;
@@ -856,6 +859,18 @@ struct InlineFormattingContextLayout<'layout_data> {
     /// Information about the line currently being laid out into [`LineItem`]s.
     current_line: LineUnderConstruction,
 
+    /// `-webkit-line-clamp` on a `display: -webkit-box` container: the number of lines shown.
+    line_clamp: Option<usize>,
+
+    /// The number of non-phantom lines laid out so far.
+    lines_laid_out: usize,
+
+    /// With [`Self::line_clamp`], the block end of the last line shown, which ends the content.
+    clamped_content_block_size: Option<Au>,
+
+    /// Whether the line being finished is the last of this inline formatting context.
+    finishing_last_line: bool,
+
     /// Information about the unbreakable line segment currently being laid out into [`LineItem`]s.
     current_line_segment: UnbreakableSegmentUnderConstruction,
 
@@ -1072,6 +1087,7 @@ impl InlineFormattingContextLayout<'_> {
 
         // Finally we finish the line itself and convert all of the LineItems into
         // fragments.
+        self.finishing_last_line = true;
         self.finish_current_line_and_reset(true /* last_line_or_forced_line_break */);
     }
 
@@ -1139,8 +1155,15 @@ impl InlineFormattingContextLayout<'_> {
             block_end_position
         };
 
+        let line_end = match self.current_line.placement_among_floats.get() {
+            Some(placement_among_floats) => {
+                placement_among_floats.start_corner.inline + placement_among_floats.size.inline
+            },
+            None => self.containing_block().size.inline,
+        };
+
         // Set up the new line now that we no longer need the old one.
-        let line_to_layout = std::mem::replace(
+        let mut line_to_layout = std::mem::replace(
             &mut self.current_line,
             LineUnderConstruction::new(LogicalVec2 {
                 inline: Au::zero(),
@@ -1159,6 +1182,19 @@ impl InlineFormattingContextLayout<'_> {
             block: block_start_position,
             inline: inline_start_position,
         };
+
+        if !is_phantom_line {
+            self.lines_laid_out += 1;
+        }
+        let is_last_clamped_line = !is_phantom_line && self.line_clamp == Some(self.lines_laid_out);
+        if is_last_clamped_line {
+            self.clamped_content_block_size = Some(block_end_position);
+        }
+        self.apply_text_overflow_ellipsis(
+            &mut line_to_layout.line_items,
+            line_end - inline_start_position,
+            is_last_clamped_line && !self.finishing_last_line,
+        );
 
         let baseline_offset = effective_block_advance.find_baseline_offset();
         let start_positioning_context_length = self.positioning_context.len();
@@ -1227,6 +1263,143 @@ impl InlineFormattingContextLayout<'_> {
     /// the `text-align` property, calculate where the line under construction starts in
     /// the inline axis as well as the adjustment needed for every justification opportunity
     /// to account for `text-align: justify`.
+    /// <https://drafts.csswg.org/css-overflow/#text-overflow>: with `text-overflow: ellipsis` on a
+    /// block container that doesn't show its overflow, a line whose content passes the end edge
+    /// (`available` from the line's start) is cut at the last character that leaves room for
+    /// "…". The ellipsis is drawn in the block container's style (so it isn't underlined after a
+    /// link), shaped with the font of the text it follows. `clamped` marks the last line shown
+    /// by `-webkit-line-clamp` with more content after it, which ends in an ellipsis whether or
+    /// not it overflows. Only horizontal left-to-right lines are handled; others keep being
+    /// clipped.
+    fn apply_text_overflow_ellipsis(
+        &self,
+        line_items: &mut Vec<LineItem>,
+        available: Au,
+        clamped: bool,
+    ) {
+        let style = self.containing_block().style;
+        let text_overflow_ellipsis = style.get_text().text_overflow.second ==
+            TextOverflowSide::Ellipsis &&
+            style.get_box().overflow_x != Overflow::Visible;
+        if !(clamped || text_overflow_ellipsis) ||
+            !style.writing_mode.is_horizontal() ||
+            !style.writing_mode.is_bidi_ltr()
+        {
+            return;
+        }
+        let pbm = |identifier: &InlineBoxIdentifier| {
+            &self.inline_box_states[identifier.index_in_inline_boxes as usize].pbm
+        };
+        let width = |item: &LineItem| match item {
+            LineItem::InlineStartBoxPaddingBorderMargin(identifier) => {
+                let pbm = pbm(identifier);
+                pbm.padding.inline_start +
+                    pbm.border.inline_start +
+                    pbm.margin.inline_start.auto_is(Au::zero)
+            },
+            LineItem::InlineEndBoxPaddingBorderMargin(identifier) => {
+                let pbm = pbm(identifier);
+                pbm.padding.inline_end + pbm.border.inline_end + pbm.margin.inline_end.auto_is(Au::zero)
+            },
+            LineItem::TextRun(_, text_run) => text_run
+                .text
+                .iter()
+                .map(|slice| slice.total_advance())
+                .sum(),
+            LineItem::Atomic(_, atomic) => atomic.size.inline,
+            LineItem::Tab { advance, .. } => *advance,
+            LineItem::AbsolutelyPositioned(..) | LineItem::Float(..) | LineItem::BlockLevel(..) => {
+                Au::zero()
+            },
+        };
+        let editable_or_block_level = line_items.iter().any(|item| match item {
+            LineItem::TextRun(_, text_run) => text_run.offsets.is_some(),
+            LineItem::BlockLevel(..) => true,
+            _ => false,
+        });
+        if editable_or_block_level ||
+            (!clamped && line_items.iter().map(width).sum::<Au>() <= available)
+        {
+            return;
+        }
+
+        // The ellipsis takes the font of the last text before the overflow, if any.
+        let mut used = Au::zero();
+        let overflow_index = line_items
+            .iter()
+            .position(|item| {
+                used += width(item);
+                used > available
+            })
+            .unwrap_or(line_items.len().saturating_sub(1));
+        let Some(font_text_run) = line_items[..=overflow_index]
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                LineItem::TextRun(_, text_run) if !text_run.info.bidi_level.is_rtl() => {
+                    Some(text_run)
+                },
+                _ => None,
+            })
+        else {
+            return;
+        };
+        let ellipsis = ShapedTextSlicer::new(
+            font_text_run
+                .info
+                .font
+                .shape_text("\u{2026}", &ShapingOptions::from(&*font_text_run.info)),
+        )
+        .slice_for_character_count(1, false, false);
+        let ellipsis_item = TextRunLineItem {
+            info: font_text_run.info.clone(),
+            base_fragment_info: font_text_run.base_fragment_info,
+            inline_styles: self.ifc.shared_inline_styles.clone(),
+            text: vec![ellipsis.clone()],
+            offsets: None,
+            is_empty_for_text_cursor: false,
+        };
+
+        // Keep what fits before the ellipsis, cutting into the text run that crosses it.
+        let limit = available - ellipsis.total_advance();
+        let mut used = Au::zero();
+        let mut kept = Vec::with_capacity(line_items.len() + 1);
+        let mut items = std::mem::take(line_items).into_iter();
+        for item in items.by_ref() {
+            let item_width = width(&item);
+            if used + item_width <= limit {
+                used += item_width;
+                kept.push(item);
+                continue;
+            }
+            if let LineItem::TextRun(identifier, mut text_run) = item &&
+                !text_run.info.bidi_level.is_rtl()
+            {
+                let mut room = limit - used;
+                let mut text = Vec::new();
+                for slice in text_run.text.drain(..) {
+                    if slice.total_advance() <= room {
+                        room -= slice.total_advance();
+                        text.push(slice);
+                    } else {
+                        text.push(slice.truncated_to_advance(room));
+                        break;
+                    }
+                }
+                text_run.text = text;
+                kept.push(LineItem::TextRun(identifier, text_run));
+            }
+            break;
+        }
+        kept.push(LineItem::TextRun(None, ellipsis_item));
+        // Floats and absolutely positioned boxes later on the line are still laid out; only
+        // the in-flow content past the ellipsis is dropped.
+        kept.extend(items.filter(|item| {
+            matches!(item, LineItem::AbsolutelyPositioned(..) | LineItem::Float(..))
+        }));
+        *line_items = kept;
+    }
+
     fn calculate_current_line_inline_start_and_justification_adjustment(
         &self,
         whitespace_trimmed: Au,
@@ -2027,6 +2200,10 @@ impl InlineFormattingContext {
                 inline: self.inline_start_for_first_line(containing_block.into()),
                 block: Au::zero(),
             }),
+            line_clamp: line_clamp(style),
+            lines_laid_out: 0,
+            clamped_content_block_size: None,
+            finishing_last_line: false,
             root_nesting_level: InlineContainerState::new(
                 style.to_arc(),
                 inline_container_state_flags,
@@ -2087,6 +2264,9 @@ impl InlineFormattingContext {
         layout.finish_last_line();
         let (content_block_size, collapsible_margins_in_children, baselines) =
             layout.placement_state.finish();
+        let content_block_size = layout
+            .clamped_content_block_size
+            .unwrap_or(content_block_size);
 
         IndependentFormattingContextLayoutResult {
             fragments: layout.fragments,
@@ -3114,4 +3294,16 @@ fn char_prevents_soft_wrap_opportunity_when_before_or_after_atomic(character: ch
         icu_properties::maps::line_break().get(character),
         ICULineBreak::Glue | ICULineBreak::WordJoiner | ICULineBreak::ZWJ
     )
+}
+
+/// The number of lines `-webkit-line-clamp` shows for an inline formatting context directly in
+/// `style`'s box. It applies to `display: -webkit-box` boxes, which stylo turns into block
+/// containers while keeping `-webkit-box` as their original display.
+fn line_clamp(style: &ComputedValues) -> Option<usize> {
+    let box_style = style.get_box();
+    let line_clamp = box_style.clone__webkit_line_clamp();
+    if line_clamp.is_none() || box_style.original_display.inside() != DisplayInside::WebkitBox {
+        return None;
+    }
+    Some(line_clamp.0 as usize)
 }
