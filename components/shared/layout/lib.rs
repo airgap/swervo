@@ -64,7 +64,7 @@ use style::device::Device;
 use style::dom::OpaqueNode;
 use style::invalidation::element::restyle_hints::RestyleHint;
 use style::properties::style_structs::Font;
-use style::properties::{ComputedValues, PropertyId};
+use style::properties::{ComputedValues, LonghandId, PropertyId};
 use style::selector_parser::{PseudoElement, RestyleDamage, Snapshot};
 use style::str::char_is_whitespace;
 use style::stylesheets::{DocumentStyleSheet, Stylesheet};
@@ -156,9 +156,47 @@ pub struct HTMLCanvasData {
     pub height: u32,
 }
 
+/// CSS properties that style how an inline `<svg>` paints. Inline SVG is rasterized from a
+/// standalone serialization of its subtree, which has none of the page's cascade, so the
+/// serializer copies these computed values into it. `color` is included for `currentColor`.
+pub const SVG_PAINT_PROPERTIES: [LonghandId; 16] = [
+    LonghandId::Color,
+    LonghandId::Fill,
+    LonghandId::FillOpacity,
+    LonghandId::FillRule,
+    LonghandId::Stroke,
+    LonghandId::StrokeWidth,
+    LonghandId::StrokeOpacity,
+    LonghandId::StrokeLinecap,
+    LonghandId::StrokeLinejoin,
+    LonghandId::StrokeMiterlimit,
+    LonghandId::StrokeDasharray,
+    LonghandId::StrokeDashoffset,
+    LonghandId::PaintOrder,
+    LonghandId::ClipRule,
+    LonghandId::StopColor,
+    LonghandId::StopOpacity,
+];
+
+/// A fingerprint of the paint properties an `<svg>` element's serialization was built from.
+/// The serialization is cached across restyles, so layout compares this to detect paint changes
+/// (a hover colour, a theme switch) that must re-serialize the subtree.
+pub fn svg_paint_signature(style: &ComputedValues) -> String {
+    let mut signature = String::new();
+    for property in SVG_PAINT_PROPERTIES {
+        style
+            .computed_or_resolved_value(property, None, &mut signature)
+            .expect("Writing CSS to a String cannot fail");
+        signature.push(';');
+    }
+    signature
+}
+
 pub struct SVGElementData<'dom> {
     /// The SVG's XML source represented as a base64 encoded `data:` url.
     pub source: Option<Result<ServoUrl, ()>>,
+    /// The [`svg_paint_signature`] of the element's style when `source` was serialized.
+    pub source_paint_signature: Option<String>,
     pub width: Option<&'dom AttrValue>,
     pub height: Option<&'dom AttrValue>,
     pub svg_id: String,

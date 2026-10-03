@@ -86,6 +86,9 @@ pub trait LayoutElement<'dom>: Copy + Debug + Send + Sync {
     /// <https://dom.spec.whatwg.org/#concept-element-local-name>.
     fn local_name(&self) -> &LocalName;
 
+    /// Whether this element is in the SVG namespace.
+    fn is_svg_element(&self) -> bool;
+
     /// Get the attribute with the given `namespace` and `name` as an [`AttrValue`] if it
     /// exists, otherwise return `None`.
     fn attribute(&self, namespace: &Namespace, name: &LocalName) -> Option<&AttrValue>;

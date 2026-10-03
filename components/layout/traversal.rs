@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use layout_api::{
     DangerousStyleElement, DangerousStyleNode, LayoutDamage, LayoutElement, LayoutNode,
+    svg_paint_signature,
 };
 use script::layout_dom::ServoLayoutNode;
 use style::context::{SharedStyleContext, StyleContext};
@@ -190,13 +191,19 @@ pub(crate) fn compute_damage_and_rebuild_box_tree_below_dirty_root<'dom>(
         return damage_from_parent;
     };
 
-    let (element_damage, is_display_none) = {
+    let (mut element_damage, is_display_none) = {
         let mut element_data = element.element_data_mut();
         (
             LayoutDamage::from(std::mem::take(&mut element_data.damage)),
             element_data.styles.is_display_none(),
         )
     };
+    // An inline <svg> paints from a cached serialization with its paint properties baked in,
+    // so a restyle that changes them (even a repaint-only `color` change) has to rebuild its
+    // box, which requests a fresh serialization.
+    if !element_damage.is_empty() && svg_paint_is_stale(layout_context, node) {
+        element_damage |= LayoutDamage::BoxDamage;
+    }
 
     let has_dirty_descendants;
     #[expect(unsafe_code)]
@@ -234,6 +241,20 @@ pub(crate) fn compute_damage_and_rebuild_box_tree_below_dirty_root<'dom>(
     // Apply the calculated damage to this element (perhaps triggering box tree layout),
     // and propagate resulting damage to ancestors.
     damage_set.apply_damage(layout_context, layout_roots)
+}
+
+/// Whether `node` is an `<svg>` whose cached serialization was built from different paint
+/// properties than its current style has. Unserialized or failed serializations don't count:
+/// the former is already queued, the latter is never retried.
+fn svg_paint_is_stale(layout_context: &LayoutContext, node: ServoLayoutNode<'_>) -> bool {
+    let Some(svg_data) = node.as_svg() else {
+        return false;
+    };
+    if !matches!(svg_data.source, Some(Ok(_))) {
+        return false;
+    }
+    let style = node.style(&layout_context.style_context);
+    svg_data.source_paint_signature.as_deref() != Some(svg_paint_signature(&style).as_str())
 }
 
 enum BoxDamageAction<'a> {

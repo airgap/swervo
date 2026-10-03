@@ -117,17 +117,58 @@ fn traverse_children_of<'dom>(
         traverse_eager_pseudo_element(PseudoElement::Before, parent_element_info, context, handler);
     }
 
-    for child in parent_element_info.node.flat_tree_children() {
-        if child.is_text_node() {
-            let info = NodeAndStyleInfo::new(child, child.style(&context.style_context));
-            handler.handle_text(&info, child.text_content());
-        } else if child.is_element() {
-            traverse_element(child, context, handler);
+    // Inside a native-foreignObject `<svg>` host only `<foreignObject>`s become boxes (in the
+    // host's widget); every other svg element paints through the host's rasterized image.
+    if parent_element_info
+        .node
+        .as_element()
+        .is_some_and(|element| element.is_svg_element() && !is_foreign_object(&element))
+    {
+        traverse_svg_foreign_objects(parent_element_info.node, context, handler);
+    } else {
+        for child in parent_element_info.node.flat_tree_children() {
+            if child.is_text_node() {
+                let info = NodeAndStyleInfo::new(child, child.style(&context.style_context));
+                handler.handle_text(&info, child.text_content());
+            } else if child.is_element() {
+                traverse_element(child, context, handler);
+            }
         }
     }
 
     if is_element {
         traverse_eager_pseudo_element(PseudoElement::After, parent_element_info, context, handler);
+    }
+}
+
+fn is_foreign_object<'dom>(element: &impl LayoutElement<'dom>) -> bool {
+    element.is_svg_element() && *element.local_name() == LocalName::from("foreignObject")
+}
+
+/// Traverse the `<foreignObject>` descendants of an svg element, looking through svg containers
+/// (`<g>`, `<a>`, `<switch>`, …) that are themselves painted as part of the rasterized svg. Text,
+/// `<title>`, `<desc>` and the like never lay out as boxes; a container hidden with
+/// `display: none` hides the foreignObjects inside it.
+fn traverse_svg_foreign_objects<'dom>(
+    svg_parent: ServoLayoutNode<'dom>,
+    context: &LayoutContext,
+    handler: &mut impl TraversalHandler<'dom>,
+) {
+    for child in svg_parent.flat_tree_children() {
+        let Some(element) = child.as_element() else {
+            continue;
+        };
+        if !element.is_svg_element() {
+            continue;
+        }
+        if is_foreign_object(&element) {
+            traverse_element(child, context, handler);
+        } else if !matches!(
+            Display::from(child.style(&context.style_context).get_box().display),
+            Display::None
+        ) {
+            traverse_svg_foreign_objects(child, context, handler);
+        }
     }
 }
 

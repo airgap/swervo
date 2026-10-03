@@ -455,15 +455,18 @@ codegen-units = 1
 # into the shared `values` list so Servo gets it too. This patch tree is servo/stylo at the
 # rev pinned above (bc25ec93) plus that one-line longhands.toml change — keep the rev bumped
 # in lockstep with the servo/stylo rev above. Branch: navgator-background-clip-text.
+# Now also carries the light-dark() resolution fix and fill/stroke + the SVG paint properties
+# enabled for Servo (inline-SVG serialization copies them in). Branch:
+# nicole/svg-paint-properties-servo.
 [patch."https://github.com/servo/stylo"]
-selectors = { git = "https://github.com/airgap/stylo", rev = "ca6f5d497a0439efcdf17ca15d3e6f3c2e5dd700" }
-servo_arc = { git = "https://github.com/airgap/stylo", rev = "ca6f5d497a0439efcdf17ca15d3e6f3c2e5dd700" }
-stylo = { git = "https://github.com/airgap/stylo", rev = "ca6f5d497a0439efcdf17ca15d3e6f3c2e5dd700" }
-stylo_atoms = { git = "https://github.com/airgap/stylo", rev = "ca6f5d497a0439efcdf17ca15d3e6f3c2e5dd700" }
-stylo_dom = { git = "https://github.com/airgap/stylo", rev = "ca6f5d497a0439efcdf17ca15d3e6f3c2e5dd700" }
-stylo_malloc_size_of = { git = "https://github.com/airgap/stylo", rev = "ca6f5d497a0439efcdf17ca15d3e6f3c2e5dd700" }
-stylo_static_prefs = { git = "https://github.com/airgap/stylo", rev = "ca6f5d497a0439efcdf17ca15d3e6f3c2e5dd700" }
-stylo_traits = { git = "https://github.com/airgap/stylo", rev = "ca6f5d497a0439efcdf17ca15d3e6f3c2e5dd700" }
+selectors = { git = "https://github.com/airgap/stylo", rev = "23a4897b8769339a7eefdab7fc01e7ca3a438662" }
+servo_arc = { git = "https://github.com/airgap/stylo", rev = "23a4897b8769339a7eefdab7fc01e7ca3a438662" }
+stylo = { git = "https://github.com/airgap/stylo", rev = "23a4897b8769339a7eefdab7fc01e7ca3a438662" }
+stylo_atoms = { git = "https://github.com/airgap/stylo", rev = "23a4897b8769339a7eefdab7fc01e7ca3a438662" }
+stylo_dom = { git = "https://github.com/airgap/stylo", rev = "23a4897b8769339a7eefdab7fc01e7ca3a438662" }
+stylo_malloc_size_of = { git = "https://github.com/airgap/stylo", rev = "23a4897b8769339a7eefdab7fc01e7ca3a438662" }
+stylo_static_prefs = { git = "https://github.com/airgap/stylo", rev = "23a4897b8769339a7eefdab7fc01e7ca3a438662" }
+stylo_traits = { git = "https://github.com/airgap/stylo", rev = "23a4897b8769339a7eefdab7fc01e7ca3a438662" }
 #
 # Or for another Git dependency:
 #

@@ -8,7 +8,10 @@ use app_units::{Au, MAX_AU};
 use data_url::DataUrl;
 use embedder_traits::ViewportDetails;
 use euclid::{Scale, Size2D};
-use layout_api::{IFrameSize, LayoutElement, LayoutImageDestination, LayoutNode, SVGElementData};
+use layout_api::{
+    IFrameSize, LayoutElement, LayoutImageDestination, LayoutNode, SVGElementData,
+    svg_paint_signature,
+};
 use malloc_size_of_derive::MallocSizeOf;
 use net_traits::image_cache::{Image, ImageOrMetadataAvailable, VectorImage};
 use net_traits::request::InternalRequest;
@@ -280,7 +283,19 @@ impl ReplacedContents {
             },
             // If `svg_source_result` is `Err()`, it means that the previous attempt
             // had errored, then don't attempt to serialize again.
-            Some(svg_source_result) => svg_source_result.ok(),
+            Some(svg_source_result) => {
+                // Paint properties are baked into the serialization; when they have changed
+                // since, keep painting the old one until script has produced a fresh one.
+                if svg_source_result.is_ok() &&
+                    svg_data.source_paint_signature.as_deref() !=
+                        Some(svg_paint_signature(&parent_style).as_str())
+                {
+                    context
+                        .image_resolver
+                        .queue_svg_element_for_serialization(node);
+                }
+                svg_source_result.ok()
+            },
         };
 
         let cached_image = svg_source.and_then(|svg_source| {
