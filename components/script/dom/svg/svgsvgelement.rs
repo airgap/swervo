@@ -653,8 +653,22 @@ impl SVGSVGElement {
             // Appended, so they win over the inline text they were computed from: the computed
             // values already include it, in a form the consumer understands (inline text can hold
             // `var()` or `currentcolor` that a standalone SVG renderer can't resolve).
+            // Custom properties and `var()` uses are dropped from the inline text: resvg's CSS
+            // parser stops at a `--name` and discards every later declaration, the appended
+            // ones included, and their computed results are what gets appended.
             Some((_, value)) => {
-                *value = AttrValue::String(format!("{};{declarations}", &**value));
+                // Joined without empty entries: resvg also gives up on a leading `;`.
+                let kept: Vec<&str> = value
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|declaration| {
+                        !declaration.is_empty() &&
+                            !declaration.starts_with("--") &&
+                            !declaration.contains("var(")
+                    })
+                    .chain(std::iter::once(declarations.as_str()))
+                    .collect();
+                *value = AttrValue::String(kept.join(";"));
             },
             None => attributes.push((style_name, AttrValue::String(declarations))),
         }

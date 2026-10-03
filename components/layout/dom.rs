@@ -679,6 +679,14 @@ impl<'dom> NodeExt<'dom> for ServoLayoutNode<'dom> {
                         else {
                             return false;
                         };
+                        // A box that became absolutely positioned or floated needs a new
+                        // out-of-flow box built by its parent; rebuilt in place as in-flow it
+                        // was never laid out, so it vanished.
+                        if info.style.clone_position().is_absolutely_positioned() ||
+                            info.style.clone_float().is_floating()
+                        {
+                            return false;
+                        }
                         if !matches!(
                             BlockLevelCreator::new_for_inflow_block_level_element(
                                 &info,

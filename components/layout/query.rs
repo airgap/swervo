@@ -21,6 +21,7 @@ use script::layout_dom::ServoLayoutNode;
 use servo_arc::Arc as ServoArc;
 use servo_geometry::{FastLayoutTransform, au_rect_to_f32_rect, f32_rect_to_au_rect};
 use servo_url::ServoUrl;
+use style::computed_values::box_sizing::T as BoxSizing;
 use style::computed_values::display::T as Display;
 use style::computed_values::position::T as Position;
 use style::computed_values::visibility::T as Visibility;
@@ -400,12 +401,28 @@ pub fn process_resolved_style_request(
                 .map(|fragment| fragment.padding)
                 .unwrap_or_default()
         });
+        // The used `width`/`height` are of the box `box-sizing` names.
+        let border_box_sizing = style.clone_box_sizing() == BoxSizing::BorderBox;
+        let border = LazyCell::new(|| {
+            fragment
+                .retrieve_box_fragment()
+                .map(|fragment| fragment.border)
+                .unwrap_or_default()
+        });
         match longhand_id {
             LonghandId::Width if resolved_size_should_be_used_value(fragment) => {
-                content_rect.size.width
+                let mut width = content_rect.size.width;
+                if border_box_sizing {
+                    width += padding.left + padding.right + border.left + border.right;
+                }
+                width
             },
             LonghandId::Height if resolved_size_should_be_used_value(fragment) => {
-                content_rect.size.height
+                let mut height = content_rect.size.height;
+                if border_box_sizing {
+                    height += padding.top + padding.bottom + border.top + border.bottom;
+                }
+                height
             },
             LonghandId::MarginBottom => margins.bottom,
             LonghandId::MarginTop => margins.top,
