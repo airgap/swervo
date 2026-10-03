@@ -125,7 +125,8 @@ struct FlexItemLayoutResult {
     flex_alignment_baseline_relative_to_margin_box: Option<Au>,
 
     // The content size of this layout in the block axis. This is known before layout
-    // for replaced elements, but for non-replaced it's only known after layout.
+    // for replaced elements, but for non-replaced it's only known after layout. It includes
+    // the minimum an `aspect-ratio` gives a non-replaced item.
     content_block_size: Au,
 
     // The containing block size used to generate this layout.
@@ -1782,8 +1783,34 @@ impl FlexItem<'_> {
             flex_axis,
         );
 
+        // <https://drafts.csswg.org/css-sizing-4/#aspect-ratio>: a non-replaced item with an
+        // `auto` block size takes it from its inline size; its content can only make it taller.
+        let aspect_ratio_block_size = self
+            .preferred_aspect_ratio
+            .filter(|_| {
+                cross_axis_is_item_block_axis &&
+                    used_cross_size_override.is_none() &&
+                    !independent_formatting_context.is_replaced() &&
+                    self.content_cross_sizes.preferred.is_initial()
+            })
+            .map(|ratio| {
+                let block_stretch_size = containing_block
+                    .size
+                    .block
+                    .to_definite()
+                    .map(|size| Au::zero().max(size - self.pbm_auto_is_zero.cross));
+                let (_, min, max) = self.content_cross_sizes.resolve_each_extrinsic(
+                    Size::FitContent,
+                    Au::zero(),
+                    block_stretch_size,
+                );
+                ratio
+                    .compute_dependent_size(Direction::Block, used_main_size)
+                    .clamp_between_extremums(min, max)
+            });
+
         let (inline_size, block_size) = if cross_axis_is_item_block_axis {
-            let cross_size = match used_cross_size_override {
+            let cross_size = match used_cross_size_override.or(aspect_ratio_block_size) {
                 Some(s) => SizeConstraint::Definite(s),
                 None => {
                     let inline_stretch_size =
@@ -1899,6 +1926,7 @@ impl FlexItem<'_> {
             ..
         } = layout;
 
+        let content_block_size = content_block_size.max(aspect_ratio_block_size.unwrap_or_default());
         let hypothetical_cross_size = if cross_axis_is_item_block_axis {
             lazy_block_size.resolve(|| content_block_size)
         } else {

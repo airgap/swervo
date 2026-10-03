@@ -25,12 +25,12 @@ use crate::replaced::ReplacedContents;
 use crate::sizing::{
     self, ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, LazySize,
 };
-use crate::style_ext::{AspectRatio, Display, DisplayInside, LayoutStyle};
+use crate::style_ext::{AspectRatio, ComputedValuesExt, Display, DisplayInside, LayoutStyle};
 use crate::table::Table;
 use crate::taffy::TaffyContainer;
 use crate::{
     ArcRefCell, ConstraintSpace, ContainingBlock, IndefiniteContainingBlock, LogicalVec2,
-    PropagatedBoxTreeData,
+    PropagatedBoxTreeData, SizeConstraint,
 };
 
 /// <https://drafts.csswg.org/css-display/#independent-formatting-context>
@@ -290,8 +290,32 @@ impl IndependentFormattingContext {
         layout_context: &LayoutContext,
         constraint_space: &ConstraintSpace,
     ) -> InlineContentSizesResult {
-        self.base
-            .inline_content_sizes(layout_context, constraint_space, &self.contents)
+        let result = self
+            .base
+            .inline_content_sizes(layout_context, constraint_space, &self.contents);
+        // <https://drafts.csswg.org/css-sizing-4/#aspect-ratio-size-transfers>: a non-replaced
+        // box with an `aspect-ratio` and a definite block size takes its automatic inline size
+        // from the ratio (an inline-block with `height: 50px; aspect-ratio: 2` is 100px wide),
+        // but no narrower than its min-content size. Replaced boxes transfer in their own
+        // content sizes.
+        if self.is_replaced() {
+            return result;
+        }
+        let (Some(ratio), SizeConstraint::Definite(block_size)) =
+            (constraint_space.preferred_aspect_ratio, constraint_space.block_size)
+        else {
+            return result;
+        };
+        let inline_size = ratio
+            .compute_dependent_size(Direction::Inline, block_size)
+            .max(result.sizes.min_content);
+        InlineContentSizesResult {
+            sizes: ContentSizes {
+                min_content: inline_size,
+                max_content: inline_size,
+            },
+            depends_on_block_constraints: true,
+        }
     }
 
     /// Computes the tentative intrinsic block sizes that may be needed while computing
@@ -580,8 +604,9 @@ impl IndependentFormattingContext {
             IndependentFormattingContextContents::Replaced(replaced, _) => {
                 replaced.preferred_aspect_ratio(self.style(), padding_border_sums)
             },
-            // TODO: support preferred aspect ratios on non-replaced boxes.
-            _ => None,
+            _ => self
+                .style()
+                .preferred_aspect_ratio(None, padding_border_sums),
         }
     }
 

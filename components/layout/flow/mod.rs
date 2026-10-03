@@ -41,7 +41,9 @@ use crate::sizing::{
     self, ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, LazySize, Size,
     SizeConstraint, Sizes,
 };
-use crate::style_ext::{AspectRatio, ContentBoxSizesAndPBM, LayoutStyle, PaddingBorderMargin};
+use crate::style_ext::{
+    AspectRatio, Clamp, ComputedValuesExt, ContentBoxSizesAndPBM, LayoutStyle, PaddingBorderMargin,
+};
 use crate::{ConstraintSpace, ContainingBlock, ContainingBlockSize, IndefiniteContainingBlock};
 
 mod construct;
@@ -1032,6 +1034,7 @@ impl IndependentFormattingContext {
             available_block_size,
             justify_self,
             preferred_aspect_ratio,
+            aspect_ratio_block_size,
         } = solve_containing_block_padding_and_border_for_in_flow_box(
             containing_block,
             &layout_style,
@@ -1062,7 +1065,11 @@ impl IndependentFormattingContext {
         let inline_size = layout
             .content_inline_size_for_table
             .unwrap_or(containing_block_for_children.size.inline);
-        let block_size = lazy_block_size.resolve(|| layout.content_block_size);
+        let block_size = lazy_block_size.resolve(|| {
+            layout
+                .content_block_size
+                .max(aspect_ratio_block_size.unwrap_or_default())
+        });
 
         let ResolvedMargins {
             margin,
@@ -1465,6 +1472,9 @@ struct ContainingBlockPaddingAndBorder<'a> {
     available_block_size: Option<Au>,
     justify_self: AlignFlags,
     preferred_aspect_ratio: Option<AspectRatio>,
+    /// The block size `aspect-ratio` gives a non-replaced box whose block size is `auto`. Its
+    /// content is the automatic minimum: the used size is the larger of the two.
+    aspect_ratio_block_size: Option<Au>,
 }
 
 struct ResolvedMargins {
@@ -1519,6 +1529,7 @@ fn solve_containing_block_padding_and_border_for_in_flow_box<'a>(
             // This is being discussed in <https://github.com/w3c/csswg-drafts/issues/11461>.
             justify_self: AlignFlags::NORMAL,
             preferred_aspect_ratio: None,
+            aspect_ratio_block_size: None,
         };
     }
 
@@ -1537,10 +1548,10 @@ fn solve_containing_block_padding_and_border_for_in_flow_box<'a>(
         .to_definite()
         .map(|block_size| Au::zero().max(block_size - pbm_sums.block));
 
-    // TODO: support preferred aspect ratios on boxes that don't establish an independent
-    // formatting context.
-    let preferred_aspect_ratio =
-        context.and_then(|context| context.preferred_aspect_ratio(&pbm.padding_border_sums));
+    let preferred_aspect_ratio = match context {
+        Some(context) => context.preferred_aspect_ratio(&pbm.padding_border_sums),
+        None => style.preferred_aspect_ratio(None, &pbm.padding_border_sums),
+    };
     let is_table = layout_style.is_table();
 
     // https://drafts.csswg.org/css2/#the-height-property
@@ -1584,6 +1595,29 @@ fn solve_containing_block_padding_and_border_for_in_flow_box<'a>(
         is_table,
     );
 
+    // <https://drafts.csswg.org/css-sizing-4/#aspect-ratio>: with an `auto` block size, a
+    // non-replaced box takes its block size from the inline size. Its children see that as a
+    // definite containing block size.
+    let aspect_ratio_block_size = preferred_aspect_ratio
+        .filter(|_| {
+            content_box_sizes.block.preferred.is_initial() &&
+                context.is_none_or(|context| !context.is_replaced())
+        })
+        .map(|ratio| {
+            let (_, min, max) = content_box_sizes.block.resolve_each_extrinsic(
+                Size::FitContent,
+                Au::zero(),
+                available_block_size,
+            );
+            ratio
+                .compute_dependent_size(Direction::Block, inline_size)
+                .clamp_between_extremums(min, max)
+        });
+    let tentative_block_size = match aspect_ratio_block_size {
+        Some(block_size) => SizeConstraint::Definite(block_size),
+        None => tentative_block_size,
+    };
+
     let containing_block_for_children = ContainingBlock {
         size: ContainingBlockSize {
             inline: inline_size,
@@ -1608,6 +1642,7 @@ fn solve_containing_block_padding_and_border_for_in_flow_box<'a>(
         available_block_size,
         justify_self,
         preferred_aspect_ratio,
+        aspect_ratio_block_size,
     }
 }
 
