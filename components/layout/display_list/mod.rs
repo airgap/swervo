@@ -1139,7 +1139,7 @@ impl Fragment {
                 let mut rect = rect;
                 rect.origin.y += font_metrics.ascent - font_metrics.underline_offset;
                 rect.size.height =
-                    Au::from_f32_px(font_metrics.underline_size.to_nearest_pixel(dppx));
+                    decoration_thickness(font_metrics.underline_size, dppx);
 
                 Self::build_display_list_for_text_decoration(
                     state,
@@ -1156,7 +1156,7 @@ impl Fragment {
             if text_decoration.line.contains(TextDecorationLine::OVERLINE) {
                 let mut rect = rect;
                 rect.size.height =
-                    Au::from_f32_px(font_metrics.underline_size.to_nearest_pixel(dppx));
+                    decoration_thickness(font_metrics.underline_size, dppx);
                 Self::build_display_list_for_text_decoration(
                     state,
                     &parent_style,
@@ -1208,7 +1208,7 @@ impl Fragment {
                 let mut rect = rect;
                 rect.origin.y += font_metrics.ascent - font_metrics.strikeout_offset;
                 rect.size.height =
-                    Au::from_f32_px(font_metrics.strikeout_size.to_nearest_pixel(dppx));
+                    decoration_thickness(font_metrics.strikeout_size, dppx);
                 Self::build_display_list_for_text_decoration(
                     state,
                     &parent_style,
@@ -1594,13 +1594,19 @@ impl<'a> BuilderForBoxFragment<'a> {
     ) -> Option<ClipChainId> {
         let style = self.fragment.style();
         let node = self.fragment.base.tag.map(|tag| tag.node);
+        // <https://drafts.fxtf.org/css-masking/#the-mask-image>: an image layer that is still
+        // loading or failed counts as a transparent black mask, hiding the element. Painting it
+        // unmasked showed solid boxes in place of MDN's icons.
+        let mut unready_image_layer = false;
         for image in style.get_svg().mask_image.0.iter() {
+            let is_image_layer = matches!(image, style::values::computed::Image::Url(..));
             let Ok(ResolvedImage::Image {
                 image: cached,
                 size,
             }) = builder.image_resolver.resolve_image(node, image)
             else {
-                // `none`, gradients/colors (deferred), and pending/errored layers are skipped.
+                // `none` and gradients/colors (deferred) are skipped.
+                unready_image_layer |= is_image_layer;
                 continue;
             };
             let image_key = match cached {
@@ -1624,6 +1630,7 @@ impl<'a> BuilderForBoxFragment<'a> {
             };
             let Some(image_key) = image_key else {
                 // Vector image not rasterized yet; reflow will repaint when it is ready.
+                unready_image_layer = true;
                 continue;
             };
             // mask-clip / mask-origin: border-box (the MVP default).
@@ -1633,6 +1640,17 @@ impl<'a> BuilderForBoxFragment<'a> {
                 image_key,
                 self.border_rect,
             ));
+        }
+        if unready_image_layer {
+            let spatial_id = builder.spatial_id(spatial_id);
+            let empty_clip = builder
+                .wr()
+                .define_clip_rect(spatial_id, units::LayoutRect::zero());
+            return Some(
+                builder
+                    .wr()
+                    .define_clip_chain(parent_clip_chain_id, [empty_clip]),
+            );
         }
         None
     }
@@ -2875,4 +2893,15 @@ impl BaseFragment {
             FragmentStatus::Clean => {},
         }
     }
+}
+
+/// A text decoration's thickness from the font's metric, snapped to device pixels but at least
+/// one: thin metrics (Open Sans's underline is 0.39px at 16px) rounded to zero and the
+/// decoration vanished. Blink clamps the same way.
+fn decoration_thickness(metric: Au, device_pixel_ratio: f32) -> Au {
+    Au::from_f32_px(
+        metric
+            .to_nearest_pixel(device_pixel_ratio)
+            .max(1.0 / device_pixel_ratio),
+    )
 }

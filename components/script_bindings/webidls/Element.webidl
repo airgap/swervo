@@ -105,6 +105,8 @@ partial interface Element {
   DOMRect getBoundingClientRect();
 
   undefined scrollIntoView(optional (boolean or ScrollIntoViewOptions) arg = {});
+  // Non-standard, but in every browser engine except Gecko; sites use it when present.
+  undefined scrollIntoViewIfNeeded(optional boolean centerIfNeeded = true);
   undefined scroll(optional ScrollToOptions options = {});
   undefined scroll(unrestricted double x, unrestricted double y);
 

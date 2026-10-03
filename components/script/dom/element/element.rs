@@ -169,7 +169,7 @@ use crate::dom::promise::Promise;
 use crate::dom::range::Range;
 use crate::dom::raredata::ElementRareData;
 use crate::dom::sanitizer::Sanitizer;
-use crate::dom::scrolling_box::{ScrollAxisState, ScrollingBox};
+use crate::dom::scrolling_box::{ScrollAxisState, ScrollRequirement, ScrollingBox};
 use crate::dom::servoparser::ServoParser;
 use crate::dom::shadowroot::{IsUserAgentWidget, ShadowRoot};
 use crate::dom::svg::svgsvgelement::SVGSVGElement;
@@ -3716,6 +3716,24 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
 
         // Step 9: Optionally perform some other action that brings the
         // element to the user’s attention.
+    }
+
+    /// Blink's `scrollIntoViewIfNeeded()`: scroll only an element that is out of view, to the
+    /// center of the scrollport (or the nearest edge without `centerIfNeeded`).
+    fn ScrollIntoViewIfNeeded(&self, cx: &mut JSContext, center_if_needed: bool) {
+        if !self.has_css_layout_box() {
+            return;
+        }
+        let position = if center_if_needed {
+            ScrollLogicalPosition::Center
+        } else {
+            ScrollLogicalPosition::Nearest
+        };
+        let axis = ScrollAxisState {
+            position,
+            requirement: ScrollRequirement::IfNotVisible,
+        };
+        self.scroll_into_view_with_options(cx, ScrollBehavior::Auto, axis, axis, None, None);
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-element-scrollwidth>
