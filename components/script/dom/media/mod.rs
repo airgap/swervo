@@ -16,6 +16,7 @@ pub(crate) mod medialist;
 pub(crate) mod mediametadata;
 pub(crate) mod mediaquerylist;
 pub(crate) mod mediaquerylistevent;
+pub(crate) mod mediasegmentparser;
 pub(crate) mod mediasession;
 pub(crate) mod mediasource;
 pub(crate) mod mediastream;

@@ -554,6 +554,8 @@ pub(crate) struct HTMLMediaElement {
     #[ignore_malloc_size_of = "servo_media"]
     #[no_trace]
     player: DomRefCell<Option<Arc<Mutex<dyn Player>>>>,
+    /// The MediaSource this element plays, when its resource is an MSE object URL.
+    media_source: MutNullableDom<MediaSource>,
     #[conditional_malloc_size_of]
     #[no_trace]
     video_renderer: Arc<Mutex<MediaFrameRenderer>>,
@@ -672,6 +674,7 @@ impl HTMLMediaElement {
             pending_play_promises: Default::default(),
             in_flight_play_promises_queue: Default::default(),
             player: Default::default(),
+            media_source: Default::default(),
             video_renderer: Arc::new(Mutex::new(MediaFrameRenderer::new(
                 document.webview_id(),
                 document.window().paint_api().clone(),
@@ -723,7 +726,8 @@ impl HTMLMediaElement {
             .as_ref()
             .is_some_and(|player| !player.lock().unwrap().paused());
 
-        if self.is_potentially_playing() && !is_playing {
+        let is_potentially_playing = self.is_potentially_playing();
+        if is_potentially_playing && !is_playing {
             if let Some(ref player) = *self.player.borrow() {
                 let player = player.lock().unwrap();
 
@@ -737,7 +741,8 @@ impl HTMLMediaElement {
                     error!("Could not play media: {error:?}");
                 }
             }
-        } else if is_playing &&
+        } else if !is_potentially_playing &&
+            is_playing &&
             let Some(ref player) = *self.player.borrow() &&
             let Err(error) = player.lock().unwrap().pause()
         {
@@ -1531,14 +1536,8 @@ impl HTMLMediaElement {
     /// will feed it via `push_data`.
     fn attach_media_source(&self, media_source: &MediaSource) {
         media_source.set_media_element(self);
+        self.media_source.set(Some(media_source));
         self.network_state.set(NetworkState::Loading);
-        // MSE feeds an append-only forward byte stream via `appendBuffer` → `push_data`; there is
-        // no fetchable resource to seek. Mark the player non-seekable so the demuxer forward-
-        // demuxes instead of emitting `SeekData` (which routes to `fetch_request` and stalls MSE
-        // playback at readyState HAVE_CURRENT_DATA on multi-segment appends).
-        if let Some(player) = self.get_player() {
-            let _ = player.lock().unwrap().set_seekable(false);
-        }
         let media_source = Trusted::new(media_source);
         self.owner_global()
             .task_manager()
@@ -2170,8 +2169,12 @@ impl HTMLMediaElement {
                     return Err(());
                 }
             },
+            Resource::Url(ref url) if self.global().get_media_source(url.as_str()).is_some() => {
+                StreamType::MediaSource
+            },
             _ => StreamType::Seekable,
         };
+        self.media_source.set(None);
 
         let window = self.owner_window();
 
@@ -3381,7 +3384,13 @@ impl HTMLMediaElementMethods<crate::DomTypeHolder> for HTMLMediaElement {
     /// <https://html.spec.whatwg.org/multipage/#dom-media-buffered>
     fn Buffered(&self, cx: &mut JSContext) -> DomRoot<TimeRanges> {
         let mut buffered = TimeRangesContainer::default();
-        if let Some(ref player) = *self.player.borrow() {
+        if let Some(media_source) = self.media_source.get() {
+            for (start, end) in media_source.buffered() {
+                buffered
+                    .add(start, end)
+                    .expect("SourceBuffer range intersections are valid and disjoint");
+            }
+        } else if let Some(ref player) = *self.player.borrow() {
             let ranges = player.lock().unwrap().buffered();
             for range in ranges {
                 let _ = buffered.add(range.start, range.end);

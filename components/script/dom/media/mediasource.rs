@@ -91,6 +91,11 @@ impl MediaSource {
     }
 
     /// Whether `readyState` is `"open"`.
+    /// What the attached media element can play: the time ranges every SourceBuffer holds.
+    pub(crate) fn buffered(&self) -> Vec<(f64, f64)> {
+        self.source_buffers.buffered_intersection()
+    }
+
     pub(crate) fn is_open(&self) -> bool {
         self.ready_state.get() == ReadyState::Open
     }
@@ -164,9 +169,19 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         if self.ready_state.get() != ReadyState::Open {
             return Err(Error::InvalidState(None));
         }
-        // Steps 5-7. Create the SourceBuffer, add it to sourceBuffers (which queues the
-        // `addsourcebuffer` event at the list).
-        let source_buffer = SourceBuffer::new(&self.global(), self, CanGc::deprecated_note());
+        // Steps 5-7. Create the SourceBuffer with its own input stream in the player, and add it
+        // to sourceBuffers (which queues the `addsourcebuffer` event at the list). An open
+        // MediaSource is always attached to an element with a player.
+        let player = self
+            .media_element()
+            .and_then(|element| element.get_player())
+            .expect("an open MediaSource has a media element with a player");
+        let stream = player.lock().unwrap().add_source_buffer().map_err(|error| {
+            warn!("MSE addSourceBuffer: {error:?}");
+            Error::NotSupported(None)
+        })?;
+        let source_buffer =
+            SourceBuffer::new(&self.global(), self, stream, CanGc::deprecated_note());
         self.source_buffers.add(&source_buffer);
         Ok(source_buffer)
     }

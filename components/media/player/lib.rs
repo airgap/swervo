@@ -100,6 +100,9 @@ pub enum StreamType {
     Stream,
     /// The stream is seekable.
     Seekable,
+    /// Media Source Extensions: each `SourceBuffer` is fed as its own stream through
+    /// [`Player::add_source_buffer`] and [`Player::push_source_buffer_data`].
+    MediaSource,
 }
 
 pub trait Player: Send + MediaInstance {
@@ -120,6 +123,23 @@ pub trait Player: Send + MediaInstance {
     fn playback_rate(&self) -> f64;
     fn push_data(&self, data: Vec<u8>) -> Result<(), PlayerError>;
     fn end_of_stream(&self) -> Result<(), PlayerError>;
+    /// Add the input stream for a new MSE `SourceBuffer`, returning its index. Requires a
+    /// player constructed with `StreamType::MediaSource`.
+    fn add_source_buffer(&self) -> Result<usize, PlayerError> {
+        Err(PlayerError::Backend(
+            "this media backend has no MSE SourceBuffer support".to_owned(),
+        ))
+    }
+    /// Append bytes to the stream of the `SourceBuffer` at `source_buffer`.
+    fn push_source_buffer_data(
+        &self,
+        _source_buffer: usize,
+        _data: Vec<u8>,
+    ) -> Result<(), PlayerError> {
+        Err(PlayerError::Backend(
+            "this media backend has no MSE SourceBuffer support".to_owned(),
+        ))
+    }
     /// Get the list of time ranges in seconds that have been buffered.
     fn buffered(&self) -> Vec<Range<f64>>;
     /// Set the stream to be played by the player.

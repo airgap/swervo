@@ -2,13 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-//! Media Source Extensions `SourceBuffer` — Phase 1 scaffold (state only). `appendBuffer` /
-//! `remove` and the GStreamer append pipeline land in Phase 2.
+//! Media Source Extensions `SourceBuffer`. Appended bytes go to this SourceBuffer's own stream
+//! in the player; `buffered` comes from the segments' container timestamps.
 
 use std::cell::Cell;
 use std::ffi::CString;
 
 use dom_struct::dom_struct;
+use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_dom_object;
 use stylo_atoms::Atom;
 
@@ -21,6 +22,7 @@ use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
+use crate::dom::media::mediasegmentparser::MediaSegmentParser;
 use crate::dom::media::mediasource::MediaSource;
 use crate::dom::timeranges::{TimeRanges, TimeRangesContainer};
 use js::context::JSContext;
@@ -31,9 +33,11 @@ pub(crate) struct SourceBuffer {
     eventtarget: EventTarget,
     mode: Cell<AppendMode>,
     updating: Cell<bool>,
-    /// Running total of bytes appended, used to keep the player's input size in sync so its
-    /// (percent-based) buffering query and playback progress work.
-    total_bytes: Cell<u64>,
+    /// This SourceBuffer's input stream in the player.
+    stream: usize,
+    #[no_trace]
+    #[ignore_malloc_size_of = "Holds only partial headers and time ranges"]
+    segments: DomRefCell<MediaSegmentParser>,
     timestamp_offset: Cell<f64>,
     append_window_start: Cell<f64>,
     append_window_end: Cell<f64>,
@@ -41,12 +45,13 @@ pub(crate) struct SourceBuffer {
 }
 
 impl SourceBuffer {
-    fn new_inherited(media_source: &MediaSource) -> SourceBuffer {
+    fn new_inherited(media_source: &MediaSource, stream: usize) -> SourceBuffer {
         SourceBuffer {
             eventtarget: EventTarget::new_inherited(),
             mode: Cell::new(AppendMode::Segments),
             updating: Cell::new(false),
-            total_bytes: Cell::new(0),
+            stream,
+            segments: Default::default(),
             timestamp_offset: Cell::new(0.0),
             append_window_start: Cell::new(0.0),
             append_window_end: Cell::new(f64::INFINITY),
@@ -57,10 +62,11 @@ impl SourceBuffer {
     pub(crate) fn new(
         global: &GlobalScope,
         media_source: &MediaSource,
+        stream: usize,
         can_gc: CanGc,
     ) -> DomRoot<SourceBuffer> {
         reflect_dom_object(
-            Box::new(SourceBuffer::new_inherited(media_source)),
+            Box::new(SourceBuffer::new_inherited(media_source, stream)),
             global,
             can_gc,
         )
@@ -79,22 +85,28 @@ impl SourceBuffer {
             }));
     }
 
-    /// The async segment of `appendBuffer`: push the bytes into the attached element's player,
-    /// then clear `updating` and fire `update` + `updateend`.
+    pub(crate) fn buffered_ranges(&self) -> Vec<(f64, f64)> {
+        self.segments.borrow().ranges().to_vec()
+    }
+
+    /// The async segment of `appendBuffer`: record the segments' time ranges, push the bytes
+    /// into this SourceBuffer's stream in the player, then clear `updating` and fire `update` +
+    /// `updateend`.
     fn finish_append(&self, cx: &mut js::context::JSContext, bytes: Vec<u8>) {
         self.upcast::<EventTarget>()
             .fire_event(cx, Atom::from("updatestart"));
 
-        let total = self.total_bytes.get().saturating_add(bytes.len() as u64);
-        self.total_bytes.set(total);
+        self.segments
+            .borrow_mut()
+            .append(&bytes, self.timestamp_offset.get());
         if let Some(element) = self.media_source.media_element() &&
-            let Some(player) = element.get_player()
+            let Some(player) = element.get_player() &&
+            let Err(error) = player
+                .lock()
+                .unwrap()
+                .push_source_buffer_data(self.stream, bytes)
         {
-            let player = player.lock().unwrap();
-            let _ = player.set_input_size(total);
-            if let Err(error) = player.push_data(bytes) {
-                warn!("MSE appendBuffer push_data failed: {error:?}");
-            }
+            warn!("MSE appendBuffer push failed: {error:?}");
         }
 
         self.updating.set(false);
@@ -136,6 +148,7 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
             return Err(Error::InvalidState(None));
         }
         // Abort any in-progress append: reset updating and fire abort + updateend.
+        self.segments.borrow_mut().reset_partial();
         if self.updating.get() {
             self.updating.set(false);
             self.queue_event("abort");
@@ -159,9 +172,8 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
                 CString::new("Invalid remove range").unwrap(),
             ));
         }
-        // Run the removal asynchronously. NB: the GStreamer appsrc cannot drop already-pushed
-        // data, so `buffered` does not shrink (best-effort); the update events still fire so
-        // players that call remove() for buffer management proceed normally.
+        // Run the removal asynchronously. The player's stream can't drop data it already took,
+        // but `buffered` drops the range, which is what players managing their buffer check.
         self.updating.set(true);
         let this = Trusted::new(self);
         self.global()
@@ -171,6 +183,7 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
                 let sb = this.root();
                 sb.upcast::<EventTarget>()
                     .fire_event(cx, Atom::from("updatestart"));
+                sb.segments.borrow_mut().remove(start, end);
                 sb.updating.set(false);
                 sb.upcast::<EventTarget>()
                     .fire_event(cx, Atom::from("update"));
@@ -191,15 +204,12 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
         self.updating.get()
     }
     /// <https://w3c.github.io/media-source/#dom-sourcebuffer-buffered>
-    /// Reports the ranges the attached element's player has actually buffered.
     fn GetBuffered(&self, cx: &mut JSContext) -> Fallible<DomRoot<TimeRanges>> {
         let mut buffered = TimeRangesContainer::default();
-        if let Some(element) = self.media_source.media_element() &&
-            let Some(player) = element.get_player()
-        {
-            for range in player.lock().unwrap().buffered() {
-                let _ = buffered.add(range.start, range.end);
-            }
+        for (start, end) in self.buffered_ranges() {
+            buffered
+                .add(start, end)
+                .expect("MediaSegmentParser ranges are valid and disjoint");
         }
         Ok(TimeRanges::new(cx, self.global().as_window(), buffered))
     }

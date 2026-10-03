@@ -31,6 +31,7 @@ use servo_media_traits::{BackendMsg, ClientContextId, MediaInstance};
 use super::BACKEND_BASE_TIME;
 use crate::media_stream::GStreamerMediaStream;
 use crate::media_stream_source::{ServoMediaStreamSrc, register_servo_media_stream_src};
+use crate::mse_source::{ServoMseSrc, register_servo_mse_src};
 use crate::render::GStreamerRender;
 use crate::source::{ServoSrc, register_servo_src};
 
@@ -120,6 +121,7 @@ impl AsRef<[f32]> for GStreamerAudioChunk {
 enum PlayerSource {
     Seekable(ServoSrc),
     Stream(ServoMediaStreamSrc),
+    MediaSource(ServoMseSrc),
 }
 
 struct PlayerInner {
@@ -244,16 +246,13 @@ impl PlayerInner {
 
     pub fn end_of_stream(&mut self) -> Result<(), PlayerError> {
         match self.source {
-            Some(ref mut source) => {
-                if let PlayerSource::Seekable(source) = source {
-                    source
-                        .push_end_of_stream()
-                        .map(|_| ())
-                        .map_err(|_| PlayerError::EOSFailed)
-                } else {
-                    Ok(())
-                }
-            },
+            Some(PlayerSource::Seekable(ref source)) => source
+                .push_end_of_stream()
+                .map(|_| ())
+                .map_err(|_| PlayerError::EOSFailed),
+            Some(PlayerSource::MediaSource(ref source)) => source
+                .end_of_stream()
+                .map_err(|_| PlayerError::EOSFailed),
             _ => Ok(()),
         }
     }
@@ -301,6 +300,31 @@ impl PlayerInner {
                 .map_err(|_| PlayerError::BufferPushFailed);
         }
         Err(PlayerError::BufferPushFailed)
+    }
+
+    pub fn add_source_buffer(&mut self) -> Result<usize, PlayerError> {
+        let Some(PlayerSource::MediaSource(ref source)) = self.source else {
+            return Err(PlayerError::Backend(
+                "MSE SourceBuffers need a StreamType::MediaSource player".to_owned(),
+            ));
+        };
+        source
+            .add_stream()
+            .map_err(|error| PlayerError::Backend(error.to_string()))
+    }
+
+    pub fn push_source_buffer_data(
+        &mut self,
+        source_buffer: usize,
+        data: Vec<u8>,
+    ) -> Result<(), PlayerError> {
+        let Some(PlayerSource::MediaSource(ref source)) = self.source else {
+            return Err(PlayerError::BufferPushFailed);
+        };
+        source
+            .push(source_buffer, data)
+            .map(|_| ())
+            .map_err(|_| PlayerError::BufferPushFailed)
     }
 
     pub fn set_src(&mut self, source: PlayerSource) {
@@ -560,11 +584,15 @@ impl GStreamerPlayer {
             });
         }
 
+        let is_media_source = self.stream_type == StreamType::MediaSource;
         // FIXME(#282): The progressive downloading breaks playback on Windows and Android.
-        if !cfg!(any(target_os = "windows", target_os = "android")) {
+        if is_media_source || !cfg!(any(target_os = "windows", target_os = "android")) {
             // Set player to perform progressive downloading. This will make the
             // player store the downloaded media in a local temporary file for
             // faster playback of already-downloaded chunks.
+            // MSE data is already in memory and arrives at the page's pace instead: no
+            // download buffering, and no byte-level buffering either. An open-ended appsrc never
+            // reads as fully buffered, so GstPlay would pause on each dip and stay paused.
             let flags = pipeline.property_value("flags");
             let flags_class = match glib::FlagsClass::with_type(flags.type_()) {
                 Some(flags) => flags,
@@ -582,7 +610,14 @@ impl GStreamerPlayer {
                     ));
                 },
             };
-            let Some(flags) = flags_class.set_by_nick("download").build() else {
+            let flags_class = if is_media_source {
+                flags_class
+                    .unset_by_nick("download")
+                    .unset_by_nick("buffering")
+            } else {
+                flags_class.set_by_nick("download")
+            };
+            let Some(flags) = flags_class.build() else {
                 return Err(PlayerError::Backend(
                     "FlagsClass creation failed".to_owned(),
                 ));
@@ -675,6 +710,12 @@ impl GStreamerPlayer {
                     PlayerError::Backend(format!("servosrc registration error: {error:?}"))
                 })?;
                 "servosrc://".to_value()
+            },
+            StreamType::MediaSource => {
+                register_servo_mse_src().map_err(|error| {
+                    PlayerError::Backend(format!("servomsesrc registration error: {error:?}"))
+                })?;
+                "servomse://".to_value()
             },
         };
         player.set_property("uri", &uri);
@@ -960,6 +1001,18 @@ impl GStreamerPlayer {
                         });
                         PlayerSource::Stream(media_stream_src)
                     },
+                    StreamType::MediaSource => {
+                        let mse_src = source
+                            .dynamic_cast::<ServoMseSrc>()
+                            .expect("Source element is expected to be a ServoMseSrc!");
+                        // No data flows until the page creates SourceBuffers and appends to
+                        // them, which needs this setup to have returned.
+                        let sender_clone = sender.clone();
+                        is_ready_clone.call_once(|| {
+                            let _ = notify!(sender_clone, Ok(()));
+                        });
+                        PlayerSource::MediaSource(mse_src)
+                    },
                 };
 
                 inner.set_src(source);
@@ -1049,6 +1102,21 @@ impl Player for GStreamerPlayer {
     inner_player_proxy!(set_stream, stream, &MediaStreamId, only_stream, bool);
     inner_player_proxy!(set_audio_track, stream_index, i32, enabled, bool);
     inner_player_proxy!(set_video_track, stream_index, i32, enabled, bool);
+
+    fn add_source_buffer(&self) -> Result<usize, PlayerError> {
+        self.setup()?;
+        let inner = self.inner.borrow();
+        let mut inner = inner.as_ref().unwrap().lock().unwrap();
+        inner.add_source_buffer()
+    }
+
+    inner_player_proxy!(
+        push_source_buffer_data,
+        source_buffer,
+        usize,
+        data,
+        Vec<u8>
+    );
 
     fn render_use_gl(&self) -> bool {
         self.render.lock().unwrap().is_gl()
