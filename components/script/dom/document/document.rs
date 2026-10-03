@@ -4121,15 +4121,35 @@ impl Document {
             "domComplete" => self.navigation_timing().dom_complete.get(),
             "loadEventStart" => self.navigation_timing().load_event_start.get(),
             "loadEventEnd" => self.navigation_timing().load_event_end.get(),
-            "redirectStart" | "redirectEnd" | "secureConnectionStart" | "responseEnd" => self
+            "redirectStart" | "redirectEnd" | "fetchStart" | "domainLookupStart" |
+            "domainLookupEnd" | "connectStart" | "connectEnd" | "secureConnectionStart" |
+            "requestStart" | "responseStart" | "responseEnd" | "domLoading" => self
                 .resource_fetch_timing()
                 .as_ref()
-                .and_then(|resource_fetch_timing| match name {
-                    "redirectStart" => resource_fetch_timing.redirect_start,
-                    "redirectEnd" => resource_fetch_timing.redirect_end,
-                    "secureConnectionStart" => resource_fetch_timing.secure_connection_start,
-                    "responseEnd" => resource_fetch_timing.response_end,
-                    _ => None,
+                .and_then(|timing| {
+                    // <https://w3c.github.io/navigation-timing/#dom-performancetiming-domainlookupstart>
+                    // and its siblings: with no DNS lookup or new connection (a reused
+                    // connection, a cached response) these equal fetchStart.
+                    let fetch_start = timing.fetch_start;
+                    let connect_start = timing.connect_start.or(fetch_start);
+                    match name {
+                        "redirectStart" => timing.redirect_start,
+                        "redirectEnd" => timing.redirect_end,
+                        "fetchStart" => fetch_start,
+                        "domainLookupStart" => timing.domain_lookup_start.or(fetch_start),
+                        // The network layer doesn't record the end of the lookup; the
+                        // connection starts right after it.
+                        "domainLookupEnd" => connect_start,
+                        "connectStart" => connect_start,
+                        "connectEnd" => timing.connect_end.or(connect_start),
+                        "secureConnectionStart" => timing.secure_connection_start,
+                        "requestStart" => timing.request_start,
+                        "responseStart" => timing.response_start,
+                        "responseEnd" => timing.response_end,
+                        // The document is created, and starts loading, as its response arrives.
+                        "domLoading" => timing.response_start,
+                        _ => unreachable!(),
+                    }
                 }),
             _ => {
                 return Err(Error::Operation(Some(format!(
