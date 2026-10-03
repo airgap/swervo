@@ -4302,6 +4302,7 @@ impl Document {
         // I'm getting rid of the whole hashtable soon anyway, since all it does
         // right now is populate the element restyle data in layout, and we
         // could in theory do it in the DOM I think.
+        el.invalidate_relative_selector_anchors();
         let mut entry = self.ensure_pending_restyle(el);
         if entry.snapshot.is_none() {
             entry.snapshot = Some(Snapshot::new());
