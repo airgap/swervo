@@ -126,7 +126,7 @@ input[type="file"]::file-selector-button {
   background: ButtonFace;
   border-radius: 2px;
   border: 1px solid ButtonBorder;
-  padding: 4px;
+  padding: 1px 6px; /* Chrome's button padding */
   color: black;
 }
 
@@ -136,14 +136,13 @@ input[type="submit"],
 input[type="reset"],
 input[type="file"]::file-selector-button {
   text-align: center;
-  /* Vertically center button content for Chrome parity. Without this the single text line is
-     top-aligned in the content box, so a button taller than its text (an explicit height, common
-     on real sites like Google's search buttons) shows the label sitting too high. Servo has no
-     align-content-on-block yet (see the FIXME near the text-control inner container above), so
-     center via inline-flex — the same flex approach <input> text controls already use. */
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  /* Vertically center button content for Chrome parity: a button taller than its text (an
+     explicit height, common on real sites like Google's search buttons) keeps its label in the
+     middle. Chrome lays buttons out as inline-blocks, so pages that set display, align-items or
+     justify-content on a button get what they get there; inline-flex leaked centering into them
+     and put block children side by side. */
+  display: inline-block;
+  align-content: safe center;
 }
 
 button:hover,

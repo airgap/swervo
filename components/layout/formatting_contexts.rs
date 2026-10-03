@@ -12,6 +12,7 @@ use style::context::SharedStyleContext;
 use style::logical_geometry::Direction;
 use style::properties::ComputedValues;
 use style::selector_parser::PseudoElement;
+use style::values::specified::align::AlignFlags;
 
 use crate::context::LayoutContext;
 use crate::dom::WeakLayoutBox;
@@ -19,6 +20,7 @@ use crate::dom_traversal::{Contents, NodeAndStyleInfo, NonReplacedContents};
 use crate::flexbox::FlexContainer;
 use crate::flow::BlockFormattingContext;
 use crate::fragment_tree::{BaseFragmentInfo, FragmentFlags};
+use crate::geom::PhysicalSize;
 use crate::layout_box_base::{IndependentFormattingContextLayoutResult, LayoutBoxBase};
 use crate::positioned::{LayoutRootLayoutInputs, PositioningContext};
 use crate::replaced::ReplacedContents;
@@ -494,11 +496,12 @@ impl IndependentFormattingContext {
                 }
                 replaced_layout
             },
-            IndependentFormattingContextContents::Flow(bfc) => bfc.layout(
-                layout_context,
-                positioning_context,
-                containing_block_for_children,
-            ),
+            IndependentFormattingContextContents::Flow(bfc) => {
+                let mut result =
+                    bfc.layout(layout_context, positioning_context, containing_block_for_children);
+                align_block_container_content(self.style(), lazy_block_size, &mut result);
+                result
+            },
             IndependentFormattingContextContents::Flex(fc) => fc.layout(
                 layout_context,
                 positioning_context,
@@ -661,4 +664,39 @@ impl ComputeInlineContentSizes for IndependentFormattingContextContents {
             },
         }
     }
+}
+
+/// <https://drafts.csswg.org/css-align/#distribution-block>: `align-content` on a block container
+/// taller than its content moves the content to the center or end. Buttons center their label
+/// this way (see servo.css), like Chrome. Horizontal writing modes only.
+fn align_block_container_content(
+    style: &ComputedValues,
+    lazy_block_size: &LazySize,
+    result: &mut IndependentFormattingContextLayoutResult,
+) {
+    let alignment = style.get_position().align_content.primary().value();
+    if !matches!(
+        alignment,
+        AlignFlags::CENTER | AlignFlags::END | AlignFlags::FLEX_END
+    ) || !style.writing_mode.is_horizontal()
+    {
+        return;
+    }
+    let content_block_size = result.content_block_size;
+    let free_space = lazy_block_size.resolve(|| content_block_size) - content_block_size;
+    if free_space <= Au(0) {
+        return;
+    }
+    let offset = if alignment == AlignFlags::CENTER {
+        free_space / 2
+    } else {
+        free_space
+    };
+    for fragment in &result.fragments {
+        if let Some(base) = fragment.base() {
+            base.translate_rect(PhysicalSize::new(Au(0), offset));
+        }
+    }
+    result.baselines.first = result.baselines.first.map(|baseline| baseline + offset);
+    result.baselines.last = result.baselines.last.map(|baseline| baseline + offset);
 }
