@@ -19,6 +19,7 @@ use servo_base::print_tree::PrintTree;
 use servo_config::opts::{DiagnosticsLogging, DiagnosticsLoggingOption};
 use servo_geometry::MaxRect;
 use style::Zero;
+use style::dom::OpaqueNode;
 use style::color::AbsoluteColor;
 use style::computed_values::overflow_x::T as ComputedOverflow;
 use style::computed_values::position::T as ComputedPosition;
@@ -140,6 +141,7 @@ impl StackingContextTree {
     /// pipeline id.
     pub fn new(
         fragment_tree: &FragmentTree,
+        top_layer_order: &[OpaqueNode],
         viewport_details: ViewportDetails,
         pipeline_id: wr::PipelineId,
         first_reflow: bool,
@@ -215,8 +217,8 @@ impl StackingContextTree {
         }
 
         // Top layer boxes are stacking contexts on the root stacking context, painted after every
-        // other descendant in top layer order. Building one may find further top layer boxes
-        // nested inside of it, which go after it.
+        // other descendant. Building one may find further top layer boxes nested inside of it.
+        let mut top_layer_stacking_contexts = Vec::new();
         let mut index = 0;
         while let Some(fragment) = stacking_context_tree
             .top_layer_fragments
@@ -231,11 +233,28 @@ impl StackingContextTree {
                 StackingContextBuildMode::IncludeHoisted,
                 &text_decorations,
             );
-            for child in &mut root_stacking_context.children[first_child_index..] {
-                child.z_index = i32::MAX;
+            let mut stacking_contexts = root_stacking_context.children.split_off(first_child_index);
+            for stacking_context in &mut stacking_contexts {
+                stacking_context.z_index = i32::MAX;
             }
+            // > The top layer is an ordered set of elements, rendered in the order they appear in
+            // > the set. The last element in the set is rendered last, and thus appears on top.
+            // A ::backdrop shares the position of its element and was found just before it.
+            // Elements layout does not know the position of, like the fullscreen element, go
+            // last.
+            let position = fragment
+                .tag()
+                .and_then(|tag| top_layer_order.iter().position(|node| *node == tag.node))
+                .unwrap_or(usize::MAX);
+            top_layer_stacking_contexts.push((position, stacking_contexts));
             index += 1;
         }
+        top_layer_stacking_contexts.sort_by_key(|(position, _)| *position);
+        root_stacking_context.children.extend(
+            top_layer_stacking_contexts
+                .into_iter()
+                .flat_map(|(_, stacking_contexts)| stacking_contexts),
+        );
 
         // The sort is stable, so top layer stacking contexts keep their order after every
         // other stacking context, including those with the maximum z-index.

@@ -210,6 +210,10 @@ pub struct LayoutThread {
     /// to preserve scroll offsets from the old tree to the new one.
     need_new_stacking_context_tree: Cell<bool>,
 
+    /// The document's top layer, in the order its elements were added, which is the order
+    /// the stacking context tree paints and hit tests them in.
+    top_layer_order: RefCell<Vec<OpaqueNode>>,
+
     /// The box tree.
     box_tree: RefCell<Option<Arc<BoxTree>>>,
 
@@ -898,6 +902,7 @@ impl LayoutThread {
             container_slots: Default::default(),
             uses_container_queries: Cell::new(false),
             need_new_stacking_context_tree: Cell::new(false),
+            top_layer_order: Default::default(),
             box_tree: Default::default(),
             fragment_tree: Default::default(),
             stacking_context_tree: Default::default(),
@@ -1102,6 +1107,16 @@ impl LayoutThread {
             debug!("layout: No root node: bailing");
             return None;
         };
+
+        let top_layer_order: Vec<OpaqueNode> = document
+            .top_layer_elements()
+            .map(|element| element.as_node().opaque())
+            .collect();
+        if *self.top_layer_order.borrow() != top_layer_order {
+            *self.top_layer_order.borrow_mut() = top_layer_order;
+            self.need_new_stacking_context_tree.set(true);
+            self.need_new_display_list.set(true);
+        }
 
         let image_resolver = Arc::new(ImageResolver {
             origin: reflow_request.origin.clone(),
@@ -1615,6 +1630,7 @@ impl LayoutThread {
         // applicable spatial and clip nodes.
         let mut new_stacking_context_tree = StackingContextTree::new(
             fragment_tree,
+            &self.top_layer_order.borrow(),
             viewport_details,
             self.id.into(),
             !self.have_ever_generated_display_list.get(),
