@@ -36,6 +36,7 @@ use crate::geom::{
     PhysicalSides, ToLogical, ToLogicalWithContainingBlock,
 };
 use crate::layout_box_base::{IndependentFormattingContextLayoutResult, LayoutBoxBase};
+use crate::lists::SymbolMarker;
 use crate::positioned::{AbsolutelyPositionedBox, PositioningContext, PositioningContextLength};
 use crate::sizing::{
     self, ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, LazySize, Size,
@@ -378,9 +379,19 @@ impl OutsideMarker {
         // they are the same, but this could change in the future.
         let pbm_of_list_item =
             LayoutStyle::Default(&self.list_item_style).padding_border_margin(containing_block);
+        let font_context = &layout_context.font_context;
+        let marker_inline_offset = SymbolMarker::for_outside_marker(style)
+            .and_then(|_| {
+                font_context
+                    .font_group(style.clone_font())
+                    .first(font_context)
+            })
+            .map_or(max_inline_size, |font| {
+                SymbolMarker::inline_offset(font.metrics.ascent)
+            });
         let content_rect = LogicalRect {
             start_corner: LogicalVec2 {
-                inline: -max_inline_size -
+                inline: -marker_inline_offset -
                     (pbm_of_list_item.border.inline_start +
                         pbm_of_list_item.padding.inline_start),
                 block: Zero::zero(),

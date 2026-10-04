@@ -72,6 +72,7 @@ use crate::fragment_tree::{
 use crate::geom::{
     LengthPercentageOrAuto, PhysicalPoint, PhysicalRect, PhysicalSides, PhysicalSize,
 };
+use crate::lists::SymbolMarker;
 use crate::replaced::NaturalSizes;
 use crate::style_ext::{BorderStyleColor, ComputedValuesExt};
 
@@ -934,6 +935,16 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
         if style.get_inherited_box().visibility != Visibility::Visible {
             return;
         }
+        if let Some(symbol) = SymbolMarker::for_outside_marker(&style) {
+            Fragment::build_display_list_for_symbol_marker(
+                symbol,
+                fragment,
+                self,
+                state,
+                &containing_block,
+            );
+            return;
+        }
         Fragment::build_display_list_for_text_fragment(fragment, self, state, &containing_block);
     }
 
@@ -1317,6 +1328,75 @@ impl Fragment {
                 text_decoration.style.to_webrender(),
             );
         }
+    }
+
+    /// Paints a disc, circle or square list marker as a shape in place of its glyph, see
+    /// [`SymbolMarker`].
+    fn build_display_list_for_symbol_marker(
+        symbol: SymbolMarker,
+        fragment: &TextFragment,
+        builder: &mut DisplayListBuilder,
+        state: &TraversalState,
+        containing_block: &PhysicalRect<Au>,
+    ) {
+        // The marker's trailing space can end up in a fragment of its own.
+        if fragment
+            .glyphs
+            .iter()
+            .all(|shaped_text_slice| shaped_text_slice.is_whitespace())
+        {
+            return;
+        }
+        let text_origin = fragment.base.rect().origin + containing_block.origin.to_vector();
+        let rect = SymbolMarker::rect(fragment.font_metrics.ascent)
+            .translate(text_origin.to_vector())
+            .to_webrender();
+
+        // Blink pixel-snaps the shape (`ToPixelSnappedRect`) before painting it.
+        let dppx = builder.device_pixel_ratio.get();
+        let snap = |value: f32| (value * dppx).round() / dppx;
+        let bounds = LayoutRect::new(
+            LayoutPoint::new(snap(rect.min.x), snap(rect.min.y)),
+            LayoutPoint::new(snap(rect.max.x), snap(rect.max.y)),
+        );
+
+        let style = fragment.base.style();
+        let color = rgba(style.clone_color());
+        let mut common = builder.common_properties(state, bounds, &style);
+        match symbol {
+            SymbolMarker::Disc => {
+                let radii = wr::BorderRadius::uniform(bounds.width() / 2.0);
+                if let Some(clip_chain_id) = builder.maybe_create_clip(state, radii, bounds, false)
+                {
+                    common.clip_chain_id = clip_chain_id;
+                }
+                builder.wr().push_rect(&common, bounds, color);
+            },
+            SymbolMarker::Circle => {
+                // Blink strokes a 1px line centred on the edge of the rect.
+                let stroke_bounds = bounds.inflate(0.5, 0.5);
+                common.clip_rect = stroke_bounds;
+                let side = BorderSide {
+                    color,
+                    style: wr::BorderStyle::Solid,
+                };
+                builder.wr().push_border(
+                    &common,
+                    stroke_bounds,
+                    LayoutSideOffsets::new_all_same(1.0),
+                    BorderDetails::Normal(NormalBorder {
+                        left: side,
+                        right: side,
+                        top: side,
+                        bottom: side,
+                        radius: wr::BorderRadius::uniform(stroke_bounds.width() / 2.0),
+                        do_aa: true,
+                    }),
+                );
+            },
+            SymbolMarker::Square => builder.wr().push_rect(&common, bounds, color),
+        }
+        builder.check_if_paintable(bounds, common.clip_rect, style.clone_opacity());
     }
 
     fn build_display_list_for_broken_image_border(
