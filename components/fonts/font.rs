@@ -36,6 +36,7 @@ use style::values::computed::{
     FontFeatureSettings, FontStretch, FontStyle, FontSynthesis, FontVariantEastAsian,
     FontVariantLigatures, FontVariantNumeric, FontWeight,
 };
+use unicode_properties::emoji;
 use unicode_script::Script;
 use webrender_api::{FontInstanceFlags, FontInstanceKey, FontVariation};
 
@@ -809,6 +810,20 @@ impl FontGroup {
             font.has_glyph_for(options.character)
         };
 
+        // A family the author listed wins over a character's default emoji presentation (icon
+        // fonts map their glyphs to emoji code points); only an explicit variation selector
+        // asks to skip it, as in Chrome. The default presentation still steers system fallback.
+        let has_presentation_selector = next_codepoint.is_some_and(|next| {
+            emoji::is_emoji_presentation_selector(next) || emoji::is_text_presentation_selector(next)
+        });
+        let font_has_glyph_for_listed_family = |font: &FontRef| {
+            if has_presentation_selector {
+                font_has_glyph_and_presentation(font)
+            } else {
+                font.has_glyph_for(options.character)
+            }
+        };
+
         let char_in_template =
             |template: FontTemplateRef| template.char_in_unicode_range(options.character);
 
@@ -816,7 +831,7 @@ impl FontGroup {
             font_context,
             options.character,
             &char_in_template,
-            &font_has_glyph_and_presentation,
+            &font_has_glyph_for_listed_family,
         ) {
             return font_or_synthesized_small_caps(font);
         }
