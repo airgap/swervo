@@ -50,6 +50,7 @@ use crate::{ConstraintSpace, ContainingBlock, ContainingBlockSize, IndefiniteCon
 mod construct;
 pub mod float;
 pub mod inline;
+mod multicol;
 mod root;
 mod same_formatting_context_block;
 

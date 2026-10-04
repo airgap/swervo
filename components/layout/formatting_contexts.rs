@@ -511,8 +511,21 @@ impl IndependentFormattingContext {
                 replaced_layout
             },
             IndependentFormattingContextContents::Flow(bfc) => {
-                let mut result =
-                    bfc.layout(layout_context, positioning_context, containing_block_for_children);
+                let multicol_result = self
+                    .style()
+                    .is_multicol()
+                    .then(|| {
+                        bfc.layout_multicol(
+                            layout_context,
+                            positioning_context,
+                            containing_block_for_children,
+                            self.style(),
+                        )
+                    })
+                    .flatten();
+                let mut result = multicol_result.unwrap_or_else(|| {
+                    bfc.layout(layout_context, positioning_context, containing_block_for_children)
+                });
                 align_block_container_content(self.style(), lazy_block_size, &mut result);
                 // A `<textarea>`'s `rows` attribute gives its intrinsic block size whatever its
                 // text, which scrolls instead (Chrome's `TextAreaIntrinsicBlockSize`).
