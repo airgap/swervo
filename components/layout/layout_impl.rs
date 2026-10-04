@@ -349,7 +349,7 @@ impl Layout for LayoutThread {
     }
 
     #[servo_tracing::instrument(skip_all)]
-    fn remove_stylesheet(&mut self, stylesheet: ServoArc<Stylesheet>) {
+    fn remove_stylesheet(&mut self, stylesheet: ServoArc<Stylesheet>) -> bool {
         let guard = stylesheet.shared_lock.read();
         let stylesheet = DocumentStyleSheet(stylesheet.clone());
         self.stylist.remove_stylesheet(stylesheet.clone(), &guard);
@@ -357,7 +357,7 @@ impl Layout for LayoutThread {
             &stylesheet,
             self.stylist.device(),
             &guard,
-        );
+        )
     }
 
     #[servo_tracing::instrument(skip_all)]

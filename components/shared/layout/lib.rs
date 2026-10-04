@@ -401,7 +401,9 @@ pub trait Layout {
     fn set_quirks_mode(&mut self, quirks_mode: QuirksMode);
 
     /// Removes a stylesheet from the Layout.
-    fn remove_stylesheet(&mut self, stylesheet: ServoArc<Stylesheet>);
+    /// Returns whether the stylesheet's removal removed any web fonts, in which case all text
+    /// must be laid out again before the next display list.
+    fn remove_stylesheet(&mut self, stylesheet: ServoArc<Stylesheet>) -> bool;
 
     /// Removes an image from the Layout image resolver cache.
     fn remove_cached_image(&mut self, image_url: &ServoUrl);

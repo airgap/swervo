@@ -4941,10 +4941,15 @@ impl Document {
     /// Remove a stylesheet owned by `owner` from the list of document sheets.
     #[cfg_attr(crown, expect(crown::unrooted_must_root))] // Owner needs to be rooted already necessarily.
     pub(crate) fn remove_stylesheet(&self, owner: StylesheetSource, stylesheet: &Arc<Stylesheet>) {
-        if self.has_browsing_context() {
+        // Text laid out with a removed web font still refers to it, and its WebRender
+        // resources are freed after the next display list, so all text has to be laid out
+        // again first, as when a web font loads.
+        if self.has_browsing_context() &&
             self.window
                 .layout_mut()
-                .remove_stylesheet(stylesheet.clone());
+                .remove_stylesheet(stylesheet.clone())
+        {
+            self.dirty_all_nodes();
         }
 
         DocumentOrShadowRoot::remove_stylesheet(

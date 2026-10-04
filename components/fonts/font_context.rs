@@ -962,7 +962,7 @@ impl FontContext {
         stylesheet: &DocumentStyleSheet,
         device: &Device,
         guard: &SharedRwLockReadGuard,
-    ) {
+    ) -> bool {
         let mut web_fonts = self.web_fonts.write();
 
         // TODO: Walking the stylesheet should not be necessary here. Instead, we can diff
@@ -983,7 +983,7 @@ impl FontContext {
         }
 
         if !removed_any {
-            return;
+            return false;
         };
 
         // Removing this stylesheet modified the available fonts, so invalidate the cache
@@ -992,6 +992,7 @@ impl FontContext {
 
         // Ensure that we clean up any WebRender resources on the next display list update.
         self.have_removed_web_fonts.store(true, Ordering::Relaxed);
+        true
     }
 
     pub fn add_template_to_font_context(
