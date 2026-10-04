@@ -3227,9 +3227,7 @@ impl Window {
         area: BoxAreaType,
         exclude_transform_and_inline: bool,
     ) -> Option<Rect<Au, CSSPixel>> {
-        let layout = self.layout.borrow();
-        layout.ensure_stacking_context_tree(self.viewport_details.get());
-        layout.query_box_area(
+        self.layout.borrow().query_box_area(
             node.to_trusted_node_address(),
             area,
             exclude_transform_and_inline,

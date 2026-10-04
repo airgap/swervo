@@ -10,6 +10,7 @@ use euclid::{Point2D, Rect, Size2D};
 use fonts::{FontMetrics, FontRef, ShapedTextSlice};
 use layout_api::BoxAreaType;
 use malloc_size_of_derive::MallocSizeOf;
+use script::layout_dom::ServoLayoutNode;
 use servo_base::id::PipelineId;
 use servo_base::print_tree::PrintTree;
 use servo_url::ServoUrl;
@@ -185,13 +186,16 @@ impl Fragment {
         }
     }
 
-    pub(crate) fn scrolling_area(&self, layout_thread: &LayoutThread) -> PhysicalRect<Au> {
+    pub(crate) fn scrolling_area(
+        &self,
+        containing_block_computation: ContainingBlockCalculation<'_>,
+    ) -> PhysicalRect<Au> {
         self.retrieve_box_fragment().map_or_else(
             || self.scrollable_overflow_for_parent(),
             |box_fragment| {
                 box_fragment.offset_by_containing_block(
                     &box_fragment.with_style().scrollable_overflow(),
-                    layout_thread.into(),
+                    containing_block_computation,
                 )
             },
         )
@@ -348,17 +352,30 @@ impl Fragment {
         level: usize,
         process_func: &mut impl FnMut(&Fragment, usize, &PhysicalRect<Au>) -> Option<T>,
     ) -> Option<T> {
+        self.find_descending_into(manager, level, &|_| true, process_func)
+    }
+
+    /// Like [`Self::find`], but only visits the children of fragments for which `descend`
+    /// returns true.
+    pub(crate) fn find_descending_into<T>(
+        &self,
+        manager: &ContainingBlockManager<PhysicalRect<Au>>,
+        level: usize,
+        descend: &impl Fn(&Fragment) -> bool,
+        process_func: &mut impl FnMut(&Fragment, usize, &PhysicalRect<Au>) -> Option<T>,
+    ) -> Option<T> {
         let containing_block = manager.get_containing_block_for_fragment(self);
         if let Some(result) = process_func(self, level, containing_block) {
             return Some(result);
         }
+        if !descend(self) {
+            return None;
+        }
 
         match self {
-            Fragment::LayoutRoot(layout_root_fragment) => {
-                layout_root_fragment
-                    .inner()
-                    .find(manager, level, process_func)
-            },
+            Fragment::LayoutRoot(layout_root_fragment) => layout_root_fragment
+                .inner()
+                .find_descending_into(manager, level, descend, process_func),
             Fragment::Box(fragment) | Fragment::Float(fragment) => {
                 let style = fragment.style();
                 let content_rect = fragment
@@ -379,10 +396,9 @@ impl Fragment {
                     manager.new_for_non_absolute_descendants(&content_rect)
                 };
 
-                fragment
-                    .children
-                    .iter()
-                    .find_map(|child| child.find(&new_manager, level + 1, process_func))
+                fragment.children.iter().find_map(|child| {
+                    child.find_descending_into(&new_manager, level + 1, descend, process_func)
+                })
             },
             Fragment::Positioning(fragment) => {
                 let content_rect = fragment
@@ -390,10 +406,9 @@ impl Fragment {
                     .rect()
                     .translate(containing_block.origin.to_vector());
                 let new_manager = manager.new_for_non_absolute_descendants(&content_rect);
-                fragment
-                    .children
-                    .iter()
-                    .find_map(|child| child.find(&new_manager, level + 1, process_func))
+                fragment.children.iter().find_map(|child| {
+                    child.find_descending_into(&new_manager, level + 1, descend, process_func)
+                })
             },
             _ => None,
         }
@@ -634,10 +649,13 @@ impl CollapsedMargin {
 /// context tree construction, a quick traversal is performed to calculate them for
 /// the purpose of the query.
 pub(crate) enum ContainingBlockCalculation<'a> {
-    /// This token variant is for the purpose of a layout query. In this case, if stacking
-    /// context tree construction has not yet taken place, a cumulative containing block
-    /// calculation traversal will be performed.
-    Lazy { layout_thread: &'a LayoutThread },
+    /// This token variant is for the purpose of a layout query about `node`. In this case, if
+    /// stacking context tree construction has not yet taken place, the cumulative containing
+    /// blocks of the fragments of `node` and of its ancestors are calculated.
+    Lazy {
+        layout_thread: &'a LayoutThread,
+        node: ServoLayoutNode<'a>,
+    },
     /// This token variant is used when the code can guarantee that stacking context
     /// tree construction has already taken place.
     ///
@@ -649,14 +667,11 @@ pub(crate) enum ContainingBlockCalculation<'a> {
 impl ContainingBlockCalculation<'_> {
     pub(crate) fn ensure(&self) {
         match self {
-            Self::Lazy { layout_thread } => layout_thread.ensure_containing_block_calculation(),
+            Self::Lazy {
+                layout_thread,
+                node,
+            } => layout_thread.ensure_containing_block_calculation_for_node(*node),
             Self::AlreadyDoneWithStackingContextTree => {},
         }
-    }
-}
-
-impl<'a> From<&'a LayoutThread> for ContainingBlockCalculation<'a> {
-    fn from(layout_thread: &'a LayoutThread) -> Self {
-        Self::Lazy { layout_thread }
     }
 }

@@ -57,7 +57,8 @@ use crate::flow::inline::construct::{
 };
 use crate::flow::inline::text_run::TextRunNodeSegment;
 use crate::fragment_tree::{
-    BoxFragment, Fragment, FragmentFlags, FragmentTree, SpecificLayoutInfo, Tag, TextFragment,
+    BoxFragment, ContainingBlockCalculation, Fragment, FragmentFlags, FragmentTree,
+    SpecificLayoutInfo, Tag, TextFragment,
 };
 use crate::layout_impl::LayoutThread;
 use crate::style_ext::ComputedValuesExt;
@@ -65,7 +66,7 @@ use crate::taffy::SpecificTaffyGridInfo;
 
 /// Get a scroll node that would represents this [`ServoLayoutNode`]'s transform and
 /// calculate its cumulative transform from its root scroll node to the scroll node.
-fn root_transform_for_layout_node(
+pub(crate) fn root_transform_for_layout_node(
     scroll_tree: &ScrollTree,
     node: ServoLayoutNode<'_>,
 ) -> Option<FastLayoutTransform> {
@@ -98,7 +99,6 @@ pub(crate) fn process_padding_request(node: ServoLayoutNode<'_>) -> Option<Physi
 
 pub(crate) fn process_box_area_request(
     layout_thread: &LayoutThread,
-    stacking_context_tree: &StackingContextTree,
     node: ServoLayoutNode<'_>,
     area: BoxAreaType,
     exclude_transform_and_inline: bool,
@@ -112,7 +112,15 @@ pub(crate) fn process_box_area_request(
                     .retrieve_box_fragment()
                     .is_none_or(|fragment| !fragment.with_style().is_inline_box())
         })
-        .filter_map(|node| node.cumulative_box_area_rect(area, layout_thread.into()))
+        .filter_map(|fragment| {
+            fragment.cumulative_box_area_rect(
+                area,
+                ContainingBlockCalculation::Lazy {
+                    layout_thread,
+                    node,
+                },
+            )
+        })
         .peekable();
 
     rects.peek()?;
@@ -122,9 +130,7 @@ pub(crate) fn process_box_area_request(
         return Some(rect_union);
     }
 
-    let Some(transform) =
-        root_transform_for_layout_node(&stacking_context_tree.paint_info.scroll_tree, node)
-    else {
+    let Some(transform) = layout_thread.root_transform_for_query(node) else {
         return Some(Rect::new(rect_union.origin, Size2D::zero()));
     };
 
@@ -133,18 +139,23 @@ pub(crate) fn process_box_area_request(
 
 pub(crate) fn process_box_areas_request(
     layout_thread: &LayoutThread,
-    stacking_context_tree: &StackingContextTree,
     node: ServoLayoutNode<'_>,
     area: BoxAreaType,
 ) -> CSSPixelRectVec {
     let fragments = node
         .fragments_for_pseudo(None)
         .into_iter()
-        .filter_map(move |fragment| fragment.cumulative_box_area_rect(area, layout_thread.into()));
+        .filter_map(move |fragment| {
+            fragment.cumulative_box_area_rect(
+                area,
+                ContainingBlockCalculation::Lazy {
+                    layout_thread,
+                    node,
+                },
+            )
+        });
 
-    let Some(transform) =
-        root_transform_for_layout_node(&stacking_context_tree.paint_info.scroll_tree, node)
-    else {
+    let Some(transform) = layout_thread.root_transform_for_query(node) else {
         return fragments
             .map(|rect| Rect::new(rect.origin, Size2D::zero()))
             .collect();
@@ -395,7 +406,12 @@ pub fn process_node_scroll_area_request(
         Some(node) => node
             .fragments_for_pseudo(None)
             .first()
-            .map(|fragment| fragment.scrolling_area(layout_thread))
+            .map(|fragment| {
+                fragment.scrolling_area(ContainingBlockCalculation::Lazy {
+                    layout_thread,
+                    node,
+                })
+            })
             .unwrap_or_default(),
         None => tree
             .scrollable_overflow()
@@ -539,8 +555,14 @@ pub fn process_resolved_style_request(
         if let Some(box_fragment) = fragment.retrieve_box_fragment() &&
             style.get_box().position != Position::Static
         {
-            let resolved_insets =
-                || box_fragment.calculate_resolved_insets_if_positioned(layout_thread.into());
+            let resolved_insets = || {
+                box_fragment.calculate_resolved_insets_if_positioned(
+                    ContainingBlockCalculation::Lazy {
+                        layout_thread,
+                        node,
+                    },
+                )
+            };
             match longhand_id {
                 LonghandId::Top => return resolved_insets().top.to_css_string(),
                 LonghandId::Right => {
@@ -893,7 +915,7 @@ fn offset_parent_fragments(node: ServoLayoutNode<'_>) -> Option<OffsetParentFrag
 #[inline]
 pub fn process_offset_parent_query(
     layout_thread: &LayoutThread,
-    scroll_tree: &ScrollTree,
+    scroll_tree: Option<&ScrollTree>,
     node: ServoLayoutNode<'_>,
 ) -> Option<OffsetParentResponse> {
     // The position comes from the first fragment of the node as per a
@@ -911,8 +933,14 @@ pub fn process_offset_parent_query(
     //      layout box return zero and terminate this algorithm.
     let fragments = node.fragments_for_pseudo(None);
     let fragment = fragments.first().cloned()?;
+    // The fragments of the offset parent and its parent belong to ancestors of `node`, so
+    // this also calculates their containing blocks.
+    let containing_block_computation = || ContainingBlockCalculation::Lazy {
+        layout_thread,
+        node,
+    };
     let mut border_box =
-        fragment.cumulative_box_area_rect(BoxAreaType::Border, layout_thread.into())?;
+        fragment.cumulative_box_area_rect(BoxAreaType::Border, containing_block_computation())?;
     if fragment
         .retrieve_box_fragment()
         .is_some_and(|box_fragment| box_fragment.with_style().is_inline_box())
@@ -921,20 +949,23 @@ pub fn process_offset_parent_query(
             .iter()
             .skip(1)
             .filter_map(|fragment| {
-                fragment.cumulative_box_area_rect(BoxAreaType::Border, layout_thread.into())
+                fragment
+                    .cumulative_box_area_rect(BoxAreaType::Border, containing_block_computation())
             })
             .fold(border_box, |unioned_rect, rect| rect.union(&unioned_rect))
             .size;
     }
-    let cumulative_sticky_offsets = fragment
-        .retrieve_box_fragment()
-        .and_then(|box_fragment| box_fragment.spatial_tree_node())
-        .map(|node_id| {
-            scroll_tree
-                .cumulative_sticky_offsets(node_id)
-                .map(Au::from_f32_px)
-                .cast_unit()
-        });
+    let cumulative_sticky_offsets = scroll_tree.and_then(|scroll_tree| {
+        fragment
+            .retrieve_box_fragment()
+            .and_then(|box_fragment| box_fragment.spatial_tree_node())
+            .map(|node_id| {
+                scroll_tree
+                    .cumulative_sticky_offsets(node_id)
+                    .map(Au::from_f32_px)
+                    .cast_unit()
+            })
+    });
     border_box = border_box.translate(cumulative_sticky_offsets.unwrap_or_default());
 
     // 2.  If the offsetParent of the element is null return the x-coordinate of the left
@@ -975,20 +1006,24 @@ pub fn process_offset_parent_query(
         if let Some(grandparent_fragment) = offset_parent_fragment.grandparent_box_fragment() {
             grandparent_fragment.offset_by_containing_block(
                 &grandparent_fragment.border_rect(),
-                layout_thread.into(),
+                containing_block_computation(),
             )
         } else {
-            parent_fragment
-                .offset_by_containing_block(&parent_fragment.padding_rect(), layout_thread.into())
+            parent_fragment.offset_by_containing_block(
+                &parent_fragment.padding_rect(),
+                containing_block_computation(),
+            )
         }
     } else {
-        parent_fragment
-            .offset_by_containing_block(&parent_fragment.padding_rect(), layout_thread.into())
+        parent_fragment.offset_by_containing_block(
+            &parent_fragment.padding_rect(),
+            containing_block_computation(),
+        )
     }
     .translate(
         cumulative_sticky_offsets
-            .and_then(|_| parent_fragment.spatial_tree_node())
-            .map(|node_id| {
+            .and_then(|_| Some((scroll_tree?, parent_fragment.spatial_tree_node()?)))
+            .map(|(scroll_tree, node_id)| {
                 scroll_tree
                     .cumulative_sticky_offsets(node_id)
                     .map(Au::from_f32_px)
@@ -1031,6 +1066,49 @@ fn is_containing_block_for_position(
             ancestor_style.establishes_containing_block_for_all_descendants(ancestor_flags)
         },
     }
+}
+
+/// Whether `node` or one of its ancestors is sticky positioned, which offsets it by an
+/// amount only the stacking context tree knows.
+pub(crate) fn has_sticky_inclusive_ancestor(node: ServoLayoutNode<'_>) -> bool {
+    let mut current = Some(node);
+    while let Some(ancestor) = current {
+        if style_and_flags_for_node(&ancestor)
+            .is_some_and(|(style, _)| style.clone_position() == Position::Sticky)
+        {
+            return true;
+        }
+        #[expect(unsafe_code)]
+        let parent = unsafe { ancestor.dangerous_flat_tree_parent() };
+        current = parent;
+    }
+    false
+}
+
+/// Whether `node` lies in the viewport's coordinate space shifted by nothing but the scroll
+/// offsets of its scroll containers, and if so whether it is fixed to the viewport (and not
+/// moved by viewport scrolling). Returns `None` when a transform, perspective or sticky
+/// positioning applies to `node` or one of its ancestors, or when a fixed positioned box has a
+/// containing block other than the viewport: then only the stacking context tree knows.
+pub(crate) fn is_fixed_to_untransformed_viewport(node: ServoLayoutNode<'_>) -> Option<bool> {
+    let mut fixed = false;
+    let mut current = Some(node);
+    while let Some(ancestor) = current {
+        if let Some((style, flags)) = style_and_flags_for_node(&ancestor) {
+            let position = style.clone_position();
+            if position == Position::Sticky ||
+                style.has_effective_transform_or_perspective(flags) ||
+                (fixed && style.establishes_containing_block_for_all_descendants(flags))
+            {
+                return None;
+            }
+            fixed |= position == Position::Fixed;
+        }
+        #[expect(unsafe_code)]
+        let parent = unsafe { ancestor.dangerous_flat_tree_parent() };
+        current = parent;
+    }
+    Some(fixed)
 }
 
 fn containing_block_for_node<'a>(node: ServoLayoutNode<'a>) -> Option<ServoLayoutNode<'a>> {

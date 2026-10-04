@@ -127,6 +127,16 @@ impl FragmentTree {
 
     pub(crate) fn find<T>(
         &self,
+        process_func: impl FnMut(&Fragment, usize, &PhysicalRect<Au>) -> Option<T>,
+    ) -> Option<T> {
+        self.find_descending_into(&|_| true, process_func)
+    }
+
+    /// Like [`Self::find`], but only visits the children of fragments for which `descend`
+    /// returns true.
+    pub(crate) fn find_descending_into<T>(
+        &self,
+        descend: &impl Fn(&Fragment) -> bool,
         mut process_func: impl FnMut(&Fragment, usize, &PhysicalRect<Au>) -> Option<T>,
     ) -> Option<T> {
         let info = ContainingBlockManager {
@@ -136,7 +146,7 @@ impl FragmentTree {
         };
         self.root_fragments
             .iter()
-            .find_map(|child| child.find(&info, 0, &mut process_func))
+            .find_map(|child| child.find_descending_into(&info, 0, descend, &mut process_func))
     }
 
     /// Find the `<body>` element's [`Fragment`], if it exists in this [`FragmentTree`].

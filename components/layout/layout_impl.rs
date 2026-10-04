@@ -32,7 +32,9 @@ use log::{debug, warn};
 use malloc_size_of::{MallocConditionalSizeOf, MallocSizeOf, MallocSizeOfOps};
 use net_traits::image_cache::ImageCache;
 use paint_api::CrossProcessPaintApi;
-use paint_api::display_list::{AxesScrollSensitivity, PaintDisplayListInfo, ScrollType};
+use paint_api::display_list::{
+    AxesScrollSensitivity, PaintDisplayListInfo, ScrollType, SpatialTreeNodeInfo,
+};
 use parking_lot::{Mutex, RwLock};
 use profile_traits::mem::{Report, ReportKind};
 use profile_traits::time::{
@@ -50,6 +52,7 @@ use servo_base::generic_channel::GenericSender;
 use servo_base::id::{PipelineId, WebViewId};
 use servo_config::opts::{self, DiagnosticsLogging, DiagnosticsLoggingOption};
 use servo_config::pref;
+use servo_geometry::FastLayoutTransform;
 use servo_url::ServoUrl;
 use style::animation::DocumentAnimationSet;
 use style::context::{
@@ -92,13 +95,15 @@ use crate::display_list::{DisplayListBuilder, HitTest, PaintTimingHandler, Stack
 use crate::cell::WeakRefCell;
 use crate::dom::{LayoutBox, NodeExt};
 use crate::query::{
-    find_character_offset_in_fragment_descendants, get_the_text_steps, process_box_area_request,
+    find_character_offset_in_fragment_descendants, get_the_text_steps,
+    has_sticky_inclusive_ancestor, is_fixed_to_untransformed_viewport, process_box_area_request,
     process_box_areas_request, process_caret_stops_query, process_client_rect_request,
     process_containing_block_descendant_query, process_containing_block_query,
     process_current_css_zoom_query, process_effective_overflow_query,
     process_node_scroll_area_request, process_offset_parent_query, process_padding_request,
     process_resolved_font_style_query, process_resolved_style_request,
     process_scroll_container_query, process_text_range_rects_request,
+    root_transform_for_layout_node,
 };
 use crate::fragment_tree::Fragment;
 use crate::traversal::{RecalcStyle, compute_damage_and_rebuild_box_tree};
@@ -203,6 +208,15 @@ pub struct LayoutThread {
     /// construction, but if a layout query needs these value beforehand, they are
     /// eagerly calculated.
     need_containing_block_calculation: Cell<bool>,
+
+    /// The nodes whose fragments and ancestors' fragments have had their cumulative
+    /// containing blocks calculated since the last layout, while
+    /// `need_containing_block_calculation` is set.
+    containing_blocks_calculated_for: RefCell<FxHashSet<OpaqueNode>>,
+
+    /// The viewport of the last reflow, for layout queries that build the stacking context
+    /// tree on demand.
+    viewport_details: Cell<ViewportDetails>,
 
     /// Whether or not the existing stacking context tree is dirty and needs to be
     /// rebuilt. This happens after a relayout or overflow update. The reason that we
@@ -466,15 +480,7 @@ impl Layout for LayoutThread {
             }
 
             let node = unsafe { ServoLayoutNode::new(&node) };
-            let stacking_context_tree = self.stacking_context_tree.borrow();
-            let stacking_context_tree = stacking_context_tree.as_ref()?;
-            process_box_area_request(
-                self,
-                stacking_context_tree,
-                node,
-                area,
-                exclude_transform_and_inline,
-            )
+            process_box_area_request(self, node, area, exclude_transform_and_inline)
         })
     }
 
@@ -492,14 +498,7 @@ impl Layout for LayoutThread {
             }
 
             let node = unsafe { ServoLayoutNode::new(&node) };
-            let stacking_context_tree = self.stacking_context_tree.borrow();
-            let stacking_context_tree = stacking_context_tree.as_ref()?;
-            Some(process_box_areas_request(
-                self,
-                stacking_context_tree,
-                node,
-                area,
-            ))
+            Some(process_box_areas_request(self, node, area))
         })
         .unwrap_or_default()
     }
@@ -555,9 +554,18 @@ impl Layout for LayoutThread {
     fn query_offset_parent(&self, node: TrustedNodeAddress) -> OffsetParentResponse {
         with_layout_state(|| {
             let node = unsafe { ServoLayoutNode::new(&node) };
+            // The stacking context tree only contributes sticky offsets here.
+            let stacking_context_tree_is_stale = self.need_new_stacking_context_tree.get() ||
+                self.stacking_context_tree.borrow().is_none();
+            if stacking_context_tree_is_stale && has_sticky_inclusive_ancestor(node) {
+                self.build_stacking_context_tree(self.viewport_details.get());
+            }
             let stacking_context_tree = self.stacking_context_tree.borrow();
-            let stacking_context_tree = stacking_context_tree.as_ref()?;
-            process_offset_parent_query(self, &stacking_context_tree.paint_info.scroll_tree, node)
+            let scroll_tree = stacking_context_tree
+                .as_ref()
+                .filter(|_| !self.need_new_stacking_context_tree.get())
+                .map(|tree| &tree.paint_info.scroll_tree);
+            process_offset_parent_query(self, scroll_tree, node)
         })
         .unwrap_or_default()
     }
@@ -768,17 +776,6 @@ impl Layout for LayoutThread {
         )
     }
 
-    fn ensure_stacking_context_tree(&self, viewport_details: ViewportDetails) {
-        with_layout_state(|| {
-            if self.stacking_context_tree.borrow().is_some() &&
-                !self.need_new_stacking_context_tree.get()
-            {
-                return;
-            }
-            self.build_stacking_context_tree(viewport_details);
-        })
-    }
-
     fn register_paint_worklet_modules(
         &mut self,
         _name: Atom,
@@ -804,10 +801,22 @@ impl Layout for LayoutThread {
     }
 
     fn scroll_offset(&self, id: ExternalScrollId) -> Option<LayoutVector2D> {
-        self.stacking_context_tree
-            .borrow_mut()
-            .as_mut()
-            .and_then(|tree| tree.paint_info.scroll_tree.scroll_offset(id))
+        let scroll_offset = || {
+            self.stacking_context_tree
+                .borrow()
+                .as_ref()
+                .and_then(|tree| tree.paint_info.scroll_tree.scroll_offset(id))
+        };
+        let offset = scroll_offset();
+        // A rebuilt tree clamps the offsets it carries over to the new scrollable sizes, which
+        // leaves zero offsets alone, so only a nonzero one needs the tree rebuilt.
+        if !self.need_new_stacking_context_tree.get() ||
+            offset.is_none_or(|offset| offset == LayoutVector2D::zero())
+        {
+            return offset;
+        }
+        with_layout_state(|| self.build_stacking_context_tree(self.viewport_details.get()));
+        scroll_offset()
     }
 
     fn needs_new_display_list(&self) -> bool {
@@ -897,6 +906,8 @@ impl LayoutThread {
             last_display_list_was_empty: Cell::new(true),
             device_has_changed: false,
             need_containing_block_calculation: Cell::new(false),
+            containing_blocks_calculated_for: Default::default(),
+            viewport_details: Cell::new(config.viewport_details),
             need_new_display_list: Cell::new(false),
             container_sizes: Default::default(),
             container_slots: Default::default(),
@@ -1130,12 +1141,17 @@ impl LayoutThread {
         });
         let mut reflow_statistics = Default::default();
 
+        self.viewport_details.set(reflow_request.viewport_details);
         let (mut reflow_phases_run, iframe_sizes) = self.restyle_and_build_trees(
             &mut reflow_request,
             document,
             root_element,
             &image_resolver,
         );
+        if reflow_phases_run.contains(ReflowPhasesRun::RanLayout) {
+            self.need_containing_block_calculation.set(true);
+            self.containing_blocks_calculated_for.borrow_mut().clear();
+        }
         if self.build_stacking_context_tree_for_reflow(&reflow_request) {
             reflow_phases_run.insert(ReflowPhasesRun::BuiltStackingContextTree);
         }
@@ -1814,6 +1830,7 @@ impl LayoutThread {
         self.box_tree.borrow_mut().take();
         self.fragment_tree.borrow_mut().take();
         self.stacking_context_tree.borrow_mut().take();
+        self.need_containing_block_calculation.set(false);
 
         // Send empty display list.
         let paint_info = PaintDisplayListInfo::new(
@@ -1840,6 +1857,143 @@ impl LayoutThread {
             reflow_phases_run: ReflowPhasesRun::BuiltDisplayList,
             ..Default::default()
         })
+    }
+
+    /// The transform from the coordinate space of `node`'s first box fragment to the root
+    /// coordinate space, or `None` if it has no box fragment.
+    pub(crate) fn root_transform_for_query(
+        &self,
+        node: ServoLayoutNode<'_>,
+    ) -> Option<FastLayoutTransform> {
+        node.fragments_for_pseudo(None)
+            .first()
+            .and_then(Fragment::retrieve_box_fragment)?;
+        if self.need_new_stacking_context_tree.get() ||
+            self.stacking_context_tree.borrow().is_none()
+        {
+            if let Some(transform) = self.root_transform_without_stacking_context_tree(node) {
+                return Some(transform);
+            }
+            self.build_stacking_context_tree(self.viewport_details.get());
+        }
+        let stacking_context_tree = self.stacking_context_tree.borrow();
+        root_transform_for_layout_node(
+            &stacking_context_tree.as_ref()?.paint_info.scroll_tree,
+            node,
+        )
+    }
+
+    /// Rebuilding the stacking context tree walks every fragment, which made each layout
+    /// query after a DOM change scale with the size of the page. When nothing but scrolling
+    /// moves `node`, its transform follows from the scroll offsets the rebuilt tree would
+    /// carry over from the stale one. Returns `None` when that doesn't hold.
+    fn root_transform_without_stacking_context_tree(
+        &self,
+        node: ServoLayoutNode<'_>,
+    ) -> Option<FastLayoutTransform> {
+        let fixed = is_fixed_to_untransformed_viewport(node)?;
+        let stacking_context_tree = self.stacking_context_tree.borrow();
+        let paint_info = &stacking_context_tree.as_ref()?.paint_info;
+        let scroll_tree = &paint_info.scroll_tree;
+        let root_scroll_node = scroll_tree.get_node(paint_info.root_scroll_node_id);
+        let mut root_scroll_offset = LayoutVector2D::zero();
+        for scroll_tree_node in &scroll_tree.nodes {
+            let SpatialTreeNodeInfo::Scroll(info) = &scroll_tree_node.info else {
+                continue;
+            };
+            if std::ptr::eq(scroll_tree_node, root_scroll_node) {
+                root_scroll_offset = info.offset;
+            } else if info.offset != LayoutVector2D::zero() {
+                // Only layout knows the new scrollable sizes these get clamped to.
+                return None;
+            }
+        }
+        if fixed || root_scroll_offset == LayoutVector2D::zero() {
+            return Some(FastLayoutTransform::Offset(LayoutVector2D::zero()));
+        }
+
+        // Carry the viewport's offset over the way `StackingContextTree::new` does.
+        let fragment_tree = self.fragment_tree.borrow();
+        let fragment_tree = fragment_tree.as_ref()?;
+        let scroll_area = fragment_tree
+            .scrollable_overflow()
+            .union(&fragment_tree.initial_containing_block)
+            .size;
+        let viewport_size = self.viewport_details.get().layout_size();
+        let sensitivity = fragment_tree.viewport_scroll_sensitivity;
+        let carry_over = |offset: f32, scrollable: f32, sensitivity: ScrollType| {
+            if scrollable > 0. && sensitivity.contains(ScrollType::Script) {
+                offset.clamp(0., scrollable)
+            } else {
+                0.
+            }
+        };
+        let offset = LayoutVector2D::new(
+            carry_over(
+                root_scroll_offset.x,
+                scroll_area.width.to_f32_px() - viewport_size.width,
+                sensitivity.x,
+            ),
+            carry_over(
+                root_scroll_offset.y,
+                scroll_area.height.to_f32_px() - viewport_size.height,
+                sensitivity.y,
+            ),
+        );
+        Some(FastLayoutTransform::Offset(-offset))
+    }
+
+    /// Calculates the cumulative containing blocks that a layout query about `node` reads: those
+    /// of the fragments of `node` and of its ancestors. Only the fragments that can contain them
+    /// are walked, which keeps the query from scaling with the size of the page.
+    pub(crate) fn ensure_containing_block_calculation_for_node(&self, node: ServoLayoutNode<'_>) {
+        if !self.need_containing_block_calculation.get() {
+            return;
+        }
+        let opaque_node = node.opaque();
+        if self
+            .containing_blocks_calculated_for
+            .borrow()
+            .contains(&opaque_node)
+        {
+            return;
+        }
+
+        let mut ancestors = FxHashSet::default();
+        let mut current = unsafe { node.dangerous_flat_tree_parent() };
+        while let Some(ancestor) = current {
+            ancestors.insert(ancestor.opaque());
+            current = unsafe { ancestor.dangerous_flat_tree_parent() };
+        }
+        // Fragments of a node nest inside the fragments of its flat tree ancestors, with only
+        // anonymous fragments in between.
+        let may_contain_node = |fragment: &Fragment| {
+            fragment
+                .base()
+                .is_none_or(|base| base.tag.is_none_or(|tag| ancestors.contains(&tag.node)))
+        };
+        let mut reached_node = false;
+        self.fragment_tree
+            .borrow()
+            .as_ref()
+            .expect("missing fragment tree")
+            .find_descending_into(&may_contain_node, |fragment, _level, containing_block| {
+                fragment.set_containing_block(containing_block);
+                reached_node |= fragment.base().is_some_and(|base| {
+                    base.tag.is_some_and(|tag| {
+                        tag.node == opaque_node && tag.pseudo_element_chain.primary.is_none()
+                    })
+                });
+                None::<()>
+            });
+        if !reached_node {
+            // `node` has no fragments, or they nest some other way: walk them all.
+            self.ensure_containing_block_calculation();
+            return;
+        }
+        self.containing_blocks_calculated_for
+            .borrow_mut()
+            .insert(opaque_node);
     }
 
     pub(crate) fn ensure_containing_block_calculation(&self) {
@@ -2156,15 +2310,16 @@ impl ReflowPhases {
                 QueryMsg::NodesFromPointQuery => {
                     Self::StackingContextTreeConstruction | Self::DisplayListConstruction
                 },
-                QueryMsg::BoxArea |
-                QueryMsg::BoxAreas |
                 QueryMsg::ElementsFromPoint |
                 QueryMsg::FlushForUpdateTheRenderingQuery |
+                QueryMsg::TextIndexQuery |
+                QueryMsg::CaretStopsQuery => Self::StackingContextTreeConstruction,
+                // These build the stacking context tree themselves, only when the queried node
+                // needs it. See `LayoutThread::root_transform_for_query`.
+                QueryMsg::BoxArea |
+                QueryMsg::BoxAreas |
                 QueryMsg::OffsetParentQuery |
                 QueryMsg::ScrollingAreaOrOffsetQuery |
-                QueryMsg::TextIndexQuery | QueryMsg::CaretStopsQuery => {
-                    Self::StackingContextTreeConstruction
-                },
                 QueryMsg::ClientRectQuery |
                 QueryMsg::CurrentCSSZoomQuery |
                 QueryMsg::EffectiveOverflow |
