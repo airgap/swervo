@@ -98,10 +98,14 @@ dialog::backdrop {
   background: rgba(0,0,0,0.1);
 }
 
-/* The internal-only -servo-top-layer property puts elements in
-   https://drafts.csswg.org/css-position-4/#top-layer, together with their ::backdrop. */
+/* https://drafts.csswg.org/css-position-4/#overlay puts elements in the top layer, together
+   with their ::backdrop. Pages can only transition it, which keeps an element in the top layer
+   while it animates out. */
+*, ::before, ::after, ::marker {
+  overlay: none !important;
+}
 dialog:modal, :popover-open {
-  -servo-top-layer: top;
+  overlay: auto !important;
 }
 /* https://drafts.csswg.org/css-position-4/#backdrop */
 ::backdrop {

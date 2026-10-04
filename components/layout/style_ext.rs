@@ -9,6 +9,7 @@ use style::Zero;
 use style::color::AbsoluteColor;
 use style::computed_values::_servo_top_layer::T as ServoTopLayer;
 use style::computed_value_flags::ComputedValueFlags;
+use style::computed_values::overlay::T as Overlay;
 use style::computed_values::direction::T as Direction;
 use style::computed_values::isolation::T as ComputedIsolation;
 use style::computed_values::mix_blend_mode::T as ComputedMixBlendMode;
@@ -867,10 +868,13 @@ impl ComputedValuesExt for ComputedValues {
             .establishes_scroll_container()
     }
 
-    /// Whether the element is in the top layer, which the user agent stylesheet marks with the
-    /// internal `-servo-top-layer` property.
+    /// Whether the element is in the top layer, which the user agent stylesheet marks with
+    /// `overlay: auto` (or the internal `-servo-top-layer` property for the fullscreen element).
+    /// A transition of `overlay` keeps an element in the top layer while it animates out.
+    /// <https://drafts.csswg.org/css-position-4/#overlay>
     fn in_top_layer(&self) -> bool {
-        self.get_box().clone__servo_top_layer() == ServoTopLayer::Top
+        self.get_box().clone__servo_top_layer() == ServoTopLayer::Top ||
+            self.get_box().clone_overlay() == Overlay::Auto
     }
 
     /// Returns true if this fragment establishes a new stacking context and false otherwise.

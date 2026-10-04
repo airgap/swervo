@@ -539,7 +539,8 @@ impl<'dom> style::dom::TElement for ServoDangerousStyleElement<'dom> {
             if old_box.display != new_box.display ||
                 old_box.float != new_box.float ||
                 old_box.position != new_box.position ||
-                old_box._servo_top_layer != new_box._servo_top_layer
+                old_box._servo_top_layer != new_box._servo_top_layer ||
+                old_box.overlay != new_box.overlay
             {
                 return true;
             }
