@@ -205,9 +205,13 @@ pub(crate) fn process_text_range_rects_request(
 
     let mut rects = Vec::new();
     for fragment in &parent_fragments {
-        let Some(content_rect) =
-            fragment.cumulative_box_area_rect(BoxAreaType::Content, layout_thread.into())
-        else {
+        let Some(content_rect) = fragment.cumulative_box_area_rect(
+            BoxAreaType::Content,
+            ContainingBlockCalculation::Lazy {
+                layout_thread,
+                node,
+            },
+        ) else {
             continue;
         };
         collect_text_range_rects(
