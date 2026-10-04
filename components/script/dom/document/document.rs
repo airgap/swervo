@@ -4900,6 +4900,15 @@ impl Document {
         self.stylesheets.borrow().len()
     }
 
+    /// Owned sheets are kept ahead of constructed ones, so they form a prefix of the set.
+    pub(crate) fn owned_stylesheet_count(&self) -> usize {
+        self.stylesheets
+            .borrow()
+            .iter()
+            .take_while(|(sheet, _origin)| !sheet.owner.is_constructed())
+            .count()
+    }
+
     pub(crate) fn stylesheet_at(&self, index: usize) -> Option<DomRoot<CSSStyleSheet>> {
         let stylesheets = self.stylesheets.borrow();
 
@@ -4970,25 +4979,15 @@ impl Document {
         let stylesheets = &mut *self.stylesheets.borrow_mut();
         let sheet = cssom_stylesheet.style_stylesheet().clone();
 
-        let insertion_point = stylesheets
-            .iter()
-            .last()
-            .map(|(sheet, _origin)| sheet)
-            .cloned();
-
         if self.has_browsing_context() {
-            self.add_stylesheet_to_stylist(
-                cx,
-                sheet.clone(),
-                insertion_point.as_ref().map(|s| s.sheet.clone()),
-            );
+            self.add_stylesheet_to_stylist(cx, sheet.clone(), None);
         }
 
         DocumentOrShadowRoot::add_stylesheet(
             StylesheetSource::Constructed(Dom::from_ref(cssom_stylesheet)),
             StylesheetSetRef::Document(stylesheets),
             sheet,
-            insertion_point,
+            None,
             self.style_shared_author_lock(),
         );
     }

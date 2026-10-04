@@ -32,6 +32,15 @@ impl StyleSheetListOwner {
         }
     }
 
+    pub(crate) fn owned_stylesheet_count(&self) -> usize {
+        match *self {
+            StyleSheetListOwner::Document(ref doc) => doc.owned_stylesheet_count(),
+            StyleSheetListOwner::ShadowRoot(ref shadow_root) => {
+                shadow_root.owned_stylesheet_count()
+            },
+        }
+    }
+
     pub(crate) fn stylesheet_at(&self, index: usize) -> Option<DomRoot<CSSStyleSheet>> {
         match *self {
             StyleSheetListOwner::Document(ref doc) => doc.stylesheet_at(index),
@@ -121,14 +130,20 @@ impl StyleSheetList {
 
 impl StyleSheetListMethods<crate::DomTypeHolder> for StyleSheetList {
     /// <https://drafts.csswg.org/cssom/#dom-stylesheetlist-length>
+    /// Adopted (constructed) sheets are part of the final CSS style sheets but are not
+    /// document or shadow root CSS style sheets, so they are excluded from this list.
+    /// <https://drafts.csswg.org/cssom/#documentorshadowroot-document-or-shadow-root-css-style-sheets>
     fn Length(&self) -> u32 {
-        self.document_or_shadow_root.stylesheet_count() as u32
+        self.document_or_shadow_root.owned_stylesheet_count() as u32
     }
 
     /// <https://drafts.csswg.org/cssom/#dom-stylesheetlist-item>
     fn Item(&self, index: u32) -> Option<DomRoot<StyleSheet>> {
         // XXXManishearth this  doesn't handle the origin clean flag and is a
         // cors vulnerability
+        if index >= self.Length() {
+            return None;
+        }
         self.document_or_shadow_root
             .stylesheet_at(index as usize)
             .map(DomRoot::upcast)

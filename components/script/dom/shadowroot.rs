@@ -179,6 +179,16 @@ impl ShadowRoot {
         self.author_styles.borrow().stylesheets.len()
     }
 
+    /// Owned sheets are kept ahead of constructed ones, so they form a prefix of the set.
+    pub(crate) fn owned_stylesheet_count(&self) -> usize {
+        self.author_styles
+            .borrow()
+            .stylesheets
+            .iter()
+            .take_while(|sheet| !sheet.owner.is_constructed())
+            .count()
+    }
+
     pub(crate) fn stylesheet_at(&self, index: usize) -> Option<DomRoot<CSSStyleSheet>> {
         let stylesheets = &self.author_styles.borrow().stylesheets;
 
@@ -246,8 +256,6 @@ impl ShadowRoot {
             let stylesheets = &mut self.author_styles.borrow_mut().stylesheets;
             let sheet = cssom_stylesheet.style_stylesheet().clone();
 
-            let insertion_point = stylesheets.iter().last().cloned();
-
             let document = self.owner_document();
             if document.has_browsing_context() {
                 document.load_web_fonts_from_stylesheet(cx, &sheet);
@@ -257,7 +265,7 @@ impl ShadowRoot {
                 StylesheetSource::Constructed(Dom::from_ref(cssom_stylesheet)),
                 StylesheetSetRef::Author(stylesheets),
                 sheet,
-                insertion_point,
+                None,
                 document.style_shared_author_lock(),
             );
         }
