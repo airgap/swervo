@@ -620,9 +620,40 @@ impl IndependentFormattingContext {
             is_table_or_replaced,
         };
 
+        // <https://drafts.csswg.org/css-sizing-4/#aspect-ratio>: a non-replaced box with an
+        // `aspect-ratio` takes the size of its ratio-dependent axis from the other axis instead
+        // of stretching. With both sizes `auto` the inline size determines the block size,
+        // unless only the block axis stretches (`top: 0; bottom: 0; left: 0`), which Chrome
+        // treats as a definite block size to transfer through the ratio. Replaced boxes
+        // transfer their ratio in `tentative_block_content_size()`.
+        let ratio_dependent_axis = preferred_aspect_ratio
+            .filter(|_| !self.is_replaced())
+            .and_then(|ratio| {
+                let axis = match (
+                    inline_axis_solver.computed_sizes.preferred.is_initial(),
+                    block_axis_solver.computed_sizes.preferred.is_initial(),
+                ) {
+                    (false, false) => return None,
+                    (true, false) => Direction::Inline,
+                    (false, true) => Direction::Block,
+                    (true, true)
+                        if block_axis_solver.automatic_size() == Size::Stretch &&
+                            inline_axis_solver.automatic_size() != Size::Stretch =>
+                    {
+                        Direction::Inline
+                    },
+                    (true, true) => Direction::Block,
+                };
+                Some((axis, ratio))
+            });
+        let automatic_size = |solver: &AbsoluteAxisSolver| match ratio_dependent_axis {
+            Some((axis, _)) if axis == solver.axis => Size::FitContent,
+            _ => solver.automatic_size(),
+        };
+
         // The block size can depend on layout results, so we only solve it tentatively,
         // we may have to resolve it properly later on.
-        let block_automatic_size = block_axis_solver.automatic_size();
+        let block_automatic_size = automatic_size(&block_axis_solver);
         let block_stretch_size = Some(block_axis_solver.stretch_size());
         let inline_stretch_size = inline_axis_solver.stretch_size();
         let tentative_block_content_size =
@@ -652,20 +683,15 @@ impl IndependentFormattingContext {
             self.inline_content_sizes(layout_context, &constraint_space)
                 .sizes
         };
-        // TODO: With insets on both block sides, Blink lets the aspect ratio override the
-        // stretched automatic block size when the inline size is stretched or definite.
-        let aspect_ratio_applies = !matches!(block_automatic_size, Size::Stretch);
-        let inline_automatic_size = if aspect_ratio_applies {
-            sizing::automatic_inline_size_with_aspect_ratio(
-                inline_axis_solver.automatic_size(),
-                preferred_aspect_ratio,
-                self.is_replaced(),
-                tentative_block_size,
-                inline_stretch_size,
-            )
-        } else {
-            inline_axis_solver.automatic_size()
-        };
+        // A stretched inline size is still limited by min and max block sizes transferred
+        // through the ratio.
+        let inline_automatic_size = sizing::automatic_inline_size_with_aspect_ratio(
+            automatic_size(&inline_axis_solver),
+            preferred_aspect_ratio,
+            self.is_replaced(),
+            tentative_block_size,
+            inline_stretch_size,
+        );
         let inline_size = inline_axis_solver.computed_sizes.resolve(
             Direction::Inline,
             inline_automatic_size,
@@ -675,22 +701,25 @@ impl IndependentFormattingContext {
             is_table,
         );
 
-        let aspect_ratio_block_size = aspect_ratio_applies
-            .then(|| {
-                sizing::block_size_from_aspect_ratio(
-                    preferred_aspect_ratio,
-                    self.is_replaced(),
-                    &block_axis_solver.computed_sizes,
-                    block_stretch_size,
-                    inline_size,
-                )
-            })
-            .flatten();
+        // The content can still make the box taller than the ratio: the automatic minimum
+        // size of a box with an `aspect-ratio` is its content size.
+        let aspect_ratio_block_size = match ratio_dependent_axis {
+            Some((Direction::Block, _)) => sizing::block_size_from_aspect_ratio(
+                preferred_aspect_ratio,
+                self.is_replaced(),
+                &block_axis_solver.computed_sizes,
+                block_stretch_size,
+                inline_size,
+            ),
+            _ => None,
+        };
+        let tentative_block_size =
+            aspect_ratio_block_size.map_or(tentative_block_size, SizeConstraint::Definite);
+
         let containing_block_for_children = ContainingBlock {
             size: ContainingBlockSize {
                 inline: inline_size,
-                block: aspect_ratio_block_size
-                    .map_or(tentative_block_size, SizeConstraint::Definite),
+                block: tentative_block_size,
             },
             style: &style,
         };
