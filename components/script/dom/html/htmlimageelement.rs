@@ -188,6 +188,10 @@ pub(crate) struct HTMLImageElement {
     last_selected_source: DomRefCell<Option<USVString>>,
     #[conditional_malloc_size_of]
     image_decode_promises: DomRefCell<Vec<Rc<Promise>>>,
+    /// <https://html.spec.whatwg.org/multipage/#lazy-load-resumption-steps>
+    /// The URL that update the image data deferred fetching, and the generation of that run.
+    #[no_trace]
+    lazy_load_resumption_steps: DomRefCell<Option<(ServoUrl, u32)>>,
     /// Line number this element was created on
     line_number: u64,
 }
@@ -1001,7 +1005,52 @@ impl HTMLImageElement {
             },
         }
 
+        // > Let delay load event be true if the img's lazy loading attribute is in the Eager
+        // > state, or if scripting is disabled for the img, and false otherwise.
+        // > If the will lazy load element steps given the img return true, then:
+        if self.will_lazy_load_element_steps() {
+            let request = match self.image_request.get() {
+                ImageRequestPhase::Current => &self.current_request,
+                ImageRequestPhase::Pending => &self.pending_request,
+            };
+            LoadBlocker::terminate(&request.borrow().blocker, cx);
+            // > 1. Set the img's lazy load resumption steps to the rest of this algorithm
+            // >    starting with the step labeled fetch the image.
+            *self.lazy_load_resumption_steps.borrow_mut() =
+                Some((image_url.clone(), self.generation.get()));
+            // > 2. Start intersection-observing a lazy loading element for the img element.
+            self.owner_document()
+                .start_intersection_observing_a_lazy_loading_element(cx, self.upcast());
+            // > 3. Return.
+            return;
+        }
+
+        // > Fetch the image: Fetch request.
         self.fetch_image(image_url, cx);
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#will-lazy-load-element-steps>
+    fn will_lazy_load_element_steps(&self) -> bool {
+        // Step 1. If scripting is disabled for element, then return false.
+        if !self.owner_document().scripting_enabled() {
+            return false;
+        }
+        // Step 2. If element's lazy loading attribute is in the Lazy state, then return true.
+        // Step 3. Return false.
+        self.Loading() == "lazy"
+    }
+
+    /// Invokes the <https://html.spec.whatwg.org/multipage/#lazy-load-resumption-steps> set by
+    /// update the image data, which continue at the step labeled "fetch the image".
+    pub(crate) fn invoke_lazy_load_resumption_steps(&self, cx: &mut js::context::JSContext) {
+        let Some((image_url, generation)) = self.lazy_load_resumption_steps.take() else {
+            return;
+        };
+        // A later run of update the image data has replaced the deferred request.
+        if generation != self.generation.get() {
+            return;
+        }
+        self.fetch_image(&image_url, cx);
     }
 
     /// <https://html.spec.whatwg.org/multipage/#update-the-image-data>
@@ -1540,6 +1589,7 @@ impl HTMLImageElement {
             dimension_attribute_source: Default::default(),
             last_selected_source: DomRefCell::new(None),
             image_decode_promises: DomRefCell::new(vec![]),
+            lazy_load_resumption_steps: DomRefCell::new(None),
             line_number: creator.return_line_number(),
         }
     }
@@ -1938,6 +1988,20 @@ impl HTMLImageElementMethods<crate::DomTypeHolder> for HTMLImageElement {
     // <https://html.spec.whatwg.org/multipage/#dom-img-referrerpolicy>
     make_setter!(SetReferrerPolicy, "referrerpolicy");
 
+    // https://html.spec.whatwg.org/multipage/#dom-img-loading
+    make_enumerated_getter!(
+        Loading,
+        "loading",
+        "lazy" | "eager",
+        // https://html.spec.whatwg.org/multipage/#lazy-loading-attribute
+        // > The attribute's missing value default and invalid value default are both the Eager state.
+        missing => "eager",
+        invalid => "eager"
+    );
+
+    // https://html.spec.whatwg.org/multipage/#dom-img-loading
+    make_setter!(cx, SetLoading, "loading");
+
     /// <https://html.spec.whatwg.org/multipage/#dom-img-decode>
     fn Decode(&self, cx: &mut JSContext) -> Rc<Promise> {
         // Step 1. Let promise be a new promise.
@@ -1999,6 +2063,11 @@ impl VirtualMethods for HTMLImageElement {
 
     fn adopting_steps(&self, cx: &mut JSContext, old_doc: &Document) {
         self.super_type().unwrap().adopting_steps(cx, old_doc);
+        // The old document's lazy load observer would keep tracking this element against the
+        // wrong viewport; update the image data defers the fetch again in the new document.
+        if self.lazy_load_resumption_steps.take().is_some() {
+            old_doc.stop_intersection_observing_a_lazy_loading_element(self.upcast());
+        }
         self.update_the_image_data(cx);
     }
 
@@ -2053,6 +2122,18 @@ impl VirtualMethods for HTMLImageElement {
 
                 if referrer_policy_state_changed {
                     self.update_the_image_data(cx);
+                }
+            },
+            &local_name!("loading") => {
+                // https://html.spec.whatwg.org/multipage/#attr-img-loading
+                // > When the loading attribute's state is changed to the Eager state, the user
+                // > agent must run these steps:
+                // > 1. Let resumptionSteps be the img element's lazy load resumption steps.
+                // > 2. If resumptionSteps is null, then return.
+                // > 3. Set the img's lazy load resumption steps to null.
+                // > 4. Invoke resumptionSteps.
+                if self.Loading() == "eager" {
+                    self.invoke_lazy_load_resumption_steps(cx);
                 }
             },
             _ => {},

@@ -660,6 +660,8 @@ pub(crate) struct Document {
     /// The lifetime of an intersection observer is specified at
     /// <https://github.com/w3c/IntersectionObserver/issues/525>.
     intersection_observers: DomRefCell<Vec<Dom<IntersectionObserver>>>,
+    /// <https://html.spec.whatwg.org/multipage/#lazy-load-intersection-observer>
+    lazy_load_intersection_observer: MutNullableDom<IntersectionObserver>,
     /// The node that is currently highlighted by the devtools
     highlighted_dom_node: MutNullableDom<Node>,
     /// The constructed stylesheet that is adopted by this [Document].
@@ -3639,6 +3641,36 @@ impl Document {
             .retain(|observer| *observer != intersection_observer)
     }
 
+    /// <https://html.spec.whatwg.org/multipage/#start-intersection-observing-a-lazy-loading-element>
+    pub(crate) fn start_intersection_observing_a_lazy_loading_element(
+        &self,
+        cx: &mut JSContext,
+        element: &Element,
+    ) {
+        // Step 1. Let doc be element's node document.
+        debug_assert!(*element.owner_document() == *self);
+        // Step 2. If doc's lazy load intersection observer is null, set it to a new
+        // IntersectionObserver instance, initialized as follows: ...
+        let observer = self.lazy_load_intersection_observer.or_init(|| {
+            IntersectionObserver::new_lazy_load_observer(cx, &self.window)
+        });
+        // Step 3. Call doc's lazy load intersection observer's observe method with element as
+        // the argument.
+        observer.observe_target_element(element);
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#stop-intersection-observing-a-lazy-loading-element>
+    pub(crate) fn stop_intersection_observing_a_lazy_loading_element(&self, element: &Element) {
+        // Step 1. Let doc be element's node document.
+        // Step 2. Assert: doc's lazy load intersection observer is not null.
+        // Step 3. Call doc's lazy load intersection observer's unobserve method with element as
+        // the argument.
+        self.lazy_load_intersection_observer
+            .get()
+            .expect("an element awaiting lazy load is observed by its document")
+            .unobserve_target_element(element);
+    }
+
     /// <https://w3c.github.io/IntersectionObserver/#update-intersection-observations-algo>
     pub(crate) fn update_intersection_observer_steps(
         &self,
@@ -4161,6 +4193,7 @@ impl Document {
             has_trustworthy_ancestor_origin: Cell::new(has_trustworthy_ancestor_origin),
             intersection_observer_task_queued: Cell::new(false),
             intersection_observers: Default::default(),
+            lazy_load_intersection_observer: Default::default(),
             highlighted_dom_node: Default::default(),
             adopted_stylesheets: AdoptedStyleSheets::new(),
             pending_scroll_events: Default::default(),
