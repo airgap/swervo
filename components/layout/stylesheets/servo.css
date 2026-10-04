@@ -565,6 +565,17 @@ details[open]::details-content {
   writing-mode: inherit;
 }
 
+/* A ruby base with its annotation, see `BlockContainerBuilder::handle_ruby`. With
+   `line-height: 1` the base's line starts at its em box, whatever the line height of the text
+   around it, so the annotation sits right above the base glyphs as in Chrome. */
+*|*::-servo-ruby-column {
+  display: inline-block;
+  text-align: center;
+  text-indent: 0;
+  line-height: 1;
+  text-wrap-mode: nowrap;
+}
+
 *|*::-servo-anonymous-table {
     display: table;
 }

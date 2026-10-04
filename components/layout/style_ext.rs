@@ -140,7 +140,6 @@ pub(crate) enum DisplayLayoutInternal {
 impl DisplayLayoutInternal {
     /// <https://drafts.csswg.org/css-display-3/#layout-specific-displa>
     pub(crate) fn display_inside(&self) -> DisplayInside {
-        // When we add ruby, the display_inside of ruby must be Flow.
         // TODO: this should be unreachable for everything but
         // table cell and caption, once we have box tree fixups.
         DisplayInside::FlowRoot {
@@ -594,7 +593,9 @@ impl ComputedValuesExt for ComputedValues {
     }
 
     fn is_inline_box(&self, fragment_flags: FragmentFlags) -> bool {
-        (self.get_box().display.is_inline_flow() &&
+        let display = self.get_box().display;
+        // An inline ruby is laid out as an inline box, see `BlockContainerBuilder::handle_ruby`.
+        ((display.is_inline_flow() || display == stylo::Display::Ruby) &&
             !fragment_flags.intersects(
                 FragmentFlags::IS_REPLACED |
                     FragmentFlags::IS_WIDGET |
@@ -1401,6 +1402,9 @@ impl From<stylo::Display> for Display {
         let outside = match outside {
             stylo::DisplayOutside::Block => DisplayOutside::Block,
             stylo::DisplayOutside::Inline => DisplayOutside::Inline,
+            // The style adjuster leaves `display: ruby-text` only on the children of rubies,
+            // which lay them out themselves, see `BlockContainerBuilder::push_ruby_columns`.
+            stylo::DisplayOutside::InternalRuby => DisplayOutside::Inline,
             stylo::DisplayOutside::TableCaption => {
                 return Display::GeneratingBox(DisplayGeneratingBox::LayoutInternal(
                     DisplayLayoutInternal::TableCaption,
@@ -1443,6 +1447,10 @@ impl From<stylo::Display> for Display {
             stylo::DisplayInside::Flex => DisplayInside::Flex,
             stylo::DisplayInside::Grid => DisplayInside::Grid,
             stylo::DisplayInside::Table => DisplayInside::Table,
+            // The block container builder recognizes a ruby from its stylo display.
+            stylo::DisplayInside::Ruby | stylo::DisplayInside::RubyText => DisplayInside::Flow {
+                is_list_item: false,
+            },
 
             // These should not be values of DisplayInside, but oh well
             stylo::DisplayInside::None => return Display::None,

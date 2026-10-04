@@ -107,8 +107,9 @@ use style::computed_values::word_break::T as WordBreak;
 use style::context::{QuirksMode, SharedStyleContext};
 use style::dom::OpaqueNode;
 use style::properties::ComputedValues;
+use style::selector_parser::PseudoElement;
 use style::values::computed::Overflow;
-use style::values::specified::box_::DisplayInside;
+use style::values::specified::box_::{Display as StyloDisplay, DisplayInside};
 use style::values::specified::text::TextOverflowSide;
 use style::properties::style_structs::InheritedText;
 use style::values::computed::BaselineShift;
@@ -137,7 +138,7 @@ use crate::formatting_contexts::{Baselines, IndependentFormattingContext};
 use crate::fragment_tree::{
     BaseFragmentInfo, BoxFragment, CollapsedMargin, Fragment, FragmentFlags, PositioningFragment,
 };
-use crate::geom::{LogicalRect, LogicalSides1D, LogicalVec2, ToLogical};
+use crate::geom::{LogicalRect, LogicalSides1D, LogicalVec2, PhysicalSize, ToLogical};
 use crate::layout_box_base::LayoutBoxBase;
 use crate::positioned::{AbsolutelyPositionedBox, PositioningContext};
 use crate::sizing::{ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult};
@@ -2985,8 +2986,15 @@ impl IndependentFormattingContext {
             .map(|baseline| pbm_sums.block_start + baseline)
             .unwrap_or(size.block);
 
-        let (block_sizes, baseline_offset_in_parent) =
-            self.get_block_sizes_and_baseline_offset(layout, size.block, baseline_offset);
+        // The annotation of a ruby column overflows the line box instead of growing it, as in
+        // Chrome, where it sits in the leading above the line or above the first line.
+        let annotation_block_size =
+            ruby_annotation_block_size(&fragment).to_logical(container_writing_mode).block;
+        let (block_sizes, baseline_offset_in_parent) = self.get_block_sizes_and_baseline_offset(
+            layout,
+            size.block - annotation_block_size,
+            baseline_offset - annotation_block_size,
+        );
         layout.update_unbreakable_segment_for_new_content(
             &block_sizes,
             size.inline,
@@ -3065,6 +3073,22 @@ impl IndependentFormattingContext {
         contribution.adjust_for_baseline_offset(baseline_offset);
 
         (contribution, baseline_offset)
+    }
+}
+
+/// The size of the annotation stacked over the base of a ruby column, see
+/// `BlockContainerBuilder::handle_ruby`, or zero for any other atomic inline.
+fn ruby_annotation_block_size(fragment: &BoxFragment) -> PhysicalSize<Au> {
+    if fragment.style().pseudo() != Some(PseudoElement::ServoRubyColumn) {
+        return PhysicalSize::zero();
+    }
+    match fragment.children.first() {
+        Some(Fragment::Box(annotation))
+            if annotation.style().get_box().display == StyloDisplay::RubyText =>
+        {
+            annotation.margin_rect().size
+        },
+        _ => PhysicalSize::zero(),
     }
 }
 

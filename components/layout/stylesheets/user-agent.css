@@ -123,6 +123,11 @@ sub, sup { line-height: normal; font-size: smaller; }
 
 ruby { display: ruby; }
 rt { display: ruby-text; }
+/* Chrome's sizing of annotations. Their centering over the base comes from text-align here,
+   since Servo lays a ruby column out as a block container. */
+ruby, rt { text-indent: 0; }
+rt { line-height: normal; }
+ruby > rt { font-size: 50%; text-align: center; }
 
 /*
  * All tag names that can be links are listed here, because applying pseudo-class selectors
