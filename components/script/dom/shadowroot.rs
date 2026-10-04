@@ -34,7 +34,6 @@ use crate::dom::bindings::codegen::Bindings::ShadowRootBinding::{
 use crate::dom::bindings::codegen::UnionTypes::{
     TrustedHTMLOrNullIsEmptyString, TrustedHTMLOrString,
 };
-use crate::dom::bindings::frozenarray::CachedFrozenArray;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::root::{Dom, DomRoot, LayoutDom, MutNullableDom};
@@ -45,7 +44,7 @@ use crate::dom::customelementregistry::CustomElementRegistry;
 use crate::dom::document::Document;
 use crate::dom::documentfragment::DocumentFragment;
 use crate::dom::documentorshadowroot::{
-    DocumentOrShadowRoot, ServoStylesheetInDocument, StylesheetSource,
+    AdoptedStyleSheets, DocumentOrShadowRoot, ServoStylesheetInDocument, StylesheetSource,
 };
 use crate::dom::element::Element;
 use crate::dom::html::htmlslotelement::HTMLSlotElement;
@@ -110,11 +109,7 @@ pub(crate) struct ShadowRoot {
 
     /// The constructed stylesheet that is adopted by this [ShadowRoot].
     /// <https://drafts.csswg.org/cssom/#dom-documentorshadowroot-adoptedstylesheets>
-    adopted_stylesheets: DomRefCell<Vec<Dom<CSSStyleSheet>>>,
-
-    /// Cached frozen array of [`Self::adopted_stylesheets`]
-    #[ignore_malloc_size_of = "mozjs"]
-    adopted_stylesheets_frozen_types: CachedFrozenArray,
+    adopted_stylesheets: AdoptedStyleSheets,
 
     details_name_groups: DomRefCell<Option<DetailsNameGroups>>,
 }
@@ -153,8 +148,7 @@ impl ShadowRoot {
             declarative: Cell::new(false),
             serializable: Cell::new(false),
             delegates_focus: Cell::new(false),
-            adopted_stylesheets: Default::default(),
-            adopted_stylesheets_frozen_types: CachedFrozenArray::new(),
+            adopted_stylesheets: AdoptedStyleSheets::new(),
             details_name_groups: Default::default(),
         }
     }
@@ -184,6 +178,10 @@ impl ShadowRoot {
 
     pub(crate) fn owner_doc(&self) -> &Document {
         &self.document
+    }
+
+    pub(crate) fn adopted_stylesheets(&self) -> &AdoptedStyleSheets {
+        &self.adopted_stylesheets
     }
 
     pub(crate) fn stylesheet_count(&self) -> usize {
@@ -584,35 +582,20 @@ impl ShadowRootMethods<crate::DomTypeHolder> for ShadowRoot {
 
     /// <https://drafts.csswg.org/cssom/#dom-documentorshadowroot-adoptedstylesheets>
     fn AdoptedStyleSheets(&self, cx: &mut JSContext, retval: MutableHandleValue) {
-        self.adopted_stylesheets_frozen_types.get_or_init(
+        self.adopted_stylesheets.get(
             cx,
-            || {
-                self.adopted_stylesheets
-                    .borrow()
-                    .clone()
-                    .iter()
-                    .map(|sheet| sheet.as_rooted())
-                    .collect()
-            },
+            &StyleSheetListOwner::ShadowRoot(Dom::from_ref(self)),
             retval,
         );
     }
 
     /// <https://drafts.csswg.org/cssom/#dom-documentorshadowroot-adoptedstylesheets>
     fn SetAdoptedStyleSheets(&self, cx: &mut JSContext, val: HandleValue) -> ErrorResult {
-        let result = DocumentOrShadowRoot::set_adopted_stylesheet_from_jsval(
+        self.adopted_stylesheets.set(
             cx,
-            self.adopted_stylesheets.borrow_mut().as_mut(),
-            val,
             &StyleSheetListOwner::ShadowRoot(Dom::from_ref(self)),
-        );
-
-        // If update is successful, clear the FrozenArray cache.
-        if result.is_ok() {
-            self.adopted_stylesheets_frozen_types.clear();
-        }
-
-        result
+            val,
+        )
     }
 
     /// <https://fullscreen.spec.whatwg.org/#dom-document-fullscreenelement>

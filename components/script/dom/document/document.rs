@@ -114,7 +114,6 @@ use crate::dom::bindings::domname::{
     self, is_valid_attribute_local_name, is_valid_element_local_name, namespace_from_domstring,
 };
 use crate::dom::bindings::error::{Error, ErrorInfo, ErrorResult, Fallible};
-use crate::dom::bindings::frozenarray::CachedFrozenArray;
 use crate::dom::bindings::inheritance::{Castable, ElementTypeId, HTMLElementTypeId, NodeTypeId};
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::refcounted::Trusted;
@@ -142,7 +141,7 @@ use crate::dom::document_embedder_controls::DocumentEmbedderControls;
 use crate::dom::document_event_handler::DocumentEventHandler;
 use crate::dom::documentfragment::DocumentFragment;
 use crate::dom::documentorshadowroot::{
-    DocumentOrShadowRoot, ServoStylesheetInDocument, StylesheetSource,
+    AdoptedStyleSheets, DocumentOrShadowRoot, ServoStylesheetInDocument, StylesheetSource,
 };
 use crate::dom::documenttimeline::DocumentTimeline;
 use crate::dom::documenttype::DocumentType;
@@ -663,10 +662,7 @@ pub(crate) struct Document {
     highlighted_dom_node: MutNullableDom<Node>,
     /// The constructed stylesheet that is adopted by this [Document].
     /// <https://drafts.csswg.org/cssom/#dom-documentorshadowroot-adoptedstylesheets>
-    adopted_stylesheets: DomRefCell<Vec<Dom<CSSStyleSheet>>>,
-    /// Cached frozen array of [`Self::adopted_stylesheets`]
-    #[ignore_malloc_size_of = "mozjs"]
-    adopted_stylesheets_frozen_types: CachedFrozenArray,
+    adopted_stylesheets: AdoptedStyleSheets,
     /// <https://drafts.csswg.org/cssom-view/#document-pending-scroll-events>
     /// > Each Document has an associated list of pending scroll events, which stores
     /// > pairs of (EventTarget, DOMString), initially empty.
@@ -4159,8 +4155,7 @@ impl Document {
             intersection_observer_task_queued: Cell::new(false),
             intersection_observers: Default::default(),
             highlighted_dom_node: Default::default(),
-            adopted_stylesheets: Default::default(),
-            adopted_stylesheets_frozen_types: CachedFrozenArray::new(),
+            adopted_stylesheets: AdoptedStyleSheets::new(),
             pending_scroll_events: Default::default(),
             scrolls_awaiting_completion: Default::default(),
             snap_targets: Default::default(),
@@ -4795,6 +4790,10 @@ impl Document {
             }
         }
         self.shadow_roots_styles_changed.set(false);
+    }
+
+    pub(crate) fn adopted_stylesheets(&self) -> &AdoptedStyleSheets {
+        &self.adopted_stylesheets
     }
 
     pub(crate) fn stylesheet_count(&self) -> usize {
@@ -7094,35 +7093,17 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
 
     /// <https://drafts.csswg.org/cssom/#dom-documentorshadowroot-adoptedstylesheets>
     fn AdoptedStyleSheets(&self, cx: &mut JSContext, retval: MutableHandleValue) {
-        self.adopted_stylesheets_frozen_types.get_or_init(
+        self.adopted_stylesheets.get(
             cx,
-            || {
-                self.adopted_stylesheets
-                    .borrow()
-                    .clone()
-                    .iter()
-                    .map(|sheet| sheet.as_rooted())
-                    .collect()
-            },
+            &StyleSheetListOwner::Document(Dom::from_ref(self)),
             retval,
         );
     }
 
     /// <https://drafts.csswg.org/cssom/#dom-documentorshadowroot-adoptedstylesheets>
     fn SetAdoptedStyleSheets(&self, cx: &mut JSContext, val: HandleValue) -> ErrorResult {
-        let result = DocumentOrShadowRoot::set_adopted_stylesheet_from_jsval(
-            cx,
-            self.adopted_stylesheets.borrow_mut().as_mut(),
-            val,
-            &StyleSheetListOwner::Document(Dom::from_ref(self)),
-        );
-
-        // If update is successful, clear the FrozenArray cache.
-        if result.is_ok() {
-            self.adopted_stylesheets_frozen_types.clear()
-        }
-
-        result
+        self.adopted_stylesheets
+            .set(cx, &StyleSheetListOwner::Document(Dom::from_ref(self)), val)
     }
 
     fn Timeline(&self) -> DomRoot<DocumentTimeline> {
