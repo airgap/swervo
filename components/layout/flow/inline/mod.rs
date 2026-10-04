@@ -101,6 +101,7 @@ use servo_arc::Arc as ServoArc;
 use style::Zero;
 use style::computed_values::line_break::T as LineBreak;
 use style::computed_values::text_wrap_mode::T as TextWrapMode;
+use style::computed_values::text_wrap_style::T as TextWrapStyle;
 use style::computed_values::white_space_collapse::T as WhiteSpaceCollapse;
 use style::computed_values::word_break::T as WordBreak;
 use style::context::{QuirksMode, SharedStyleContext};
@@ -146,6 +147,11 @@ use crate::{ConstraintSpace, ContainingBlock, IndefiniteContainingBlock, SharedS
 // From gfxFontConstants.h in Firefox.
 static FONT_SUBSCRIPT_OFFSET_RATIO: f32 = 0.20;
 static FONT_SUPERSCRIPT_OFFSET_RATIO: f32 = 0.34;
+
+/// Chrome only balances `text-wrap: balance` blocks of up to this many lines and wraps longer
+/// text greedily, which the spec permits for performance.
+/// <https://drafts.csswg.org/css-text-4/#valdef-text-wrap-style-balance>
+const MAX_LINES_TO_BALANCE: usize = 6;
 
 #[derive(Debug, MallocSizeOf)]
 pub(crate) struct InlineFormattingContext {
@@ -1001,6 +1007,11 @@ struct InlineFormattingContextLayout<'layout_data> {
     /// by the boundary between two characters, the text-wrap-mode property of their nearest
     /// common ancestor is used.
     text_wrap_mode: TextWrapMode,
+
+    /// The inline size that lines must fit in when no floats are involved. This is the
+    /// containing block's inline size except when `text-wrap: balance` narrows it; text
+    /// alignment still uses the full containing block.
+    line_break_inline_size: Au,
 }
 
 impl InlineFormattingContextLayout<'_> {
@@ -1710,7 +1721,7 @@ impl InlineFormattingContextLayout<'_> {
                 .size
         } else {
             LogicalVec2 {
-                inline: containing_block.size.inline,
+                inline: self.line_break_inline_size,
                 block: MAX_AU,
             }
         };
@@ -1743,7 +1754,7 @@ impl InlineFormattingContextLayout<'_> {
 
         // If the potential line is larger than the containing block we do not even need to consider
         // floats. We definitely have to do a linebreak.
-        if potential_line_size.inline > containing_block.size.inline {
+        if potential_line_size.inline > self.line_break_inline_size {
             return true;
         }
 
@@ -2334,6 +2345,87 @@ impl InlineFormattingContext {
         sequential_layout_state: Option<&mut SequentialLayoutState>,
         collapsible_with_parent_start_margin: CollapsibleWithParentStartMargin,
     ) -> IndependentFormattingContextLayoutResult {
+        // Balancing lays the lines out several times, which must not place floats more than
+        // once, so it only happens outside of float contexts.
+        let line_break_inline_size = match sequential_layout_state {
+            None => self.balanced_line_break_inline_size(
+                layout_context,
+                containing_block,
+                collapsible_with_parent_start_margin,
+            ),
+            Some(_) => None,
+        }
+        .unwrap_or(containing_block.size.inline);
+        self.layout_with_line_break_inline_size(
+            layout_context,
+            positioning_context,
+            containing_block,
+            sequential_layout_state,
+            collapsible_with_parent_start_margin,
+            line_break_inline_size,
+        )
+        .0
+    }
+
+    /// <https://drafts.csswg.org/css-text-4/#valdef-text-wrap-style-balance>
+    ///
+    /// Like Chrome, this finds the narrowest line-breaking inline size that keeps the number
+    /// of lines that greedy wrapping produces at the full inline size, so all lines end up
+    /// about as long as each other.
+    fn balanced_line_break_inline_size(
+        &self,
+        layout_context: &LayoutContext,
+        containing_block: &ContainingBlock,
+        collapsible_with_parent_start_margin: CollapsibleWithParentStartMargin,
+    ) -> Option<Au> {
+        let style_text = containing_block.style.get_inherited_text();
+        if style_text.text_wrap_style != TextWrapStyle::Balance ||
+            style_text.text_wrap_mode != TextWrapMode::Wrap
+        {
+            return None;
+        }
+
+        let count_lines = |line_break_inline_size| {
+            self.layout_with_line_break_inline_size(
+                layout_context,
+                &mut PositioningContext::default(),
+                containing_block,
+                None,
+                collapsible_with_parent_start_margin,
+                line_break_inline_size,
+            )
+            .1
+        };
+        let full_inline_size = containing_block.size.inline;
+        let line_count = count_lines(full_inline_size);
+        if !(2..=MAX_LINES_TO_BALANCE).contains(&line_count) {
+            return None;
+        }
+
+        let mut too_narrow = Au::zero();
+        let mut wide_enough = full_inline_size;
+        while wide_enough - too_narrow > Au::from_px(1) {
+            let middle = (too_narrow + wide_enough).scale_by(0.5);
+            if count_lines(middle) <= line_count {
+                wide_enough = middle;
+            } else {
+                too_narrow = middle;
+            }
+        }
+        Some(wide_enough)
+    }
+
+    /// Lays out the lines, breaking them to fit `line_break_inline_size`, and also returns
+    /// how many non-phantom lines that produced.
+    fn layout_with_line_break_inline_size(
+        &self,
+        layout_context: &LayoutContext,
+        positioning_context: &mut PositioningContext,
+        containing_block: &ContainingBlock,
+        sequential_layout_state: Option<&mut SequentialLayoutState>,
+        collapsible_with_parent_start_margin: CollapsibleWithParentStartMargin,
+        line_break_inline_size: Au,
+    ) -> (IndependentFormattingContextLayoutResult, usize) {
         // Clear any cached inline fragments from previous layouts.
         for inline_box in self.inline_boxes.iter() {
             inline_box.borrow().base.clear_fragments();
@@ -2383,6 +2475,7 @@ impl InlineFormattingContext {
             depends_on_block_constraints: false,
             white_space_collapse: style_text.white_space_collapse,
             text_wrap_mode: style_text.text_wrap_mode,
+            line_break_inline_size,
         };
 
         for item in self.inline_items.iter() {
@@ -2432,15 +2525,18 @@ impl InlineFormattingContext {
             .clamped_content_block_size
             .unwrap_or(content_block_size);
 
-        IndependentFormattingContextLayoutResult {
-            fragments: layout.fragments,
-            content_block_size,
-            collapsible_margins_in_children,
-            baselines,
-            depends_on_block_constraints: layout.depends_on_block_constraints,
-            content_inline_size_for_table: None,
-            specific_layout_info: None,
-        }
+        (
+            IndependentFormattingContextLayoutResult {
+                fragments: layout.fragments,
+                content_block_size,
+                collapsible_margins_in_children,
+                baselines,
+                depends_on_block_constraints: layout.depends_on_block_constraints,
+                content_inline_size_for_table: None,
+                specific_layout_info: None,
+            },
+            layout.lines_laid_out,
+        )
     }
 
     pub(crate) fn subtree_size(&self) -> usize {
