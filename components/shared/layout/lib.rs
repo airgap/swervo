@@ -291,7 +291,7 @@ pub enum PendingImageState {
 }
 
 /// The destination in layout where an image is needed.
-#[derive(Debug, MallocSizeOf)]
+#[derive(Clone, Copy, Debug, MallocSizeOf)]
 pub enum LayoutImageDestination {
     BoxTreeConstruction,
     DisplayListBuilding,

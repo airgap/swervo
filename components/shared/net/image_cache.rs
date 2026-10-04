@@ -129,6 +129,9 @@ pub enum ImageResponse {
     Loaded(Image, ServoUrl),
     /// The request image metadata was loaded.
     MetadataLoaded(ImageMetadata),
+    /// Part of the requested image has been received and decoded; the rest is still loading.
+    /// <https://html.spec.whatwg.org/multipage/#img-inc>
+    PartiallyDecoded(Image),
     /// The requested image failed to load or decode.
     FailedToLoadOrDecode,
 }
@@ -201,6 +204,9 @@ pub trait ImageCache: Sync + Send {
         origin: ImmutableOrigin,
         cors_setting: Option<CorsSettings>,
     ) -> Option<Image>;
+
+    /// Returns the part of the still-loading image `id` that has been decoded so far, if any.
+    fn get_partially_decoded_image(&self, id: PendingImageId) -> Option<Image>;
 
     /// Returns if the Image is already in the cache or not. If the Image is not yet completely decoded, we return [`ImageCacheResult::Pending`] or [`ImageCacheResult::Available`].
     fn get_cached_image_status(

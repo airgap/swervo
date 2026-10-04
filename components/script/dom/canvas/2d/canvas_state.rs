@@ -425,7 +425,9 @@ impl CanvasState {
                     return None;
                 }
             },
-            ImageResponse::FailedToLoadOrDecode | ImageResponse::MetadataLoaded(_) => {
+            ImageResponse::FailedToLoadOrDecode |
+            ImageResponse::MetadataLoaded(_) |
+            ImageResponse::PartiallyDecoded(_) => {
                 return None;
             },
         };

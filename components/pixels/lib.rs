@@ -18,7 +18,7 @@ use image::error::ImageFormatHint;
 use image::imageops::{self, FilterType};
 use image::metadata::LoopCount;
 use image::{
-    AnimationDecoder, DynamicImage, ImageBuffer, ImageDecoder, ImageError, ImageFormat,
+    AnimationDecoder, ColorType, DynamicImage, ImageBuffer, ImageDecoder, ImageError, ImageFormat,
     ImageResult, Limits, Rgba,
 };
 use log::{debug, error};
@@ -583,6 +583,162 @@ pub fn load_from_memory(buffer: &[u8], cors_status: CorsStatus) -> Option<Raster
             }
         },
     }
+}
+
+/// The result of decoding the part of an image that has been received so far.
+pub enum PartialDecode {
+    /// Only the complete image can be shown: there is no incremental decoder for the format, or
+    /// the image is animated, interlaced or has more than 8 bits per channel.
+    Unsupported,
+    /// Too little data has arrived to show any pixels yet.
+    NeedMoreData,
+    /// The decoded part of the image, with the rows that have not arrived yet left transparent.
+    Decoded(RasterImage),
+}
+
+/// Decodes the prefix of an image that is still downloading, so that it can be painted while the
+/// rest arrives: baseline JPEGs and PNGs fill in top-down and progressive JPEGs sharpen scan by
+/// scan, as in other browsers.
+pub fn decode_partial_image(buffer: &[u8], cors_status: CorsStatus) -> PartialDecode {
+    // The JPEG and PNG signatures are at most 8 bytes long.
+    const LONGEST_SIGNATURE: usize = 8;
+    let format = match detect_image_format(buffer) {
+        Ok(format) => format,
+        Err(_) if buffer.len() < LONGEST_SIGNATURE => return PartialDecode::NeedMoreData,
+        Err(_) => return PartialDecode::Unsupported,
+    };
+    match format {
+        ImageFormat::Jpeg => {
+            let Ok(decoder) = jpeg::JpegDecoder::new(Cursor::new(buffer)) else {
+                return PartialDecode::NeedMoreData;
+            };
+            decode_partial_static_image(decoder, cors_status, |rows, decoder_result| {
+                // zune-jpeg decodes a truncated stream as if the missing bits were zero,
+                // so anything other than success means the data is unusable for now.
+                if decoder_result.is_err() {
+                    return 0;
+                }
+                count_received_jpeg_rows(rows)
+            })
+        },
+        ImageFormat::Png => {
+            let Ok(decoder) = png::PngDecoder::with_limits(Cursor::new(buffer), Limits::default())
+            else {
+                return PartialDecode::NeedMoreData;
+            };
+            // Adam7 passes land scattered across the whole image, and APNG frames have to be
+            // composited, so neither can be shown from a prefix of the stream.
+            // https://www.w3.org/TR/png-3/#11IHDR: the interlace method is byte 12 of the
+            // IHDR data, which directly follows the 8-byte signature and 8-byte chunk header.
+            const IHDR_INTERLACE_METHOD_OFFSET: usize = 28;
+            if buffer[IHDR_INTERLACE_METHOD_OFFSET] != 0 || !matches!(decoder.is_apng(), Ok(false))
+            {
+                return PartialDecode::Unsupported;
+            }
+            // The PNG decoder writes rows in order and stops with an error where the data ends,
+            // leaving the remaining rows zeroed.
+            decode_partial_static_image(decoder, cors_status, |rows, _| {
+                rows.iter()
+                    .rposition(|row| row.iter().any(|&byte| byte != 0))
+                    .map_or(0, |last_row| last_row + 1)
+            })
+        },
+        _ => PartialDecode::Unsupported,
+    }
+}
+
+/// Counts the rows at the top of a truncated JPEG decode that hold received data.
+fn count_received_jpeg_rows(rows: &[&[u8]]) -> usize {
+    // Blocks that have not arrived decode to mid-gray (128 in every channel). Treat trailing
+    // gray rows as missing so they stay transparent, as in Chrome.
+    let received = rows
+        .iter()
+        .rposition(|row| row.iter().any(|&byte| byte != 128))
+        .map_or(0, |last_row| last_row + 1);
+    if received == rows.len() {
+        return received;
+    }
+    // The MCU row at the decoding frontier has only partly arrived, and the decoder fills the
+    // rest of it with made-up blocks instead of gray. MCUs are at most 16 pixels tall.
+    const MAX_MCU_HEIGHT: usize = 16;
+    received.saturating_sub(MAX_MCU_HEIGHT)
+}
+
+fn decode_partial_static_image(
+    mut decoder: impl ImageDecoder,
+    cors_status: CorsStatus,
+    count_received_rows: impl FnOnce(&[&[u8]], ImageResult<()>) -> usize,
+) -> PartialDecode {
+    let (width, height) = decoder.dimensions();
+    let color_type = decoder.color_type();
+    if !matches!(
+        color_type,
+        ColorType::L8 | ColorType::La8 | ColorType::Rgb8 | ColorType::Rgba8
+    ) {
+        return PartialDecode::Unsupported;
+    }
+    if width == 0 ||
+        height == 0 ||
+        compute_rgba8_byte_length_if_within_limit(width as usize, height as usize).is_none()
+    {
+        return PartialDecode::Unsupported;
+    }
+    let orientation = decoder.orientation();
+
+    let mut pixels = vec![0; decoder.total_bytes() as usize];
+    let decoder_result = decoder.read_image(&mut pixels);
+    let row_length = pixels.len() / height as usize;
+    let rows: Vec<&[u8]> = pixels.chunks_exact(row_length).collect();
+    let received_rows = count_received_rows(&rows, decoder_result);
+    if received_rows == 0 {
+        return PartialDecode::NeedMoreData;
+    }
+
+    let mut dynamic_image = match color_type {
+        ColorType::L8 => ImageBuffer::from_raw(width, height, pixels).map(DynamicImage::ImageLuma8),
+        ColorType::La8 => {
+            ImageBuffer::from_raw(width, height, pixels).map(DynamicImage::ImageLumaA8)
+        },
+        ColorType::Rgb8 => {
+            ImageBuffer::from_raw(width, height, pixels).map(DynamicImage::ImageRgb8)
+        },
+        ColorType::Rgba8 => {
+            ImageBuffer::from_raw(width, height, pixels).map(DynamicImage::ImageRgba8)
+        },
+        _ => unreachable!("Checked above"),
+    }
+    .expect("The buffer was sized by the decoder");
+    let mut rgba = dynamic_image.into_rgba8();
+    let rgba_row_length = width as usize * 4;
+    let rgba_bytes: &mut [u8] = &mut rgba;
+    rgba_bytes[received_rows * rgba_row_length..].fill(0);
+
+    if let Ok(orientation) = orientation {
+        dynamic_image = DynamicImage::ImageRgba8(rgba);
+        dynamic_image.apply_orientation(orientation);
+        rgba = dynamic_image.into_rgba8();
+    }
+
+    let is_opaque = rgba8_premultiply_inplace(&mut rgba);
+    let frame = ImageFrame {
+        delay: None,
+        byte_range: 0..rgba.len(),
+        width: rgba.width(),
+        height: rgba.height(),
+    };
+    PartialDecode::Decoded(RasterImage {
+        metadata: ImageMetadata {
+            width: rgba.width(),
+            height: rgba.height(),
+        },
+        format: PixelFormat::RGBA8,
+        frames: vec![frame],
+        bytes: Arc::new(rgba.into_vec()),
+        id: None,
+        cors_status,
+        is_opaque,
+        loop_count: None,
+    })
 }
 
 // https://developer.mozilla.org/en-US/docs/Web/HTML/Element/img

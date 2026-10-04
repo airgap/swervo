@@ -222,6 +222,14 @@ impl HTMLImageElement {
 
     /// Gets the copy of the raster image data.
     pub(crate) fn get_raster_image_data(&self) -> Option<Snapshot> {
+        // A partially available image only has the rows received so far, which canvas,
+        // WebGL and the like must not read as if they were the image.
+        if matches!(
+            self.current_request.borrow().state,
+            State::PartiallyAvailable
+        ) {
+            return None;
+        }
         let Some(raster_image) = self.image_data()?.as_raster_image() else {
             warn!("Vector image is not supported as raster image source");
             return None;
@@ -528,6 +536,21 @@ impl HTMLImageElement {
                 self.pending_request.borrow_mut().state = State::PartiallyAvailable;
                 (false, false)
             },
+            (ImageResponse::PartiallyDecoded(image), ImageRequestPhase::Current) => {
+                // A partially available current request is rendered with whatever part of the
+                // image has been decoded so far, like Chrome does while the rest downloads.
+                // https://html.spec.whatwg.org/multipage/#img-inc
+                {
+                    let mut current_request = self.current_request.borrow_mut();
+                    current_request.state = State::PartiallyAvailable;
+                    current_request.metadata = Some(image.metadata());
+                    current_request.image = Some(image);
+                }
+                self.upcast::<Node>().dirty(NodeDamage::Other);
+                (false, false)
+            },
+            // The pending request is not shown until it is completely available.
+            (ImageResponse::PartiallyDecoded(_), ImageRequestPhase::Pending) => (false, false),
             (ImageResponse::FailedToLoadOrDecode, ImageRequestPhase::Current) => {
                 // Otherwise, if the user agent is able to determine that image request's image is
                 // corrupted in some fatal way such that the image dimensions cannot be obtained,
@@ -619,6 +642,7 @@ impl HTMLImageElement {
             ImageResponse::MetadataLoaded(meta) => {
                 self.pending_request.borrow_mut().metadata = Some(meta);
             },
+            ImageResponse::PartiallyDecoded(_) => {},
         };
     }
 

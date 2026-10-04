@@ -242,8 +242,22 @@ impl ImageResolver {
                     resolved_images_cache.insert(url, Ok(image.clone()));
                     Ok(image)
                 },
-                ImageOrMetadataAvailable::MetadataAvailable(..) => {
-                    Result::Err(ResolveImageError::OnlyMetadata)
+                ImageOrMetadataAvailable::MetadataAvailable(_, id) => {
+                    let Some(image) = self.image_cache.get_partially_decoded_image(id) else {
+                        return Result::Err(ResolveImageError::OnlyMetadata);
+                    };
+                    // Paint the part decoded so far, but keep it out of `resolved_images_cache`
+                    // and ask to be notified, so the node is laid out again when the image
+                    // completes.
+                    self.pending_images.lock().push(PendingImage {
+                        state: PendingImageState::PendingResponse,
+                        node: node.into(),
+                        id,
+                        origin: self.origin.clone(),
+                        destination,
+                        is_internal_request,
+                    });
+                    Ok(image)
                 },
             },
             LayoutImageCacheResult::Pending => Result::Err(ResolveImageError::ImagePending),

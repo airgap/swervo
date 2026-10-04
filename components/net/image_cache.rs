@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use imsz::imsz_from_reader;
 use log::{debug, warn};
@@ -24,7 +25,10 @@ use net_traits::request::CorsSettings;
 use net_traits::{FetchMetadata, FetchResponseMsg, FilteredMetadata, NetworkError};
 use paint_api::{CrossProcessPaintApi, ImageUpdate, SerializableImageData};
 use parking_lot::Mutex;
-use pixels::{CorsStatus, ImageFrame, ImageMetadata, PixelFormat, RasterImage, load_from_memory};
+use pixels::{
+    CorsStatus, ImageFrame, ImageMetadata, PartialDecode, PixelFormat, RasterImage,
+    decode_partial_image, load_from_memory,
+};
 use profile_traits::mem::{Report, ReportKind};
 use profile_traits::path;
 use resvg::tiny_skia;
@@ -49,6 +53,10 @@ const FALLBACK_RIPPY: &[u8] = include_bytes!("resources/rippy.png");
 /// test uses very large values for viewBox. Hence, we just clamp the maximum
 /// width/height of the pixmap allocated for rasterization.
 const MAX_SVG_PIXMAP_DIMENSION: u32 = 5000;
+
+/// How often the bytes of a still-downloading image are decoded to paint what has arrived so
+/// far. Loads that finish within this interval never pay for a partial decode.
+const PARTIAL_DECODE_INTERVAL: Duration = Duration::from_millis(100);
 
 //
 // TODO(gw): Remaining work on image cache:
@@ -352,6 +360,17 @@ impl LoadKeyGenerator {
     }
 }
 
+/// Progress of decoding an image while its bytes are still arriving.
+#[derive(MallocSizeOf)]
+enum PartialDecodeState {
+    /// Decode what has arrived once this instant has passed.
+    WaitingUntil(Instant),
+    /// A decode of the bytes received so far is running on the thread pool.
+    Decoding,
+    /// The image will only be shown once it is complete.
+    Unsupported,
+}
+
 #[derive(Debug)]
 enum LoadResult {
     LoadedRasterImage(RasterImage),
@@ -394,6 +413,13 @@ struct PendingLoad {
 
     /// The MIME type from the `Content-type` header of the HTTP response, if any.
     content_type: Option<Mime>,
+
+    partial_decode: PartialDecodeState,
+
+    /// The most recent decode of the bytes received so far, painted while the rest downloads.
+    /// The complete image takes over its WebRender key, so paint picks up the final pixels.
+    #[conditional_malloc_size_of]
+    partial_image: Option<Arc<RasterImage>>,
 }
 
 impl PendingLoad {
@@ -413,6 +439,10 @@ impl PendingLoad {
             cors_setting,
             cors_status: CorsStatus::Unsafe,
             content_type: None,
+            partial_decode: PartialDecodeState::WaitingUntil(
+                Instant::now() + PARTIAL_DECODE_INTERVAL,
+            ),
+            partial_image: None,
         }
     }
 
@@ -686,6 +716,14 @@ impl ImageCacheStore {
             Some(load) => load,
             None => return,
         };
+        if let Some(partial_key) = pending_load
+            .partial_image
+            .as_ref()
+            .and_then(|image| image.id) &&
+            !matches!(&load_result, LoadResult::LoadedRasterImage(image) if image.id == Some(partial_key))
+        {
+            self.paint_api.delete_image(partial_key);
+        }
         let url = pending_load.final_url.clone();
         let image_response = match load_result {
             LoadResult::LoadedRasterImage(raster_image) => {
@@ -789,7 +827,9 @@ impl ImageCacheStore {
             .get(&(url, origin, cors_setting))
             .map(|completed_load| match &completed_load.image_response {
                 ImageResponse::Loaded(image, url) => Ok((image.clone(), url.clone())),
-                ImageResponse::FailedToLoadOrDecode | ImageResponse::MetadataLoaded(_) => Err(()),
+                ImageResponse::FailedToLoadOrDecode |
+                ImageResponse::MetadataLoaded(_) |
+                ImageResponse::PartiallyDecoded(_) => Err(()),
             })
     }
 
@@ -798,15 +838,96 @@ impl ImageCacheStore {
     fn handle_decoder(&mut self, msg: DecoderMsg) {
         let image = match msg.image {
             None => LoadResult::FailedToLoadOrDecode,
-            Some(DecodedImage::Raster(raster_image)) => {
-                self.load_image_with_keycache(PendingKey::RasterImage((msg.key, raster_image)));
-                return;
+            Some(DecodedImage::Raster(mut raster_image)) => {
+                let partial_key = self
+                    .pending_loads
+                    .get_by_key_mut(&msg.key)
+                    .and_then(|pending_load| pending_load.partial_image.as_ref())
+                    .and_then(|partial_image| partial_image.id);
+                let Some(partial_key) = partial_key else {
+                    self.load_image_with_keycache(PendingKey::RasterImage((msg.key, raster_image)));
+                    return;
+                };
+                let (descriptor, data, _) =
+                    raster_image.webrender_image_descriptor_and_data_for_frame(0);
+                self.paint_api.update_image(
+                    partial_key,
+                    descriptor,
+                    SerializableImageData::Raw(data),
+                    None,
+                );
+                raster_image.id = Some(partial_key);
+                LoadResult::LoadedRasterImage(raster_image)
             },
             Some(DecodedImage::Vector(vector_image_data)) => {
                 LoadResult::LoadedVectorImage(vector_image_data)
             },
         };
         self.complete_load(msg.key, image);
+    }
+
+    /// Handle the decode of the bytes of a still-downloading image that a worker thread
+    /// started in `notify_pending_response`.
+    fn handle_partial_decode(&mut self, key: LoadKey, decode: PartialDecode) {
+        let Some(pending_load) = self.pending_loads.loads.get_mut(&key) else {
+            return;
+        };
+        // Once all bytes have arrived the complete image is decoding (or the load failed),
+        // and that result supersedes this one.
+        if pending_load.result.is_some() {
+            return;
+        }
+        let mut image = match decode {
+            PartialDecode::Unsupported => {
+                pending_load.partial_decode = PartialDecodeState::Unsupported;
+                return;
+            },
+            PartialDecode::NeedMoreData => {
+                pending_load.partial_decode =
+                    PartialDecodeState::WaitingUntil(Instant::now() + PARTIAL_DECODE_INTERVAL);
+                return;
+            },
+            PartialDecode::Decoded(image) => image,
+        };
+        pending_load.partial_decode =
+            PartialDecodeState::WaitingUntil(Instant::now() + PARTIAL_DECODE_INTERVAL);
+
+        let (descriptor, data, _) = image.webrender_image_descriptor_and_data_for_frame(0);
+        let data = SerializableImageData::Raw(data);
+        match pending_load
+            .partial_image
+            .as_ref()
+            .and_then(|image| image.id)
+        {
+            Some(image_key) => {
+                self.paint_api
+                    .update_image(image_key, descriptor, data, None);
+                image.id = Some(image_key);
+            },
+            None => {
+                // Waiting for a batch of keys would only delay a later, more complete decode,
+                // so skip showing this one if no key is at hand.
+                let KeyCacheState::Ready(ref mut keys) = self.key_cache.cache else {
+                    return;
+                };
+                let Some(image_key) = keys.pop() else {
+                    self.key_cache.cache = KeyCacheState::PendingBatch;
+                    self.paint_api
+                        .generate_image_key_async(self.webview_id, self.pipeline_id);
+                    return;
+                };
+                self.paint_api.add_image(image_key, descriptor, data, false);
+                image.id = Some(image_key);
+            },
+        }
+
+        let image = Arc::new(image);
+        pending_load.partial_image = Some(image.clone());
+        for listener in &pending_load.listeners {
+            listener.respond(ImageResponse::PartiallyDecoded(Image::Raster(
+                image.clone(),
+            )));
+        }
     }
 }
 
@@ -927,6 +1048,12 @@ impl ImageCache for ImageCacheImpl {
             Some(Ok((img, _))) => Some(img),
             _ => None,
         }
+    }
+
+    fn get_partially_decoded_image(&self, id: PendingImageId) -> Option<Image> {
+        let store = self.store.lock();
+        let image = store.pending_loads.loads.get(&id)?.partial_image.clone()?;
+        Some(Image::Raster(image))
     }
 
     fn get_cached_image_status(
@@ -1260,6 +1387,8 @@ impl ImageCache for ImageCacheImpl {
                         .as_ref()
                         .and_then(|metadata| metadata.content_type.clone())
                         .map(|content_type| content_type.into_inner().into());
+                    pending_load.partial_decode =
+                        PartialDecodeState::WaitingUntil(Instant::now() + PARTIAL_DECODE_INTERVAL);
                 } else {
                     debug!("Pending load for id {:?} already evicted from cache", id);
                 }
@@ -1283,6 +1412,19 @@ impl ImageCache for ImageCacheImpl {
                             }
                             pending_load.metadata = Some(img_metadata);
                         }
+                    }
+
+                    if let PartialDecodeState::WaitingUntil(deadline) = pending_load.partial_decode &&
+                        Instant::now() >= deadline
+                    {
+                        pending_load.partial_decode = PartialDecodeState::Decoding;
+                        let bytes = pending_load.bytes.as_slice().to_vec();
+                        let cors_status = pending_load.cors_status;
+                        let local_store = self.store.clone();
+                        self.thread_pool.spawn(move || {
+                            let decode = decode_partial_image(&bytes, cors_status);
+                            local_store.lock().handle_partial_decode(id, decode);
+                        });
                     }
                 } else {
                     debug!("Pending load for id {:?} already evicted from cache", id);
@@ -1387,6 +1529,11 @@ impl ImageCacheStore {
                     .and_then(|icon| icon.id)
                     .map(ImageUpdate::DeleteImage),
             )
+            .chain(self.pending_loads.loads.values_mut().filter_map(|load| {
+                // Loads that are still running must not show or reuse the deleted key.
+                load.partial_decode = PartialDecodeState::Unsupported;
+                load.partial_image.take()?.id.map(ImageUpdate::DeleteImage)
+            }))
             .collect();
         if !deletions.is_empty() {
             self.paint_api
@@ -1414,6 +1561,11 @@ impl ImageCacheImpl {
         if let Some(load) = store.pending_loads.get_by_key_mut(&id) {
             if let Some(ref metadata) = load.metadata {
                 listener.respond(ImageResponse::MetadataLoaded(*metadata));
+            }
+            if let Some(ref partial_image) = load.partial_image {
+                listener.respond(ImageResponse::PartiallyDecoded(Image::Raster(
+                    partial_image.clone(),
+                )));
             }
             load.add_listener(listener);
             return;

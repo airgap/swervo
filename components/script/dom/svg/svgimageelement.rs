@@ -204,7 +204,7 @@ impl SVGImageElement {
                 self.invalidate_enclosing_svg_serializations();
                 self.queue_simple_event("load");
             },
-            ImageResponse::MetadataLoaded(..) => {},
+            ImageResponse::MetadataLoaded(..) | ImageResponse::PartiallyDecoded(_) => {},
             ImageResponse::FailedToLoadOrDecode => {
                 *self.image.borrow_mut() = None;
                 self.queue_simple_event("error");
