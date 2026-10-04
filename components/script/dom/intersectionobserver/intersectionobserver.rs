@@ -717,7 +717,7 @@ impl IntersectionObserver {
             if time - registration.last_update_time.get() <
                 Duration::from_millis(self.delay.get().max(0) as u64)
             {
-                return;
+                continue;
             }
 
             // Step 3
