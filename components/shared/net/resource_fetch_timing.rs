@@ -98,15 +98,6 @@ impl ResourceFetchTiming {
     // TODO currently this is being set with precise time ns when it should be time since
     // time origin (as described in Performance::now)
     pub fn set_attribute(&mut self, attribute: ResourceAttribute) {
-        let should_attribute_always_be_updated = matches!(
-            attribute,
-            ResourceAttribute::FetchStart |
-                ResourceAttribute::ResponseEnd |
-                ResourceAttribute::StartTime(_)
-        );
-        if !self.timing_check_passed && !should_attribute_always_be_updated {
-            return;
-        }
         let now = Some(CrossProcessInstant::now());
         match attribute {
             ResourceAttribute::DomainLookupStart => self.domain_lookup_start = now,
@@ -147,15 +138,25 @@ impl ResourceFetchTiming {
         }
     }
 
+    /// <https://fetch.spec.whatwg.org/#timing-allow-failed>
+    ///
+    /// The full timing stays recorded: a navigation's own document reads it unchecked, and only
+    /// the resource timing entry reported to the initiator is reduced, see [`Self::opaque`].
     pub fn mark_timing_check_failed(&mut self) {
         self.timing_check_passed = false;
-        self.domain_lookup_start = None;
-        self.redirect_count = 0;
-        self.request_start = None;
-        self.response_start = None;
-        self.redirect_start = None;
-        self.connect_start = None;
-        self.connect_end = None;
+    }
+
+    /// <https://fetch.spec.whatwg.org/#create-an-opaque-timing-info>
+    pub fn opaque(&self) -> ResourceFetchTiming {
+        ResourceFetchTiming {
+            timing_type: self.timing_type,
+            timing_check_passed: false,
+            fetch_start: self.fetch_start,
+            start_time: self.start_time,
+            response_end: self.response_end,
+            preloaded: self.preloaded,
+            ..ResourceFetchTiming::new(self.timing_type)
+        }
     }
 }
 

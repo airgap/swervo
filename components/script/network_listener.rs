@@ -85,8 +85,13 @@ pub(crate) fn submit_timing_data(
     initiator_type: InitiatorType,
     resource_timing: &ResourceFetchTiming,
 ) {
-    let performance_entry =
-        PerformanceResourceTiming::new(cx, global, url, initiator_type, resource_timing);
+    // A fetch that failed the TAO check reports only its start and end to the initiator:
+    // <https://fetch.spec.whatwg.org/#create-an-opaque-timing-info>
+    let performance_entry = if resource_timing.timing_check_passed {
+        PerformanceResourceTiming::new(cx, global, url, initiator_type, resource_timing)
+    } else {
+        PerformanceResourceTiming::new(cx, global, url, initiator_type, &resource_timing.opaque())
+    };
     global
         .performance()
         .queue_entry(performance_entry.upcast::<PerformanceEntry>());

@@ -4100,11 +4100,13 @@ impl ScriptThread {
             return;
         };
 
-        // Update the `url_list` of the incomplete load to track all redirects. This will be reflected
-        // in the new `RequestBuilder` as well.
-        incomplete_load.url_list.push(metadata.final_url.clone());
-
         let mut request_builder = incomplete_load.request_builder();
+        // `http_redirect_fetch` appends the location URL to the new request's URL list. Track it in
+        // the `url_list` of the incomplete load too, so that a later redirect's request carries every
+        // URL fetched so far, once, and the document's redirect count matches the redirects taken.
+        if let Some(Ok(location_url)) = &metadata.location_url {
+            incomplete_load.url_list.push(location_url.clone());
+        }
         request_builder.referrer = metadata
             .referrer
             .clone()

@@ -1110,11 +1110,23 @@ pub(crate) async fn http_fetch(
 
     // set back to default
     response.return_internal = true;
+    // <https://w3c.github.io/navigation-timing/#dom-performancenavigationtiming-redirectcount>
+    // A document does not learn that it was reached through a redirect from another origin.
+    let request = &fetch_params.request;
+    let destination_origin = request.current_url().origin();
+    let redirect_count = if request.is_navigation_request() &&
+        request
+            .url_list
+            .iter()
+            .any(|url| url.origin() != destination_origin)
+    {
+        0
+    } else {
+        request.redirect_count as u16
+    };
     context
         .timing
-        .set_attribute(ResourceAttribute::RedirectCount(
-            fetch_params.request.redirect_count as u16,
-        ));
+        .set_attribute(ResourceAttribute::RedirectCount(redirect_count));
 
     response.resource_timing = context.timing.clone();
 
