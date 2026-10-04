@@ -1045,9 +1045,12 @@ impl ImageCache for ImageCacheImpl {
                     .min(MAX_SVG_PIXMAP_DIMENSION);
                 tiny_skia::IntSize::from_wh(width, height).unwrap_or(natural_size)
             };
+            // Scale from the unrounded size: a document whose size is a fraction of a pixel
+            // (vercel.com's logo has a 0.3047 viewBox) rounds up to 1px and would render tiny.
+            let svg_size = vector_image.svg_tree.size();
             let transform = tiny_skia::Transform::from_scale(
-                tinyskia_requested_size.width() as f32 / natural_size.width() as f32,
-                tinyskia_requested_size.height() as f32 / natural_size.height() as f32,
+                tinyskia_requested_size.width() as f32 / svg_size.width(),
+                tinyskia_requested_size.height() as f32 / svg_size.height(),
             );
             let mut pixmap = tiny_skia::Pixmap::new(
                 tinyskia_requested_size.width(),
