@@ -64,6 +64,10 @@ enum CellContentAlignment {
     Baseline,
 }
 
+
+/// Blink's `kTableMaxInlineSize`.
+const TABLE_MAX_INLINE_SIZE: i32 = 1_000_000;
+
 /// A result of a final or speculative layout of a single cell in
 /// the table. Note that this is only done for slots that are not
 /// covered by spans or empty.
@@ -2784,7 +2788,22 @@ impl ComputeInlineContentSizes for Table {
             );
         layout.compute_measures(layout_context, writing_mode);
 
-        let grid_content_sizes = layout.compute_grid_min_max();
+        let mut grid_content_sizes = layout.compute_grid_min_max();
+
+        // A fixed-layout table ignores cell content, so its max-content would be its column
+        // widths alone. Blink gives one with a percentage inline size a huge max-content
+        // instead, so a shrink-to-fit container lets it reach its percentage rather than
+        // collapsing it (booking.com's date picker).
+        if layout.is_in_fixed_mode &&
+            matches!(
+                &self.style.box_size(writing_mode).inline,
+                Size::Numeric(inline_size) if inline_size.has_percentage()
+            )
+        {
+            grid_content_sizes.max_content = grid_content_sizes
+                .max_content
+                .max(Au::from_px(TABLE_MAX_INLINE_SIZE));
+        }
 
         // Padding and border should apply to the table grid, but they will be taken into
         // account when computing the inline content sizes of the table wrapper (our parent), so
