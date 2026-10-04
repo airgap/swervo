@@ -4040,8 +4040,12 @@ impl Window {
     /// otherwise make sure a rendering update follows to do it.
     fn serialize_pending_svgs(&self, cx: &mut JSContext, updates_the_rendering: bool) {
         if !updates_the_rendering {
-            for svg in self.pending_svg_serialization.borrow().iter() {
-                svg.upcast::<Node>().dirty(NodeDamage::Other);
+            // Ask for a rendering update without dirtying the `<svg>`s: dirty nodes make every
+            // later geometry query restyle and lay out the whole page again, which turned pages
+            // that read layout in loops (linear.app) into seconds of back-to-back reflows.
+            if !self.pending_svg_serialization.borrow().is_empty() {
+                self.Document()
+                    .add_rendering_update_reason(RenderingUpdateReason::PendingSvgSerialization);
             }
             return;
         }

@@ -377,6 +377,9 @@ bitflags! {
         /// A scrolling box scrolled during the last rendering update. Another rendering update
         /// is needed to notice that it stopped, at which point `scrollend` fires.
         const ScrollInProgress = 1 << 4;
+        /// Layout queued inline `<svg>`s for serialization during a query reflow, which can't
+        /// serialize them, so a rendering update has to follow to do it.
+        const PendingSvgSerialization = 1 << 5;
     }
 }
 
