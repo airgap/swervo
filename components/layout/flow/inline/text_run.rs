@@ -256,11 +256,13 @@ impl TextRunSegment {
         let mut character_range_start = self.character_range.start;
         for (run_index, run) in self.runs.iter().enumerate() {
             let new_character_range_end = character_range_start + run.character_count();
-            let offsets = (ifc.ifc.shared_selection.is_some() || ifc.ifc.editable_text.is_some())
+            let offsets = (ifc.ifc.shared_selection.is_some() || ifc.ifc.text_origins.is_some())
                 .then(|| TextRunOffsets {
                     shared_selection: ifc.ifc.shared_selection.clone(),
-                    editable_text: ifc.ifc.editable_text.clone(),
+                    text_origins: ifc.ifc.text_origins.clone(),
                     character_range: character_range_start..new_character_range_end,
+                    line_block_start: Au::zero(),
+                    line_block_size: Au::zero(),
                 });
 
             // Break before each unbreakable run in this TextRun, except the first unless the
@@ -280,8 +282,10 @@ impl TextRunSegment {
                     let cluster_character_end = cluster_character_start + cluster.character_count();
                     let offsets = offsets.as_ref().map(|offsets| TextRunOffsets {
                         shared_selection: offsets.shared_selection.clone(),
-                        editable_text: offsets.editable_text.clone(),
+                        text_origins: offsets.text_origins.clone(),
                         character_range: cluster_character_start..cluster_character_end,
+                        line_block_start: Au::zero(),
+                        line_block_size: Au::zero(),
                     });
                     ifc.process_overflow_wrap_opportunity(cluster.total_advance());
                     ifc.push_glyph_store_to_unbreakable_segment(

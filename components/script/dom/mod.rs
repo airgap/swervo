@@ -227,6 +227,7 @@ mod canvas;
 pub(crate) use self::canvas::*;
 pub(crate) mod cache;
 pub(crate) mod cachestorage;
+pub(crate) mod caretposition;
 pub(crate) mod characterdata;
 pub(crate) use self::characterdata::*;
 pub(crate) mod clipboard;

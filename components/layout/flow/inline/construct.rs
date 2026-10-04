@@ -22,8 +22,8 @@ use web_atoms::local_name;
 
 use super::text_run::{TextRun, TextRunNodeSegment};
 use super::{
-    EditableText, EditableTextSource, InlineBox, InlineBoxIdentifier, InlineBoxes,
-    InlineFormattingContext, InlineItem, SharedInlineStyles,
+    InlineBox, InlineBoxIdentifier, InlineBoxes, InlineFormattingContext, InlineItem,
+    SharedInlineStyles, TextOrigin, TextOriginKind, TextOrigins,
 };
 use crate::cell::ArcRefCell;
 use crate::context::LayoutContext;
@@ -60,13 +60,13 @@ pub(crate) struct InlineFormattingContextBuilder {
     /// originating node in the DOM, this will not be `None`.
     pub shared_selection: Option<SharedSelection>,
 
-    /// The DOM origin of the editable (`contenteditable`) text pushed so far, which lets
-    /// editing map between character offsets in the laid out text and DOM positions.
-    pub editable_text: EditableText,
+    /// The DOM origin of the text pushed so far, which maps between character offsets in the
+    /// laid out text and DOM positions for selections and carets.
+    pub text_origins: TextOrigins,
 
     /// The text node whose text is being pushed in pieces (around a `::first-letter`) and the
     /// UTF-16 length of the pieces already pushed.
-    editable_text_node_progress: Option<(OpaqueNode, u32)>,
+    text_node_progress: Option<(OpaqueNode, u32)>,
 
     /// Whether the last processed node ended with whitespace. This is used to
     /// implement rule 4 of <https://www.w3.org/TR/css-text-3/#collapse>:
@@ -353,11 +353,11 @@ impl InlineFormattingContextBuilder {
         // The first letter is pushed for its pseudo-element, but the text after it still
         // continues at a later DOM offset of the text node.
         let node = info.node.opaque();
-        let pushed_length = match self.editable_text_node_progress {
+        let pushed_length = match self.text_node_progress {
             Some((progress_node, length)) if progress_node == node => length,
             _ => 0,
         };
-        self.editable_text_node_progress = Some((
+        self.text_node_progress = Some((
             node,
             pushed_length + first_letter_text.encode_utf16().count() as u32,
         ));
@@ -387,8 +387,7 @@ impl InlineFormattingContextBuilder {
         text_offset: usize,
         info: &NodeAndStyleInfo<'dom>,
     ) {
-        let editable_source =
-            self.editable_source_for_text(&text, info, info.style.clone_white_space_collapse());
+        let origin = self.origin_of_text(&text, info, info.style.clone_white_space_collapse());
         let trim_beginning_white_space = self.last_inline_box_ended_with_collapsible_white_space;
         let starts_on_word_boundary = self.on_word_boundary;
         let char_iterator = rendered_characters(
@@ -448,16 +447,16 @@ impl InlineFormattingContextBuilder {
 
         self.text_segments.push(new_text);
 
-        if let Some((node, mut dom_offsets, is_line_break)) = editable_source {
+        if let Some((node, mut dom_offsets, kind)) = origin {
             // Text transforms can change the number of characters (ß becomes SS), which loses
             // the exact correspondence; keep one offset per laid out character regardless.
             let end = dom_offsets.pop().expect("Always has an end offset");
             let last = dom_offsets.last().copied().unwrap_or(end);
             dom_offsets.resize(character_count, last);
             dom_offsets.push(end);
-            self.editable_text.sources.push(EditableTextSource {
+            self.text_origins.sources.push(TextOrigin {
                 node,
-                is_line_break,
+                kind,
                 character_start: new_character_range.start,
                 dom_offsets,
             });
@@ -519,39 +518,38 @@ impl InlineFormattingContextBuilder {
         }
     }
 
-    /// For text of an editable DOM text node, or the line feed generated for an editable `<br>`,
-    /// returns the node, the UTF-16 offset in it of each character left after white space
-    /// collapsing followed by the offset just past the last one, and whether it is a `<br>`.
-    fn editable_source_for_text(
+    /// For text of a DOM text node, or the line feed generated for a `<br>`, returns the node,
+    /// the UTF-16 offset in it of each character left after white space collapsing followed by
+    /// the offset just past the last one, and which kind of node it is.
+    fn origin_of_text(
         &mut self,
         text: &str,
         info: &NodeAndStyleInfo,
         white_space_collapse: WhiteSpaceCollapse,
-    ) -> Option<(OpaqueNode, Vec<u32>, bool)> {
+    ) -> Option<(OpaqueNode, Vec<u32>, TextOriginKind)> {
         let node = info.node.opaque();
         if !info.node.is_text_node() {
             let is_line_break = info
                 .node
                 .as_element()
                 .is_some_and(|element| element.local_name() == &local_name!("br"));
-            if !is_line_break || !info.node.is_editable() {
+            if !is_line_break {
                 return None;
             }
+            self.note_editability(info);
             // Before the `<br>` is offset 0 in it, after it is offset 1.
             let mut dom_offsets = vec![0; text.chars().count()];
             dom_offsets.push(1);
-            return Some((node, dom_offsets, true));
+            return Some((node, dom_offsets, TextOriginKind::LineBreak));
         }
 
-        let piece_start = match self.editable_text_node_progress {
+        let piece_start = match self.text_node_progress {
             Some((progress_node, length)) if progress_node == node => length,
             _ => 0,
         };
         let piece_length = text.encode_utf16().count() as u32;
-        self.editable_text_node_progress = Some((node, piece_start + piece_length));
-        if !info.node.is_editable() {
-            return None;
-        }
+        self.text_node_progress = Some((node, piece_start + piece_length));
+        self.note_editability(info);
 
         let collapsed: Vec<char> = WhitespaceCollapse::new(
             text.chars(),
@@ -579,7 +577,27 @@ impl InlineFormattingContextBuilder {
             return None;
         }
         dom_offsets.push(end);
-        Some((node, dom_offsets, false))
+        Some((node, dom_offsets, TextOriginKind::Text))
+    }
+
+    fn note_editability(&mut self, info: &NodeAndStyleInfo) {
+        if !self.text_origins.is_editable && info.node.is_editable() {
+            self.text_origins.is_editable = true;
+        }
+    }
+
+    /// Makes this empty inline formatting context hold a line for the caret of the editing host
+    /// it belongs to, as other browsers lay out an empty editing host with one line.
+    pub(crate) fn hold_line_for_empty_editing_host(&mut self, info: &NodeAndStyleInfo) {
+        debug_assert!(self.is_empty);
+        self.is_empty = false;
+        self.text_origins.is_editable = true;
+        self.text_origins.sources.push(TextOrigin {
+            node: info.node.opaque(),
+            kind: TextOriginKind::EmptyEditingHost,
+            character_start: self.current_character_offset,
+            dom_offsets: vec![0],
+        });
     }
 
     pub(crate) fn enter_display_contents(&mut self, shared_inline_styles: SharedInlineStyles) {

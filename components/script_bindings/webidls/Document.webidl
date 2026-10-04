@@ -211,13 +211,18 @@ Document includes DocumentOrShadowRoot;
 
 // https://drafts.csswg.org/cssom-view/#extensions-to-the-document-interface
 partial interface Document {
-  // CaretPosition? caretPositionFromPoint(double x, double y, optional CaretPositionFromPointOptions options = {});
+  CaretPosition? caretPositionFromPoint(double x, double y, optional CaretPositionFromPointOptions options = {});
   readonly attribute Element? scrollingElement;
 };
 
-// dictionary CaretPositionFromPointOptions {
-//   sequence<ShadowRoot> shadowRoots = [];
-// };
+dictionary CaretPositionFromPointOptions {
+  sequence<ShadowRoot> shadowRoots = [];
+};
+
+// Non-standard, from WebKit; editors such as Monaco hit test text with it.
+partial interface Document {
+  Range? caretRangeFromPoint(double x, double y);
+};
 
 // https://w3c.github.io/selection-api/#dom-document
 partial interface Document {

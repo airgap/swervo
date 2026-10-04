@@ -2955,7 +2955,7 @@ impl Window {
             animations: document.animations().sets.clone(),
             animating_images: document.image_animation_manager().animating_images(),
             highlighted_dom_node: document.highlighted_dom_node().map(|node| node.to_opaque()),
-            editing_selection: document.editing_selection_for_layout(),
+            document_selection: document.selection_for_layout(),
             document_context,
             rooted_nodes_for_accessibility_integrity_check,
         };
@@ -3457,27 +3457,40 @@ impl Window {
         // the space key. There's no nice way to catch this so let's use this for
         // now.
         let point_in_viewport = mouse_event.point_in_viewport()?.map(Au::from_f32_px);
+        self.text_index_query_on_node(node, point_in_viewport)
+    }
 
+    /// The index of the grapheme of the text control `node` closest to the given point.
+    pub(crate) fn text_index_query_on_node(
+        &self,
+        node: &Node,
+        point_in_viewport: Point2D<Au, CSSPixel>,
+    ) -> Option<usize> {
         self.layout_reflow(QueryMsg::TextIndexQuery);
         self.layout
             .borrow()
             .query_text_index(node.to_trusted_node_address(), point_in_viewport)
     }
 
-    /// The caret positions in the editable text of `editing_host`, by line. Positions after a
-    /// line break are left out: they are the start of the next line.
-    pub(crate) fn caret_stops_query(&self, editing_host: &Node) -> Vec<LaidOutCaretLine> {
+    /// The caret positions in the text of `node`, by line. Positions after a line break are
+    /// left out: they are the start of the next line.
+    pub(crate) fn caret_stops_query(&self, node: &Node) -> Vec<LaidOutCaretLine> {
         self.layout_reflow(QueryMsg::CaretStopsQuery);
         let lines = self
             .layout
             .borrow()
-            .query_caret_stops(editing_host.to_trusted_node_address());
+            .query_caret_stops(node.to_trusted_node_address());
         lines
             .into_iter()
             .filter_map(|line| {
                 let mut stops: Vec<LaidOutCaretStop> = Vec::new();
                 for stop in line.stops {
                     let node = unsafe { from_untrusted_node_address(stop.node) };
+                    // The text of text controls is in their user agent shadow trees, which
+                    // positions in the document never enter.
+                    if node.is_in_ua_widget() {
+                        continue;
+                    }
                     let (node, offset) = if node.is::<HTMLBRElement>() {
                         if stop.offset == 1 {
                             continue;

@@ -33,6 +33,8 @@ use script_bindings::codegen::GenericBindings::EventBinding::EventMethods;
 use script_bindings::codegen::GenericBindings::HTMLElementBinding::HTMLElementMethods;
 use script_bindings::codegen::GenericBindings::HTMLLabelElementBinding::HTMLLabelElementMethods;
 use script_bindings::codegen::GenericBindings::KeyboardEventBinding::KeyboardEventMethods;
+use script_bindings::codegen::GenericBindings::NodeBinding::NodeMethods;
+use script_bindings::codegen::GenericBindings::SelectionBinding::SelectionMethods;
 use script_bindings::codegen::GenericBindings::ShadowRootBinding::ShadowRootMethods;
 use script_bindings::codegen::GenericBindings::TouchBinding::TouchMethods;
 use script_bindings::codegen::GenericBindings::WindowBinding::{ScrollBehavior, WindowMethods};
@@ -74,11 +76,12 @@ use crate::dom::keyboardevent::KeyboardEvent;
 use crate::dom::node::{self, Node, NodeTraits};
 use crate::dom::pointerevent::{PointerEvent, PointerId};
 use crate::dom::scrolling_box::{ScrollAxisState, ScrollRequirement, ScrollingBoxAxis};
-use crate::dom::selection::CaretMovement;
+use crate::dom::selection::{CaretMovement, PointerSelection};
 use crate::dom::types::{
     ClipboardEvent, CompositionEvent, DataTransfer, Element, Event, EventTarget, GlobalScope,
-    HTMLAnchorElement, HTMLElement, HTMLLabelElement, MouseEvent, Touch, TouchEvent, TouchList,
-    WheelEvent, Window,
+    HTMLAnchorElement, HTMLButtonElement, HTMLElement, HTMLInputElement,
+    HTMLLabelElement, HTMLSelectElement, HTMLTextAreaElement, MouseEvent, Touch, TouchEvent,
+    TouchList, WheelEvent, Window,
 };
 use crate::drag_data_store::{DragDataStore, Kind, Mode};
 use crate::realms::enter_auto_realm;
@@ -220,6 +223,9 @@ pub(crate) struct DocumentEventHandler {
     widget_mouse_capture_target: MutNullableDom<Element>,
     /// <https://html.spec.whatwg.org/multipage/#drag-and-drop-processing-model>
     drag_and_drop: DragAndDrop,
+    /// Whether the primary button was pressed to select and moving the mouse extends the
+    /// selection.
+    selecting_with_mouse: Cell<bool>,
 }
 
 impl DocumentEventHandler {
@@ -248,6 +254,7 @@ impl DocumentEventHandler {
             pointer_capture_target: Default::default(),
             widget_mouse_capture_target: Default::default(),
             drag_and_drop: DragAndDrop::new(),
+            selecting_with_mouse: Cell::new(false),
         }
     }
 
@@ -801,6 +808,23 @@ impl DocumentEventHandler {
         // Send mousemove event. Routed to the capture target when capture is active.
         mouse_event.upcast::<Event>().fire(cx, &pointer_target);
 
+        // Moving the mouse with the primary button pressed extends the selection to it.
+        if self.selecting_with_mouse.get() {
+            if input_event.pressed_mouse_buttons & 1 == 0 {
+                self.selecting_with_mouse.set(false);
+            } else if let Some(point) = mouse_event.point_in_viewport() &&
+                let Some(selection) = self.window.Document().GetSelection(cx)
+            {
+                selection.select_at_point(
+                    cx,
+                    &hit_test_result.node,
+                    point.map(Au::from_f32_px),
+                    PointerSelection::Character,
+                    true,
+                );
+            }
+        }
+
         self.update_current_hover_target_and_status(Some(new_target));
 
         if self
@@ -1114,17 +1138,14 @@ impl DocumentEventHandler {
                         .focus_handler()
                         .focus(cx, node.find_click_focusable_area());
 
-                    // Pressing the primary button in an editing host puts the caret where it was
-                    // pressed, or extends the selection there with Shift.
                     if event.button == MouseButton::Left &&
-                        let Some(editing_host) = hit_test_result.node.editing_host_of() &&
-                        let Some(point) = mouse_event.point_in_viewport() &&
-                        let Some(selection) = document.GetSelection(cx)
+                        let Some(point) = mouse_event.point_in_viewport()
                     {
-                        selection.move_to_point_in_editing_host(
+                        self.select_for_primary_button_press(
                             cx,
-                            &editing_host,
+                            &hit_test_result.node,
                             point.map(Au::from_f32_px),
+                            self.click_counting_info.borrow().count + 1,
                             input_event
                                 .active_keyboard_modifiers
                                 .contains(Modifiers::SHIFT),
@@ -1142,6 +1163,7 @@ impl DocumentEventHandler {
             MouseButtonAction::Up => {
                 if event.button == MouseButton::Left {
                     self.drag_and_drop.clear_drag_candidate();
+                    self.selecting_with_mouse.set(false);
                 }
 
                 // Step 6. Dispatch pointerup event.
@@ -1245,6 +1267,57 @@ impl DocumentEventHandler {
             .set(self.mouse_buttons_down.get().saturating_sub(1));
         self.last_mouse_button_down_point.set(None);
         self.unset_active_element();
+    }
+
+    /// Changes the selection for a press of the primary button like other browsers: text controls
+    /// keep their own selection, buttons and draggable elements are pressed or dragged rather than
+    /// selected from, and anywhere else the press selects, by characters, words or paragraphs
+    /// depending on the click count, and starts selecting with the mouse.
+    fn select_for_primary_button_press(
+        &self,
+        cx: &mut JSContext,
+        hit_node: &Node,
+        point: Point2D<Au, CSSPixel>,
+        click_count: usize,
+        shift: bool,
+    ) {
+        let Some(selection) = self.window.Document().GetSelection(cx) else {
+            return;
+        };
+        for ancestor in hit_node.inclusive_ancestors(ShadowIncluding::Yes) {
+            if ancestor.is::<HTMLInputElement>() || ancestor.is::<HTMLTextAreaElement>() {
+                // The selection of the document moves to the text control.
+                let parent = ancestor.GetParentNode().expect("Hit elements have a parent");
+                selection
+                    .Collapse(cx, Some(&parent), ancestor.index())
+                    .expect("The position of a child is a valid boundary point");
+                return;
+            }
+            // Draggable elements, such as links and images, are dragged instead.
+            let is_draggable = ancestor
+                .downcast::<HTMLElement>()
+                .is_some_and(|element| element.Draggable());
+            if is_draggable ||
+                ancestor.is::<HTMLButtonElement>() ||
+                ancestor.is::<HTMLSelectElement>()
+            {
+                return;
+            }
+        }
+
+        let granularity = match click_count {
+            1 => PointerSelection::Character,
+            2 => PointerSelection::Word,
+            _ => PointerSelection::Paragraph,
+        };
+        selection.select_at_point(
+            cx,
+            hit_node,
+            point,
+            granularity,
+            shift && granularity == PointerSelection::Character,
+        );
+        self.selecting_with_mouse.set(true);
     }
 
     /// <https://w3c.github.io/pointerevents/#handle-native-mouse-click>

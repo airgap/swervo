@@ -176,6 +176,10 @@ pub trait LayoutNode<'dom>: Copy + Debug + NodeInfo + Send + Sync {
     /// <https://html.spec.whatwg.org/multipage/#editable>.
     fn is_editable(&self) -> bool;
 
+    /// Whether this node is an editing host, the root of `contenteditable` content:
+    /// <https://html.spec.whatwg.org/multipage/#editing-host>.
+    fn is_editing_host(&self) -> bool;
+
     /// If this is an image element, returns its URL. If this is not an image element, fails.
     fn image_url(&self) -> Option<ServoUrl>;
 

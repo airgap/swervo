@@ -1778,9 +1778,8 @@ pub fn find_character_offset_in_fragment_descendants(
     })
 }
 
-/// The caret positions of the editable text in the fragments of `node` (an editing host),
-/// grouped into lines from top to bottom, each in left to right order. Positions are in the
-/// viewport.
+/// The caret positions of the text in the fragments of `node`, grouped into lines from top to
+/// bottom, each in left to right order. Positions are in the viewport.
 pub fn process_caret_stops_query(
     node: &ServoLayoutNode,
     stacking_context_tree: &StackingContextTree,
@@ -1794,7 +1793,7 @@ pub fn process_caret_stops_query(
             if text_fragment
                 .offsets
                 .as_ref()
-                .is_some_and(|offsets| offsets.editable_text.is_some())
+                .is_some_and(|offsets| offsets.text_origins.is_some())
             {
                 let rect = text_fragment.base.rect().translate(origin);
                 text_fragments.push((text_fragment.clone(), rect));
@@ -1842,14 +1841,14 @@ pub fn process_caret_stops_query(
             .offsets
             .as_ref()
             .expect("Only collected fragments with offsets");
-        let editable_text = offsets
-            .editable_text
+        let text_origins = offsets
+            .text_origins
             .as_ref()
             .expect("Only collected fragments with editable text");
 
         let mut stops = Vec::new();
         let mut push_stop = |character: usize, x: Au| {
-            if let Some((node, offset)) = editable_text.dom_position(character) {
+            if let Some((node, offset)) = text_origins.dom_position(character) {
                 stops.push(CaretStop {
                     node: node.into(),
                     offset,
@@ -1874,8 +1873,10 @@ pub fn process_caret_stops_query(
         // Fragments of one line box can have different heights, but each contains the middle
         // of the others.
         let middle = rect.min_y() + rect.height().scale_by(0.5);
+        // Fragments are sorted by their top, so their line is most likely one of the last.
         match lines
             .iter_mut()
+            .rev()
             .find(|line| line.top <= middle && middle < line.bottom)
         {
             Some(line) => {

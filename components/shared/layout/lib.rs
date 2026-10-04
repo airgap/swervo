@@ -161,21 +161,21 @@ pub struct ScriptSelection {
 
 pub type SharedSelection = Arc<AtomicRefCell<ScriptSelection>>;
 
-/// The selection inside a focused editing host (`contenteditable`), in DOM terms. Unlike a
-/// [`ScriptSelection`] it can span many text nodes and inline formatting contexts.
+/// The selection of a document as layout paints it, in DOM terms. Unlike a [`ScriptSelection`]
+/// it can span many text nodes and inline formatting contexts.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct EditingSelection {
-    /// The insertion point of a collapsed selection: a text node or a `<br>` and a UTF-16
-    /// offset in it (0 or 1 for a `<br>`).
+pub struct DocumentSelection {
+    /// The insertion point of a selection collapsed in the focused editing host: a text node, a
+    /// `<br>` or an empty editing host and a UTF-16 offset in it (0 or 1 for a `<br>`).
     pub caret: Option<(OpaqueNode, u32)>,
     /// The selected UTF-16 range of every text node in a non-collapsed selection.
     pub selected_text: Vec<(OpaqueNode, Range<u32>)>,
 }
 
-/// A position where a caret can be placed in editable text, as laid out.
+/// A position where a caret can be placed in text, as laid out.
 #[derive(Clone, Debug)]
 pub struct CaretStop {
-    /// The text node, or the `<br>`, that this position is in.
+    /// The text node, the `<br>` or the empty editing host that this position is in.
     pub node: UntrustedNodeAddress,
     /// A UTF-16 offset in the text node, or 0 (before) / 1 (after) for a `<br>`.
     pub offset: u32,
@@ -502,7 +502,7 @@ pub trait Layout {
         node: TrustedNodeAddress,
         point: Point2D<Au, CSSPixel>,
     ) -> Option<usize>;
-    /// The caret positions of the editable text inside the given editing host, by line.
+    /// The caret positions of the text inside the given node, by line.
     fn query_caret_stops(&self, node: TrustedNodeAddress) -> Vec<CaretLine>;
     fn query_elements_from_point(&self, point: LayoutPoint) -> Vec<ElementsFromPointResult>;
     fn query_effective_overflow(&self, node: TrustedNodeAddress) -> Option<AxesOverflow>;
@@ -818,8 +818,8 @@ pub struct ReflowRequest {
     pub animating_images: Arc<RwLock<AnimatingImages>>,
     /// The node highlighted by the devtools, if any
     pub highlighted_dom_node: Option<OpaqueNode>,
-    /// The selection of the focused editing host, which layout paints.
-    pub editing_selection: Option<EditingSelection>,
+    /// The selection of the document, which layout paints.
+    pub document_selection: Option<DocumentSelection>,
     /// The current font context.
     pub document_context: WebFontDocumentContext,
     /// Nodes which were removed from the DOM tree since the last reflow, which were rooted in

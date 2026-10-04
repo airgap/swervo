@@ -13,6 +13,7 @@ use std::str::FromStr;
 use std::sync::{Arc as StdArc, LazyLock, Mutex};
 use std::time::Duration;
 
+use app_units::Au;
 use bitflags::bitflags;
 use chrono::Local;
 use content_security_policy::sandboxing_directive::SandboxingFlagSet;
@@ -25,6 +26,7 @@ use embedder_traits::{
     AllowOrDeny, AnimationState, CustomHandlersAutomationMode, EmbedderMsg, Image, LoadStatus,
 };
 use encoding_rs::{Encoding, UTF_8};
+use euclid::{Point2D, Rect, Size2D};
 use html5ever::{LocalName, Namespace, QualName, local_name, ns};
 use hyper_serde::Serde;
 use indexmap::IndexSet;
@@ -32,7 +34,7 @@ use js::context::{JSContext, NoGC};
 use js::realm::CurrentRealm;
 use js::rust::{HandleObject, HandleValue, MutableHandleValue};
 use layout_api::{
-    EditingSelection, PendingRestyle, ReflowGoal, ReflowPhasesRun, ReflowStatistics,
+    DocumentSelection, PendingRestyle, ReflowGoal, ReflowPhasesRun, ReflowStatistics,
     RestyleReason, ScrollContainerQueryFlags, TrustedNodeAddress,
 };
 use metrics::{InteractiveFlag, InteractiveWindow, ProgressiveWebMetrics};
@@ -65,6 +67,7 @@ use servo_config::pref;
 use servo_constellation_traits::{NavigationHistoryBehavior, ScriptToConstellationMessage};
 use servo_media::{ClientContextId, ServoMedia};
 use servo_url::{ImmutableOrigin, MutableOrigin, ServoUrl};
+use style::Zero;
 use style::attr::AttrValue;
 use style::context::QuirksMode;
 use style::dom::OpaqueNode;
@@ -75,6 +78,7 @@ use style::str::{split_html_space_chars, str_join};
 use style::stylesheet_set::DocumentStylesheetSet;
 use style::stylesheets::{Origin, OriginSet, Stylesheet, UrlExtraData};
 use style::stylist::Stylist;
+use style_traits::CSSPixel;
 use stylo_atoms::Atom;
 use time::Duration as TimeDuration;
 use url::{Host, Position};
@@ -82,14 +86,14 @@ use webrender_api::units::LayoutVector2D;
 
 use crate::animations::Animations;
 use crate::document_loader::{DocumentLoader, LoadType};
-use crate::dom::abstractrange::bp_position;
 use crate::dom::animationtimeline::AnimationTimeline;
 use crate::dom::attr::Attr;
 use crate::dom::beforeunloadevent::BeforeUnloadEvent;
 use crate::dom::bindings::callback::ExceptionHandling;
 use crate::dom::bindings::codegen::Bindings::BeforeUnloadEventBinding::BeforeUnloadEvent_Binding::BeforeUnloadEventMethods;
 use crate::dom::bindings::codegen::Bindings::DocumentBinding::{
-    DocumentMethods, DocumentReadyState, DocumentVisibilityState, NamedPropertyValue,
+    CaretPositionFromPointOptions, DocumentMethods, DocumentReadyState, DocumentVisibilityState,
+    NamedPropertyValue,
 };
 use crate::dom::bindings::codegen::Bindings::ElementBinding::ScrollLogicalPosition;
 use crate::dom::bindings::codegen::Bindings::EventBinding::Event_Binding::EventMethods;
@@ -124,7 +128,9 @@ use crate::dom::bindings::str::{DOMString, USVString};
 use crate::dom::bindings::trace::{HashMapTracedValues, NoTrace};
 use crate::dom::bindings::weakref::DOMTracker;
 use crate::dom::bindings::xmlname::matches_name_production;
+use crate::dom::caretposition::CaretPosition;
 use crate::dom::cdatasection::CDATASection;
+use crate::dom::characterdata::CharacterData;
 use crate::dom::comment::Comment;
 use crate::dom::compositionevent::CompositionEvent;
 use crate::dom::css::cssstylesheet::CSSStyleSheet;
@@ -172,7 +178,9 @@ use crate::dom::html::htmlhtmlelement::HTMLHtmlElement;
 use crate::dom::html::htmliframeelement::HTMLIFrameElement;
 use crate::dom::html::htmlimageelement::HTMLImageElement;
 use crate::dom::html::htmlmediaelement::HTMLMediaElement;
+use crate::dom::html::htmlinputelement::HTMLInputElement;
 use crate::dom::html::htmlscriptelement::{HTMLScriptElement, ScriptResult};
+use crate::dom::html::htmltextareaelement::HTMLTextAreaElement;
 use crate::dom::html::htmltitleelement::HTMLTitleElement;
 use crate::dom::htmldetailselement::DetailsNameGroups;
 use crate::dom::intersectionobserver::IntersectionObserver;
@@ -196,7 +204,7 @@ use crate::dom::range::Range;
 use crate::dom::resizeobserver::{ResizeObservationDepth, ResizeObserver};
 use crate::dom::sanitizer::Sanitizer;
 use crate::dom::scrolling_box::{ScrollAxisState, ScrollingBox};
-use crate::dom::selection::Selection;
+use crate::dom::selection::{Selection, caret_stops_around, closest_caret_stop};
 use crate::dom::servoparser::ServoParser;
 use crate::dom::shadowroot::ShadowRoot;
 use crate::dom::storageevent::StorageEvent;
@@ -5351,20 +5359,60 @@ impl Document {
         self.highlighted_dom_node.get()
     }
 
-    /// The selection that layout paints when it is inside the focused editing host: the caret
-    /// of a collapsed selection, or the selected text.
-    pub(crate) fn editing_selection_for_layout(&self) -> Option<EditingSelection> {
-        let range = self.selection.get()?.active_range()?;
-        let focused_area = self.focus_handler().focused_area();
-        let editing_host = range.start_container().editing_host_of()?;
-        if *editing_host != *focused_area.element()?.upcast::<Node>() {
-            return None;
+    /// The steps of <https://drafts.csswg.org/cssom-view/#dom-document-caretpositionfrompoint>
+    /// that find the caret position at (`x`, `y`) in the viewport, with the caret in the
+    /// viewport when it is in laid out text.
+    fn caret_position_from_point(
+        &self,
+        x: Finite<f64>,
+        y: Finite<f64>,
+    ) -> Option<(DomRoot<Node>, u32, Option<Rect<Au, CSSPixel>>)> {
+        // Step 1. If there is no viewport associated with the document, return null.
+        // Step 2. If either argument is negative, x is greater than the viewport width
+        // excluding the size of a rendered scroll bar (if any), or y is greater than the
+        // viewport height excluding the size of a rendered scroll bar (if any) return null.
+        // Step 3. If at the coordinates x,y in the viewport no text insertion point indicator
+        // would have been inserted when applying the transfer and drop steps, return null.
+        let element = self.ElementFromPoint(x, y)?;
+        let node = element.upcast::<Node>();
+        let point = Point2D::new(Au::from_f64_px(*x), Au::from_f64_px(*y));
+
+        // Step 4. If at the coordinates x,y in the viewport a text input box is present, return
+        // a caret position with its properties set as follows: the offset node is the text
+        // input box and the offset is the offset into its text.
+        if element.is::<HTMLInputElement>() || element.is::<HTMLTextAreaElement>() {
+            let offset = self.window.text_index_query_on_node(node, point).unwrap_or(0);
+            return Some((DomRoot::from_ref(node), offset as u32, None));
         }
 
+        // Step 5. Otherwise, return a caret position where the caret range is collapsed at the
+        // insertion point of the text insertion point indicator, here the closest caret position
+        // in laid out text.
+        let lines = caret_stops_around(&self.window, node);
+        let Some((line, stop)) = closest_caret_stop(&lines, point) else {
+            return Some((DomRoot::from_ref(node), 0, None));
+        };
+        let client_rect = Rect::new(
+            Point2D::new(stop.x, line.top),
+            Size2D::new(Au::zero(), line.bottom - line.top),
+        );
+        Some((stop.node.clone(), stop.offset, Some(client_rect)))
+    }
+
+    /// The selection that layout paints: the caret of a selection collapsed in the focused
+    /// editing host, or the selected text.
+    pub(crate) fn selection_for_layout(&self) -> Option<DocumentSelection> {
+        let range = self.selection.get()?.active_range()?;
+
         if range.collapsed() {
+            let focused_area = self.focus_handler().focused_area();
+            let editing_host = range.start_container().editing_host_of()?;
+            if *editing_host != *focused_area.element()?.upcast::<Node>() {
+                return None;
+            }
             let (node, offset) =
                 caret_position_in_laid_out_text(&range.start_container(), range.start_offset())?;
-            return Some(EditingSelection {
+            return Some(DocumentSelection {
                 caret: Some((node.to_opaque(), offset)),
                 selected_text: Vec::new(),
             });
@@ -5372,21 +5420,42 @@ impl Document {
 
         let (start, start_offset) = (range.start_container(), range.start_offset());
         let (end, end_offset) = (range.end_container(), range.end_offset());
-        let selected_text = editing_host
-            .traverse_preorder(ShadowIncluding::No)
-            .filter(|node| node.is::<Text>())
-            .filter_map(|node| {
-                let selected_start = if node == start { start_offset } else { 0 };
-                let selected_end = if node == end { end_offset } else { node.len() };
-                let after_start = bp_position(&node, selected_end, &start, start_offset) ==
-                    Some(Ordering::Greater);
-                let before_end =
-                    bp_position(&node, selected_start, &end, end_offset) == Some(Ordering::Less);
-                (after_start && before_end && selected_start < selected_end)
-                    .then(|| (node.to_opaque(), selected_start..selected_end))
+        // The node at a boundary point in tree order: the character data node it is in, or the
+        // first node after it.
+        let document_node = self.upcast::<Node>();
+        let node_at = |container: &Node, offset: u32| {
+            if container.is::<CharacterData>() {
+                return Some(DomRoot::from_ref(container));
+            }
+            container.children().nth(offset as usize).or_else(|| {
+                container
+                    .following_nodes(document_node, ShadowIncluding::No)
+                    .next_skipping_children()
             })
-            .collect();
-        Some(EditingSelection {
+        };
+        let end_node = node_at(&end, end_offset);
+        let mut selected_text = Vec::new();
+        let mut node = node_at(&start, start_offset);
+        while let Some(current) = node {
+            let is_end = end_node.as_ref() == Some(&current);
+            if is_end && *current != *end {
+                break;
+            }
+            if current.is::<Text>() {
+                let selected_start = if current == start { start_offset } else { 0 };
+                let selected_end = if is_end { end_offset } else { current.len() };
+                if selected_start < selected_end {
+                    selected_text.push((current.to_opaque(), selected_start..selected_end));
+                }
+            }
+            if is_end {
+                break;
+            }
+            node = current
+                .following_nodes(document_node, ShadowIncluding::No)
+                .next();
+        }
+        Some(DocumentSelection {
             caret: None,
             selected_text,
         })
@@ -6836,6 +6905,42 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
         )
     }
 
+    /// <https://drafts.csswg.org/cssom-view/#dom-document-caretpositionfrompoint>
+    fn CaretPositionFromPoint(
+        &self,
+        cx: &mut JSContext,
+        x: Finite<f64>,
+        y: Finite<f64>,
+        _options: &CaretPositionFromPointOptions,
+    ) -> Option<DomRoot<CaretPosition>> {
+        // TODO: Positions in the shadow trees of `options.shadowRoots` are not returned.
+        let (node, offset, client_rect) = self.caret_position_from_point(x, y)?;
+        Some(CaretPosition::new(
+            cx,
+            &self.window,
+            &node,
+            offset,
+            client_rect,
+        ))
+    }
+
+    /// <https://developer.mozilla.org/en-US/docs/Web/API/Document/caretRangeFromPoint>, which
+    /// WebKit and Blink implement: the caret position at the point as a collapsed range.
+    fn CaretRangeFromPoint(
+        &self,
+        cx: &mut JSContext,
+        x: Finite<f64>,
+        y: Finite<f64>,
+    ) -> Option<DomRoot<Range>> {
+        let (mut node, mut offset, _) = self.caret_position_from_point(x, y)?;
+        // Like in other browsers, the range does not go into a text control but is before it.
+        if node.is::<HTMLInputElement>() || node.is::<HTMLTextAreaElement>() {
+            offset = node.index();
+            node = node.GetParentNode().expect("Hit elements have a parent");
+        }
+        Some(Range::new(cx, self, &node, offset, &node, offset))
+    }
+
     /// <https://drafts.csswg.org/cssom-view/#dom-document-scrollingelement>
     fn GetScrollingElement(&self) -> Option<DomRoot<Element>> {
         // Step 1. If the Document is in quirks mode, follow these steps:
@@ -7460,6 +7565,8 @@ fn caret_position_in_laid_out_text(node: &Node, offset: u32) -> Option<(DomRoot<
             },
             // After a final `<br>` there is no further line; its start is the caret position.
             (Some(before), None) if before.is::<HTMLBRElement>() => return Some((before, 0)),
+            // Layout gives an empty editing host a line for its caret.
+            (None, None) if offset == 0 => return Some((node, 0)),
             (_, Some(after)) if after.is::<Element>() => {
                 node = after;
                 offset = 0;

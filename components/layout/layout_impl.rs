@@ -22,7 +22,7 @@ use fonts::{FontContext, FontContextWebFontMethods, WebFontDocumentContext};
 use fonts_traits::StylesheetWebFontLoadFinishedCallback;
 use icu_locid::subtags::Language;
 use layout_api::{
-    AxesOverflow, BoxAreaType, CSSPixelRectVec, CaretLine, DangerousStyleNode, EditingSelection,
+    AxesOverflow, BoxAreaType, CSSPixelRectVec, CaretLine, DangerousStyleNode, DocumentSelection,
     IFrameSizes, Layout, LayoutConfig, LayoutDamage, LayoutElement, LayoutFactory, LayoutNode,
     NodeRenderingType, OffsetParentResponse, PhysicalSides, QueryMsg, ReflowGoal, ReflowPhasesRun,
     ReflowRequest, ReflowRequestRestyle, ReflowResult, ReflowStatistics, RestyleReason,
@@ -257,9 +257,9 @@ pub struct LayoutThread {
     /// If this changed, then we need to create a new display list.
     previously_highlighted_dom_node: Cell<Option<OpaqueNode>>,
 
-    /// The selection of the focused editing host painted by the last display list. If this
-    /// changed, then we need to create a new display list.
-    previously_painted_editing_selection: RefCell<Option<EditingSelection>>,
+    /// The selection of the document painted by the last display list. If this changed, then we
+    /// need to create a new display list.
+    previously_painted_selection: RefCell<Option<DocumentSelection>>,
 
     /// Handler for all Paint Timings
     paint_timing_handler: RefCell<Option<PaintTimingHandler>>,
@@ -926,7 +926,7 @@ impl LayoutThread {
             resolved_images_cache: Default::default(),
             debug: opts::get().debug.clone(),
             previously_highlighted_dom_node: Cell::new(None),
-            previously_painted_editing_selection: Default::default(),
+            previously_painted_selection: Default::default(),
             paint_timing_handler: Default::default(),
             user_stylesheets: config.user_stylesheets,
             accessibility_active: Cell::new(false),
@@ -1435,8 +1435,8 @@ impl LayoutThread {
             .process_style(dangerous_root_element, Some(&snapshot_map));
 
         if self.previously_highlighted_dom_node.get() != reflow_request.highlighted_dom_node ||
-            *self.previously_painted_editing_selection.borrow() !=
-                reflow_request.editing_selection
+            *self.previously_painted_selection.borrow() !=
+                reflow_request.document_selection
         {
             // Need to manually force layout to build a new display list regardless of whether the box tree
             // changed or not.
@@ -1758,7 +1758,7 @@ impl LayoutThread {
             self.webview_id,
             self.device().device_pixel_ratio(),
             reflow_request.highlighted_dom_node,
-            reflow_request.editing_selection.as_ref(),
+            reflow_request.document_selection.as_ref(),
             &self.debug,
             paint_timing_handler,
             reflow_statistics,
@@ -1791,8 +1791,8 @@ impl LayoutThread {
         self.need_new_display_list.set(false);
         self.previously_highlighted_dom_node
             .set(reflow_request.highlighted_dom_node);
-        *self.previously_painted_editing_selection.borrow_mut() =
-            reflow_request.editing_selection.clone();
+        *self.previously_painted_selection.borrow_mut() =
+            reflow_request.document_selection.clone();
         true
     }
 

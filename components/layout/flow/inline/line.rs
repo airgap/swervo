@@ -23,7 +23,7 @@ use unicode_bidi::{BidiInfo, Level};
 
 use super::inline_box::{InlineBoxContainerState, InlineBoxIdentifier, InlineBoxTreePathToken};
 use super::{
-    EditableText, InlineFormattingContextLayout, LineBlockSizes, SharedInlineStyles, line_height,
+    TextOrigins, InlineFormattingContextLayout, LineBlockSizes, SharedInlineStyles, line_height,
 };
 use crate::cell::ArcRefCell;
 use crate::flow::inline::text_run::FontAndScriptInfo;
@@ -598,6 +598,11 @@ impl LineItemLayout<'_, '_> {
                 inline: inline_advance,
             },
         };
+        let mut offsets = text_item.offsets;
+        if let Some(offsets) = offsets.as_mut() {
+            offsets.line_block_start = font_metrics.ascent - self.current_state.baseline_offset;
+            offsets.line_block_size = self.line_metrics.block_size;
+        }
 
         let font_key = text_item.info.font.key(
             self.layout.layout_context.painter_id,
@@ -627,7 +632,7 @@ impl LineItemLayout<'_, '_> {
                 font: text_item.info.font.clone(),
                 glyphs: text_item.text,
                 justification_adjustment: self.justification_adjustment,
-                offsets: text_item.offsets,
+                offsets,
                 character_start: text_item.character_start,
                 is_empty_for_text_cursor: text_item.is_empty_for_text_cursor,
             })),
@@ -871,13 +876,17 @@ pub(crate) struct TextRunOffsets {
     /// The selection range of the containing inline formatting context, for text controls.
     #[ignore_malloc_size_of = "This is stored primarily in the DOM"]
     pub shared_selection: Option<SharedSelection>,
-    /// The DOM origin of the text of the containing inline formatting context, for editable
-    /// content.
+    /// The DOM origin of the text of the containing inline formatting context, for selections
+    /// and carets in the document.
     #[ignore_malloc_size_of = "Measured in the inline formatting context"]
-    pub editable_text: Option<Arc<EditableText>>,
+    pub text_origins: Option<Arc<TextOrigins>>,
     /// The range of characters this [`TextRun`] represents within the entire text of its
     /// inline formatting context.
     pub character_range: Range<usize>,
+    /// The block offset of the start of the line box relative to the fragment and the block size
+    /// of the line box, which selected text is highlighted over. Set when the line is laid out.
+    pub line_block_start: Au,
+    pub line_block_size: Au,
 }
 
 pub(super) struct TextRunLineItem {

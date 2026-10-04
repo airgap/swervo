@@ -293,6 +293,17 @@ impl<'dom, 'style> BlockContainerBuilder<'dom, 'style> {
 
         self.finish_anonymous_table_if_needed();
 
+        if self.block_level_boxes.is_empty() &&
+            self.inline_formatting_context_builder
+                .as_ref()
+                .is_none_or(|builder| builder.is_empty) &&
+            self.info.node.is_editing_host()
+        {
+            let info = self.info;
+            self.ensure_inline_formatting_context_builder()
+                .hold_line_for_empty_editing_host(info);
+        }
+
         if let Some(inline_formatting_context) = self.finish_ongoing_inline_formatting_context() {
             // There are two options here. This block was composed of both one or more inline formatting contexts
             // and child blocks OR this block was a single inline formatting context. In the latter case, we

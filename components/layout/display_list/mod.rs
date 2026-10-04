@@ -11,7 +11,8 @@ pub(crate) use clip::ClipId;
 use euclid::{Box2D, Point2D, Rect, Scale, SideOffsets2D, Size2D, UnknownUnit, Vector2D};
 use fonts::{FontRef, ShapedTextSlice};
 use gradient::WebRenderGradient;
-use layout_api::{EditingSelection, ReflowStatistics};
+use layout_api::{DocumentSelection, ReflowStatistics};
+use rustc_hash::FxHashMap;
 use net_traits::image_cache::Image as CachedImage;
 use paint_api::display_list::{PaintDisplayListInfo, SpatialTreeNodeInfo};
 use paint_api::{CrossProcessPaintApi, SerializableImageData};
@@ -63,7 +64,7 @@ use crate::display_list::background::BackgroundPainter;
 use crate::display_list::conversions::FilterToWebRender;
 pub(crate) use crate::display_list::conversions::ToWebRender;
 use crate::display_list::paint_traversal::{PaintTraversal, PaintTraversalHandler, TraversalState};
-use crate::flow::inline::EditableText;
+use crate::flow::inline::TextOrigins;
 use crate::fragment_tree::{
     BackgroundMode, BaseFragment, BoxFragment, BoxFragmentWithStyle, ContainingBlockCalculation,
     Fragment, FragmentFlags, FragmentStatus, FragmentTree, IFrameFragment, ImageFragment,
@@ -90,6 +91,15 @@ pub(crate) use paint_timing_handler::PaintTimingHandler;
 pub(crate) use stacking_context::*;
 
 const INSERTION_POINT_LOGICAL_WIDTH: Au = Au(AU_PER_PX);
+
+/// The colours of selected text without a `::selection` rule, those of Chrome.
+const DEFAULT_SELECTION_BACKGROUND: wr::ColorF = wr::ColorF {
+    r: 51. / 255.,
+    g: 103. / 255.,
+    b: 209. / 255.,
+    a: 1.,
+};
+const DEFAULT_SELECTION_TEXT: wr::ColorF = wr::ColorF::WHITE;
 
 pub(crate) struct DisplayListBuilder<'a> {
     /// The [`FragmentTree`] that we are building a display list for.
@@ -141,8 +151,12 @@ pub(crate) struct DisplayListBuilder<'a> {
     /// Statistics collected about the reflow, in order to write tests for incremental layout.
     reflow_statistics: &'a mut ReflowStatistics,
 
-    /// The selection of the focused editing host, painted over its editable text.
-    editing_selection: Option<&'a EditingSelection>,
+    /// The caret of a selection collapsed in the focused editing host, as in
+    /// [`DocumentSelection::caret`].
+    caret: Option<(OpaqueNode, u32)>,
+
+    /// The selected UTF-16 range of each text node in a non-collapsed selection of the document.
+    selected_text: FxHashMap<OpaqueNode, std::ops::Range<u32>>,
 }
 
 struct InspectorHighlight {
@@ -193,7 +207,7 @@ impl<'a> DisplayListBuilder<'a> {
         webview_id: WebViewId,
         device_pixel_ratio: Scale<f32, StyloCSSPixel, StyloDevicePixel>,
         highlighted_dom_node: Option<OpaqueNode>,
-        editing_selection: Option<&EditingSelection>,
+        document_selection: Option<&DocumentSelection>,
         debug: &DiagnosticsLogging,
         paint_timing_handler: &mut PaintTimingHandler,
         reflow_statistics: &mut ReflowStatistics,
@@ -228,7 +242,10 @@ impl<'a> DisplayListBuilder<'a> {
             device_pixel_ratio,
             paint_timing_handler,
             reflow_statistics,
-            editing_selection,
+            caret: document_selection.and_then(|selection| selection.caret),
+            selected_text: document_selection
+                .map(|selection| selection.selected_text.iter().cloned().collect())
+                .unwrap_or_default(),
         };
 
         // Clear any caret color from previous display list constructions.
@@ -1111,7 +1128,13 @@ impl Fragment {
         let mut baseline_origin = rect.origin;
         baseline_origin.y += fragment.font_metrics.ascent;
 
-        let include_whitespace = fragment.offsets.is_some() ||
+        let include_whitespace = fragment.offsets.as_ref().is_some_and(|offsets| {
+            offsets.shared_selection.is_some() ||
+                offsets
+                    .text_origins
+                    .as_ref()
+                    .is_some_and(|text_origins| text_origins.is_editable)
+        }) ||
             state
                 .text_decorations
                 .iter()
@@ -1125,6 +1148,15 @@ impl Fragment {
         );
 
         if glyphs.is_empty() && !fragment.is_empty_for_text_cursor {
+            // Selected white space is highlighted although it has no glyphs to paint.
+            Self::build_display_list_for_text_selection(
+                fragment,
+                builder,
+                state,
+                containing_block,
+                fragment.base.rect().min_x(),
+                fragment.justification_adjustment,
+            );
             return;
         }
 
@@ -1212,7 +1244,7 @@ impl Fragment {
             }
         }
 
-        Self::build_display_list_for_text_selection(
+        let selection = Self::build_display_list_for_text_selection(
             fragment,
             builder,
             state,
@@ -1228,14 +1260,45 @@ impl Fragment {
             .get_inherited_text()
             .clone__webkit_text_fill_color()
             .resolve_to_absolute(&color);
-        builder.wr().push_text(
-            &common,
-            glyph_bounds,
-            &glyphs,
-            fragment.font_key,
-            rgba(fill_color),
-            None,
-        );
+        // Selected text is painted in the colour of the selection: the glyphs are painted once
+        // for each side of the selection and once for the selection, each clipped to its part.
+        let mut parts = vec![(common.clip_rect, rgba(fill_color))];
+        if let Some((selection_rect, selected_text_color)) = selection &&
+            selected_text_color != rgba(fill_color)
+        {
+            let clip = common.clip_rect;
+            let (start, end) = (selection_rect.min.x, selection_rect.max.x);
+            parts = vec![
+                (
+                    Box2D::new(clip.min, Point2D::new(start, clip.max.y)),
+                    rgba(fill_color),
+                ),
+                (
+                    Box2D::new(Point2D::new(start, clip.min.y), Point2D::new(end, clip.max.y)),
+                    selected_text_color,
+                ),
+                (
+                    Box2D::new(Point2D::new(end, clip.min.y), clip.max),
+                    rgba(fill_color),
+                ),
+            ];
+        }
+        for (clip_rect, color) in parts {
+            let Some(clip_rect) = clip_rect.intersection(&common.clip_rect) else {
+                continue;
+            };
+            builder.wr().push_text(
+                &wr::CommonItemProperties {
+                    clip_rect,
+                    ..common
+                },
+                glyph_bounds,
+                &glyphs,
+                fragment.font_key,
+                color,
+                None,
+            );
+        }
 
         // <https://compat.spec.whatwg.org/#the-webkit-text-stroke>: the stroke paints over the
         // fill, as in Chrome.
@@ -1448,16 +1511,19 @@ impl Fragment {
         );
     }
 
-    /// The part of the selection of a focused editing host that falls in this text fragment, as
-    /// character offsets of its inline formatting context.
-    fn editing_selection_in_text_fragment(
+    /// The part of the selection of the document that falls in this text fragment, as character
+    /// offsets of its inline formatting context, and whether it is a caret.
+    fn document_selection_in_text_fragment(
+        builder: &DisplayListBuilder,
         fragment: &TextFragment,
         character_range: &std::ops::Range<usize>,
-        editable_text: &EditableText,
-        editing_selection: &EditingSelection,
+        text_origins: &TextOrigins,
     ) -> Option<(std::ops::Range<usize>, bool)> {
-        if let Some((node, offset)) = editing_selection.caret {
-            let caret = editable_text.character_offset(node, offset)?;
+        if let Some((node, offset)) = builder.caret {
+            if !text_origins.is_editable {
+                return None;
+            }
+            let caret = text_origins.character_offset(node, offset)?;
             // Where a line wraps at a space, the space ends the first line but is not painted, and
             // the offset after it starts the next line. Paint the caret there only once, on the
             // next line.
@@ -1476,16 +1542,20 @@ impl Fragment {
             return Some((caret..caret, true));
         }
 
+        if builder.selected_text.is_empty() {
+            return None;
+        }
         let mut selected: Option<std::ops::Range<usize>> = None;
-        for (node, dom_range) in &editing_selection.selected_text {
-            let (Some(start), Some(end)) = (
-                editable_text.character_offset(*node, dom_range.start),
-                editable_text.character_offset(*node, dom_range.end),
-            ) else {
+        for source in text_origins.sources_in(character_range) {
+            let Some(dom_range) = builder.selected_text.get(&source.node) else {
                 continue;
             };
-            let start = start.max(character_range.start);
-            let end = end.min(character_range.end);
+            let start = source
+                .character_offset(dom_range.start)
+                .max(character_range.start);
+            let end = source
+                .character_offset(dom_range.end)
+                .min(character_range.end);
             if start >= end {
                 continue;
             }
@@ -1506,44 +1576,34 @@ impl Fragment {
         containing_block_rect: &PhysicalRect<Au>,
         fragment_x_offset: Au,
         justification_adjustment: Au,
-    ) {
-        let Some(offsets) = fragment.offsets.as_ref() else {
-            return;
-        };
+    ) -> Option<(units::LayoutRect, wr::ColorF)> {
+        let offsets = fragment.offsets.as_ref()?;
 
         // The selected characters of the inline formatting context, and whether they are a caret.
-        let (selection, is_caret) = match (&offsets.shared_selection, &offsets.editable_text) {
+        let (selection, is_caret) = match (&offsets.shared_selection, &offsets.text_origins) {
             (Some(shared_selection), _) => {
                 let shared_selection = shared_selection.borrow();
                 if !shared_selection.enabled {
-                    return;
+                    return None;
                 }
                 (
                     shared_selection.character_range.clone(),
                     shared_selection.range.is_empty(),
                 )
             },
-            (None, Some(editable_text)) => {
-                let Some(editing_selection) = builder.editing_selection else {
-                    return;
-                };
-                let Some(selection) = Self::editing_selection_in_text_fragment(
-                    fragment,
-                    &offsets.character_range,
-                    editable_text,
-                    editing_selection,
-                ) else {
-                    return;
-                };
-                selection
-            },
-            (None, None) => return,
+            (None, Some(text_origins)) => Self::document_selection_in_text_fragment(
+                builder,
+                fragment,
+                &offsets.character_range,
+                text_origins,
+            )?,
+            (None, None) => return None,
         };
 
         if offsets.character_range.start > selection.end ||
             offsets.character_range.end < selection.start
         {
-            return;
+            return None;
         }
 
         // When there is an active selection, the line is empty, and there is a forced linebreak,
@@ -1555,7 +1615,7 @@ impl Fragment {
                 .character_range
                 .contains(&selection.start)
         {
-            return;
+            return None;
         }
 
         let mut current_character_index = offsets.character_range.start;
@@ -1599,26 +1659,36 @@ impl Fragment {
 
         let parent_style = fragment.base.style();
         if !is_caret {
+            // Like in other browsers, the highlight spans the whole line box.
             let selection_rect = Rect::new(
                 containing_block_rect.origin +
-                    Vector2D::new(fragment_x_offset + start_x, Au::zero()),
-                Size2D::new(end_x - start_x, containing_block_rect.height()),
+                    Vector2D::new(
+                        fragment_x_offset + start_x,
+                        fragment.base.rect().min_y() + offsets.line_block_start,
+                    ),
+                Size2D::new(end_x - start_x, offsets.line_block_size),
             )
             .to_webrender();
 
-            if let Some(selection_color) = fragment
-                .selected_style
-                .borrow()
-                .clone_background_color()
-                .as_absolute()
+            let selected_style = fragment.selected_style.borrow();
+            // Without a `::selection` rule the selected style is the style of the text itself.
+            let (background_color, text_color) = if ServoArc::ptr_eq(&selected_style, &parent_style)
             {
-                let selection_common =
-                    builder.common_properties(state, selection_rect, &parent_style);
-                builder
-                    .wr()
-                    .push_rect(&selection_common, selection_rect, rgba(*selection_color));
-            }
-            return;
+                (DEFAULT_SELECTION_BACKGROUND, DEFAULT_SELECTION_TEXT)
+            } else {
+                (
+                    selected_style
+                        .clone_background_color()
+                        .as_absolute()
+                        .map_or(wr::ColorF::TRANSPARENT, |color| rgba(*color)),
+                    rgba(selected_style.clone_color()),
+                )
+            };
+            let selection_common = builder.common_properties(state, selection_rect, &parent_style);
+            builder
+                .wr()
+                .push_rect(&selection_common, selection_rect, background_color);
+            return Some((selection_rect, text_color));
         }
 
         let insertion_point_rect = Rect::new(
@@ -1656,6 +1726,7 @@ impl Fragment {
             insertion_point_rect,
             property_binding,
         );
+        None
     }
 }
 
