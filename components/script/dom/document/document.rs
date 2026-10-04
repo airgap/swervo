@@ -3616,6 +3616,9 @@ impl Document {
     pub(crate) fn deliver_resize_loop_error_notification(&self, cx: &mut JSContext) {
         let error_info: ErrorInfo = crate::dom::bindings::error::ErrorInfo {
             message: "ResizeObserver loop completed with undelivered notifications.".to_string(),
+            // Chrome attributes the error to the document so `onerror` handlers that filter
+            // on filename see the page URL.
+            filename: self.url().to_string(),
             ..Default::default()
         };
         self.window
