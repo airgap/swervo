@@ -954,6 +954,18 @@ impl Document {
             .set(Some(new_dirty_root.downcast::<Element>().unwrap()));
     }
 
+    /// Like [`Self::note_node_with_dirty_descendants`], for a node below which stylo's
+    /// relative selector invalidator has already set `HAS_DIRTY_DESCENDANTS`, down to the
+    /// elements it restyled. That flag on `node` would otherwise end the walk before it marks
+    /// the ancestors and moves the dirty root.
+    pub(crate) fn note_node_with_invalidated_descendants(&self, node: &Node) {
+        node.set_flag(NodeFlags::HAS_DIRTY_DESCENDANTS, false);
+        self.note_node_with_dirty_descendants(node);
+        if node.is::<Element>() {
+            node.set_flag(NodeFlags::HAS_DIRTY_DESCENDANTS, true);
+        }
+    }
+
     pub(crate) fn take_dirty_root(&self) -> Option<DomRoot<Element>> {
         self.dirty_root.take()
     }
@@ -4746,7 +4758,6 @@ impl Document {
         // I'm getting rid of the whole hashtable soon anyway, since all it does
         // right now is populate the element restyle data in layout, and we
         // could in theory do it in the DOM I think.
-        el.invalidate_relative_selector_anchors();
         let mut entry = self.ensure_pending_restyle(el);
         if entry.snapshot.is_none() {
             entry.snapshot = Some(Snapshot::new());

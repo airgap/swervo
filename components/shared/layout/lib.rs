@@ -506,6 +506,7 @@ pub trait Layout {
     fn query_caret_stops(&self, node: TrustedNodeAddress) -> Vec<CaretLine>;
     fn query_elements_from_point(&self, point: LayoutPoint) -> Vec<ElementsFromPointResult>;
     fn query_effective_overflow(&self, node: TrustedNodeAddress) -> Option<AxesOverflow>;
+    fn stylist(&self) -> &Stylist;
     fn stylist_mut(&mut self) -> &mut Stylist;
 
     /// Set whether the accessibility tree should be constructed for this Layout.

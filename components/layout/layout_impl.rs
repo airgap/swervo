@@ -827,6 +827,10 @@ impl Layout for LayoutThread {
         self.need_new_display_list.set(true);
     }
 
+    fn stylist(&self) -> &Stylist {
+        &self.stylist
+    }
+
     /// <https://drafts.css-houdini.org/css-properties-values-api-1/#the-registerproperty-function>
     fn stylist_mut(&mut self) -> &mut Stylist {
         &mut self.stylist

@@ -356,6 +356,10 @@ impl Node {
             debug_assert!(!node.get_flag(NodeFlags::HAS_DIRTY_DESCENDANTS));
             vtable_for(&node).bind_to_tree(cx, &context);
         }
+
+        if parent_is_connected && let Some(element) = new_child.downcast::<Element>() {
+            element.invalidate_relative_selectors_for_insertion();
+        }
     }
 
     /// Clear style and layout data on this [`Node`] and all descendants. This is used to clean
@@ -501,6 +505,9 @@ impl Node {
     fn remove_child(&self, cx: &mut JSContext, child: &Node, cached_index: Option<u32>) {
         assert!(child.parent_node.get().as_deref() == Some(self));
         self.note_dirty_descendants();
+        if let Some(element) = child.downcast::<Element>() {
+            element.invalidate_relative_selectors_for_removal();
+        }
 
         let prev_sibling = child.GetPreviousSibling();
         match prev_sibling {
@@ -543,6 +550,9 @@ impl Node {
     fn move_child(&self, cx: &mut JSContext, child: &Node) {
         assert!(child.parent_node.get().as_deref() == Some(self));
         self.note_dirty_descendants();
+        if let Some(element) = child.downcast::<Element>() {
+            element.invalidate_relative_selectors_for_removal();
+        }
 
         child.prev_sibling.set(None);
         child.next_sibling.set(None);
