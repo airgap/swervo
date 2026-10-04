@@ -77,6 +77,7 @@ use style::stylist::Stylist;
 use stylo_atoms::Atom;
 use time::Duration as TimeDuration;
 use url::{Host, Position};
+use webrender_api::units::LayoutVector2D;
 
 use crate::animations::Animations;
 use crate::document_loader::{DocumentLoader, LoadType};
@@ -331,6 +332,18 @@ impl PendingScrollEvent {
     }
 }
 
+/// A scroll event target whose scrolling box scrolled recently and whose scroll has not
+/// completed yet.
+#[derive(JSTraceable, MallocSizeOf)]
+#[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
+struct ScrollAwaitingCompletion {
+    target: Dom<EventTarget>,
+    /// The scroll position before the user started this scroll, if the user scrolled the box
+    /// directly. Snapping after such a scroll goes in the direction the user scrolled.
+    #[no_trace]
+    user_scroll_origin: Option<LayoutVector2D>,
+}
+
 /// Reasons why a [`Document`] might need a rendering update that is otherwise
 /// untracked via other [`Document`] properties.
 #[derive(Clone, Copy, Debug, Default, JSTraceable, MallocSizeOf)]
@@ -348,6 +361,11 @@ bitflags! {
         /// one more rendering update possibility after this happens, so that any potential screenshot
         /// reflects the up-to-date contents.
         const FontReadyPromiseFulfilled = 1 << 2;
+        /// A smooth scroll is animating and needs to advance in the next rendering update.
+        const SmoothScrollInProgress = 1 << 3;
+        /// A scrolling box scrolled during the last rendering update. Another rendering update
+        /// is needed to notice that it stopped, at which point `scrollend` fires.
+        const ScrollInProgress = 1 << 4;
     }
 }
 
@@ -643,6 +661,9 @@ pub(crate) struct Document {
     /// > Each Document has an associated list of pending scroll events, which stores
     /// > pairs of (EventTarget, DOMString), initially empty.
     pending_scroll_events: DomRefCell<Vec<PendingScrollEvent>>,
+    /// Scroll event targets whose scrolling box scrolled during the last rendering update and
+    /// whose scroll is not yet considered completed.
+    scrolls_awaiting_completion: DomRefCell<Vec<ScrollAwaitingCompletion>>,
     /// Other reasons that a rendering update might be required for this [`Document`].
     rendering_update_reasons: Cell<RenderingUpdateReason>,
     /// Whether or not this [`Document`] is waiting on canvas image updates. If it is
@@ -1586,34 +1607,79 @@ impl Document {
     pub(crate) fn run_the_scroll_steps(&self, cx: &mut JSContext) {
         // Step 1: For each scrolling box `box` that was scrolled:
         //
-        // Note: Since scrolling is currently synchronous (no scroll animations /
-        // smooth scrolling), we consider any box event target that had a scroll
-        // event to be a box that scrolled. Once scrolling is asynchronous this
-        // should reflect scrolling targets which have finished their scroll
-        // animation.
-        let boxes_that_were_scrolled: Vec<_> = self
+        // Note: `scrollend` marks the completion of a scroll. A box counts as having
+        // completed its scroll once a rendering update passes in which it did not scroll
+        // at all, so a smooth scroll or a stream of user scroll input yields one
+        // `scrollend` at its end instead of one per frame.
+        let scrolled_in_this_update: Vec<DomRoot<EventTarget>> = self
             .pending_scroll_events
             .borrow()
             .iter()
-            .filter_map(|pending_event| {
-                if &*pending_event.event == "scroll" {
-                    Some(pending_event.target.as_rooted())
-                } else {
-                    None
-                }
-            })
+            .filter(|pending_event| &*pending_event.event == "scroll")
+            .map(|pending_event| pending_event.target.as_rooted())
             .collect();
+        let completed_scrolls: Vec<(DomRoot<EventTarget>, Option<LayoutVector2D>)> = {
+            let mut awaiting_completion = self.scrolls_awaiting_completion.borrow_mut();
+            let still_scrolling = |awaiting: &ScrollAwaitingCompletion| {
+                scrolled_in_this_update
+                    .iter()
+                    .any(|scrolled| **scrolled == *awaiting.target) ||
+                    self.scroll_target_has_ongoing_smooth_scroll(&awaiting.target)
+            };
+            let completed = awaiting_completion
+                .iter()
+                .filter(|awaiting| !still_scrolling(awaiting))
+                .map(|awaiting| {
+                    (
+                        DomRoot::from_ref(&*awaiting.target),
+                        awaiting.user_scroll_origin,
+                    )
+                })
+                .collect();
+            awaiting_completion.retain(still_scrolling);
+            for target in &scrolled_in_this_update {
+                if !awaiting_completion
+                    .iter()
+                    .any(|awaiting| *awaiting.target == **target)
+                {
+                    awaiting_completion.push(ScrollAwaitingCompletion {
+                        target: Dom::from_ref(&**target),
+                        user_scroll_origin: None,
+                    });
+                }
+            }
+            completed
+        };
 
-        for target in boxes_that_were_scrolled.into_iter() {
+        for (target, user_scroll_origin) in completed_scrolls.into_iter() {
+            // A user scroll of a snap container that came to rest between snap positions
+            // continues to the next snap position in the direction the user scrolled, and
+            // completes once it gets there.
+            if let Some(user_scroll_origin) = user_scroll_origin &&
+                let Some(scrolling_box) = self.mandatory_snap_container_for_scroll_target(&target)
+            {
+                let position = scrolling_box.scroll_position();
+                let snapped = scrolling_box.snapped_position(position, Some(user_scroll_origin));
+                if snapped != position {
+                    scrolling_box.scroll_to(cx, snapped, ScrollBehavior::Smooth);
+                    self.scrolls_awaiting_completion
+                        .borrow_mut()
+                        .push(ScrollAwaitingCompletion {
+                            target: target.as_traced(),
+                            user_scroll_origin: None,
+                        });
+                    continue;
+                }
+            }
+
             // Step 1.1: If box belongs to a viewport, let doc be the viewport’s associated
             // Document and target be the viewport. If box belongs to a VisualViewport,
             // let doc be the VisualViewport’s associated document and target be the
             // VisualViewport. Otherwise, box belongs to an element and let doc be the
             // element’s node document and target be the element.
-            let Some(element) = target.downcast::<Element>() else {
-                continue;
-            };
-            let document = element.owner_document();
+            //
+            // Note: Every target here queued its scroll event in this Document's list, so
+            // this Document is doc.
 
             // Step 1.2: If box belongs to a snap container, snapcontainer, run the
             // update scrollsnapchange targets steps for snapcontainer.
@@ -1621,7 +1687,7 @@ impl Document {
 
             // Step 1.3: If (target, "scrollend") is already in doc’s pending scroll
             // events, abort these steps.
-            let mut pending_scroll_events = document.pending_scroll_events.borrow_mut();
+            let mut pending_scroll_events = self.pending_scroll_events.borrow_mut();
             let event = "scrollend".into();
             if pending_scroll_events
                 .iter()
@@ -1635,6 +1701,10 @@ impl Document {
                 target: target.as_traced(),
                 event: "scrollend".into(),
             });
+        }
+
+        if !self.scrolls_awaiting_completion.borrow().is_empty() {
+            self.add_rendering_update_reason(RenderingUpdateReason::ScrollInProgress);
         }
 
         // Step 2: For each item (target, type) in doc’s pending scroll events, in
@@ -1662,6 +1732,51 @@ impl Document {
 
         // Step 3. Empty doc’s pending scroll events.
         // Note: This is done above.
+    }
+
+    /// Records where a scroll the user is making started from, before its scroll event is
+    /// queued, so that snapping can follow the direction of the scroll once it completes.
+    pub(crate) fn note_user_scroll_origin(&self, target: &EventTarget, origin: LayoutVector2D) {
+        let mut awaiting_completion = self.scrolls_awaiting_completion.borrow_mut();
+        match awaiting_completion
+            .iter_mut()
+            .find(|awaiting| *awaiting.target == *target)
+        {
+            Some(awaiting) => {
+                awaiting.user_scroll_origin.get_or_insert(origin);
+            },
+            None => awaiting_completion.push(ScrollAwaitingCompletion {
+                target: Dom::from_ref(target),
+                user_scroll_origin: Some(origin),
+            }),
+        }
+    }
+
+    fn scroll_target_has_ongoing_smooth_scroll(&self, target: &EventTarget) -> bool {
+        let window = self.window();
+        if target.is::<Document>() {
+            return window.has_ongoing_smooth_scroll(window.pipeline_id().root_scroll_id());
+        }
+        target.downcast::<Element>().is_some_and(|element| {
+            window.has_ongoing_smooth_scroll(window.scroll_id_for_element(element))
+        })
+    }
+
+    /// The scrolling box behind a scroll event target, if it is a `mandatory` snap container.
+    fn mandatory_snap_container_for_scroll_target(
+        &self,
+        target: &EventTarget,
+    ) -> Option<ScrollingBox> {
+        if target.is::<Document>() {
+            let scrolling_box = self.viewport_scrolling_box(ScrollContainerQueryFlags::Inclusive);
+            return scrolling_box
+                .is_mandatory_snap_container()
+                .then_some(scrolling_box);
+        }
+        target
+            .downcast::<Element>()
+            .filter(|element| element.mandatory_scroll_snap_axis().is_some())?
+            .scrolling_box(ScrollContainerQueryFlags::Inclusive)
     }
 
     /// <https://drafts.csswg.org/cssom-view/#scrolling-events>
@@ -3975,6 +4090,7 @@ impl Document {
             adopted_stylesheets: Default::default(),
             adopted_stylesheets_frozen_types: CachedFrozenArray::new(),
             pending_scroll_events: Default::default(),
+            scrolls_awaiting_completion: Default::default(),
             rendering_update_reasons: Default::default(),
             waiting_on_canvas_image_updates: Cell::new(false),
             root_removal_noted: Cell::new(true),

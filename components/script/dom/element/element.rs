@@ -16,7 +16,7 @@ use app_units::Au;
 use cssparser::match_ignore_ascii_case;
 use devtools_traits::{AttrInfo, DomMutation, ScriptToDevtoolsControlMsg};
 use dom_struct::dom_struct;
-use euclid::Rect;
+use euclid::{Rect, SideOffsets2D};
 use html5ever::serialize::TraversalScope;
 use html5ever::serialize::TraversalScope::{ChildrenOnly, IncludeNode};
 use html5ever::{LocalName, Namespace, Prefix, QualName, local_name, namespace_prefix, ns};
@@ -53,7 +53,7 @@ use style::selector_parser::{RestyleDamage, SelectorParser, Snapshot};
 use style::shared_lock::Locked;
 use style::stylesheets::layer_rule::LayerOrder;
 use style::stylesheets::{CssRuleType, UrlExtraData};
-use style::values::computed::Overflow;
+use style::values::computed::{Overflow, ScrollSnapAxis, ScrollSnapStrictness};
 use style::values::generics::NonNegative;
 use style::values::generics::position::PreferredRatio;
 use style::values::generics::ratio::Ratio;
@@ -932,6 +932,29 @@ impl Element {
             .scrolling_box_query(Some(self.upcast()), flags)
     }
 
+    /// The border box outset by scroll-margin, in the coordinate space of
+    /// `getBoundingClientRect()`, or `None` without a box.
+    /// <https://drafts.csswg.org/css-scroll-snap-1/#scroll-snap-area>
+    pub(crate) fn scroll_snap_area(&self) -> Option<Rect<Au, CSSPixel>> {
+        let border_box = self.upcast::<Node>().border_box()?;
+        let style = self.style()?;
+        let margin = style.get_margin();
+        Some(border_box.outer_rect(SideOffsets2D::new(
+            Au::from_f32_px(margin.scroll_margin_top.px()),
+            Au::from_f32_px(margin.scroll_margin_right.px()),
+            Au::from_f32_px(margin.scroll_margin_bottom.px()),
+            Au::from_f32_px(margin.scroll_margin_left.px()),
+        )))
+    }
+
+    /// The axis of this element's `scroll-snap-type` when its snapping is `mandatory`. For the
+    /// root element this is the viewport's snap type. `proximity` snapping is not implemented,
+    /// so such containers report `None` and scroll freely.
+    pub(crate) fn mandatory_scroll_snap_axis(&self) -> Option<ScrollSnapAxis> {
+        let snap_type = self.style()?.get_box().scroll_snap_type;
+        (snap_type.strictness == ScrollSnapStrictness::Mandatory).then_some(snap_type.axis)
+    }
+
     /// <https://drafts.csswg.org/cssom-view/#scroll-a-target-into-view>
     pub(crate) fn scroll_into_view_with_options(
         &self,
@@ -943,7 +966,8 @@ impl Element {
         inner_target_rect: Option<Rect<Au, CSSPixel>>,
     ) {
         let get_target_rect = || match inner_target_rect {
-            None => self.upcast::<Node>().border_box().unwrap_or_default(),
+            // The snap area, not the bare border box, is what gets aligned.
+            None => self.scroll_snap_area().unwrap_or_default(),
             Some(inner_target_rect) => inner_target_rect.translate(
                 self.upcast::<Node>()
                     .content_box()
@@ -974,9 +998,9 @@ impl Element {
 
             // Step 1.3: If `position` is not the same as `scrolling box`’s current scroll position, or
             // `scrolling box` has an ongoing smooth scroll,
-            //
-            // TODO: Handle smooth scrolling.
-            if position != scrolling_box.scroll_position() {
+            if position != scrolling_box.scroll_position() ||
+                scrolling_box.has_ongoing_smooth_scroll()
+            {
                 //  ↪ If `scrolling box` is associated with an element
                 //    Perform a scroll of the element’s scrolling box to `position`,
                 //    with the `element` as the associated element and `behavior` as the

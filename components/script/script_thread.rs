@@ -1214,6 +1214,10 @@ impl ScriptThread {
             // > 8. For each doc of docs, run the resize steps for doc. [CSSOMVIEW]
             let resized = document.window().run_the_resize_steps(cx);
 
+            // Smooth scrolls advance here so the scroll events they cause are part of
+            // this rendering update's scroll steps.
+            document.window().advance_smooth_scrolls(cx);
+
             // > 9. For each doc of docs, run the scroll steps for doc.
             document.run_the_scroll_steps(cx);
 
@@ -2031,6 +2035,7 @@ impl ScriptThread {
             return;
         };
 
+        let previous_offset = window.layout().scroll_offset(scroll_states.scrolled_node);
         self.profile_event(
             ScriptThreadEventCategory::SetScrollState,
             Some(pipeline_id),
@@ -2044,7 +2049,7 @@ impl ScriptThread {
         window
             .Document()
             .event_handler()
-            .handle_embedder_scroll_event(scroll_states.scrolled_node);
+            .handle_embedder_scroll_event(scroll_states.scrolled_node, previous_offset);
     }
 
     #[cfg(feature = "webgpu")]

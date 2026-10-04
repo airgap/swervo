@@ -86,6 +86,8 @@ use servo_geometry::DeviceIndependentIntRect;
 use servo_url::{ImmutableOrigin, MutableOrigin, ServoUrl};
 use storage_traits::StorageThreads;
 use storage_traits::webstorage_thread::WebStorageType;
+use style::bezier::Bezier;
+use style::computed_values::scroll_behavior::T as ComputedScrollBehavior;
 use style::error_reporting::{ContextualParseError, ParseErrorReporter};
 use style::properties::PropertyId;
 use style::properties::style_structs::Font;
@@ -150,7 +152,7 @@ use crate::dom::css::cssstyledeclaration::{
 use crate::dom::customelementregistry::CustomElementRegistry;
 use crate::dom::document::focus::FocusableArea;
 use crate::dom::document::{
-    AnimationFrameCallback, Document, SameOriginDescendantNavigablesIterator,
+    AnimationFrameCallback, Document, RenderingUpdateReason, SameOriginDescendantNavigablesIterator,
 };
 use crate::dom::element::Element;
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
@@ -287,6 +289,43 @@ pub(crate) struct LaidOutCaretLine {
     pub(crate) top: Au,
     pub(crate) bottom: Au,
     pub(crate) stops: Vec<LaidOutCaretStop>,
+}
+
+/// A scroll of one scrolling box that animates from `from` to `to` over `duration`.
+/// <https://drafts.csswg.org/cssom-view/#concept-smooth-scroll>
+#[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
+#[derive(JSTraceable, MallocSizeOf)]
+struct SmoothScroll {
+    #[no_trace]
+    scroll_id: ExternalScrollId,
+    element: Option<Dom<Element>>,
+    #[no_trace]
+    from: Vector2D<f32, LayoutPixel>,
+    #[no_trace]
+    to: Vector2D<f32, LayoutPixel>,
+    start_time: Instant,
+    duration: Duration,
+}
+
+impl SmoothScroll {
+    /// Chromium's delta-based duration for programmatic smooth scrolls: one frame at 60Hz per
+    /// square root of the distance in pixels, so long scrolls are faster per pixel. The cap
+    /// keeps scrolls across very long documents from dragging on.
+    fn duration_for_distance(distance: f32) -> Duration {
+        Duration::from_secs_f32((distance.sqrt() / 60.).min(1.))
+    }
+
+    /// The position for `now`, and whether the scroll has reached its destination. The
+    /// progress follows `ease-in-out`, the curve other engines use for programmatic scrolls.
+    fn position_at(&self, now: Instant) -> (Vector2D<f32, LayoutPixel>, bool) {
+        let elapsed = now.saturating_duration_since(self.start_time);
+        if elapsed >= self.duration {
+            return (self.to, true);
+        }
+        let progress = elapsed.as_secs_f64() / self.duration.as_secs_f64();
+        let eased = Bezier::calculate_bezier_output(progress, 1e-6, 0.42, 0., 0.58, 1.) as f32;
+        (self.from.lerp(self.to, eased), false)
+    }
 }
 
 #[dom_struct]
@@ -439,6 +478,10 @@ pub(crate) struct Window {
     /// trigger a GC, so it waits for a rendering reflow: query reflows run while callers (e.g.
     /// ResizeObserver) hold DOM borrows that tracing would then trip over.
     pending_svg_serialization: DomRefCell<Vec<Dom<SVGSVGElement>>>,
+
+    /// The smooth scrolls of scrolling boxes in this `Window` that are still animating,
+    /// advanced once per rendering update.
+    smooth_scrolls: DomRefCell<Vec<SmoothScroll>>,
 
     /// Directory to store unminified css for this window if unminify-css
     /// opt is enabled.
@@ -2047,11 +2090,15 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
         // Step 1.1: Let options be the argument.
         // Step 1.2: Let x be the value of the left dictionary member of options, if
         // present, or the viewport’s current scroll position on the x axis otherwise.
-        let x = options.left.unwrap_or(0.0) as f32;
+        let x = options
+            .left
+            .map_or(self.scroll_offset().x, |left| left as f32);
 
         // Step 1.3: Let y be the value of the top dictionary member of options, if
         // present, or the viewport’s current scroll position on the y axis otherwise.
-        let y = options.top.unwrap_or(0.0) as f32;
+        let y = options
+            .top
+            .map_or(self.scroll_offset().y, |top| top as f32);
 
         // The rest of the specification continues from `Self::scroll`.
         self.scroll(cx, x, y, options.parent.behavior);
@@ -2526,7 +2573,11 @@ impl Window {
         // Step 10: If position is the same as the viewport’s current scroll position, and
         // the viewport does not have an ongoing smooth scroll, abort these steps.
         let scroll_offset = self.scroll_offset();
-        if x == scroll_offset.x && y == scroll_offset.y {
+        let scroll_id = self.pipeline_id().root_scroll_id();
+        if x == scroll_offset.x &&
+            y == scroll_offset.y &&
+            !self.has_ongoing_smooth_scroll(scroll_id)
+        {
             return;
         }
 
@@ -2534,14 +2585,21 @@ impl Window {
         // Step 12: Perform a scroll of the viewport to position, document’s root element
         // as the associated element, if there is one, or null otherwise, and the scroll
         // behavior being the value of the behavior dictionary member of options.
-        self.perform_a_scroll(
-            cx,
-            x,
-            y,
-            self.pipeline_id().root_scroll_id(),
-            behavior,
-            None,
-        );
+        let root_element = self.Document().GetDocumentElement();
+        self.perform_a_scroll(cx, x, y, scroll_id, behavior, root_element.as_deref());
+    }
+
+    pub(crate) fn abort_smooth_scroll(&self, scroll_id: ExternalScrollId) {
+        self.smooth_scrolls
+            .borrow_mut()
+            .retain(|smooth_scroll| smooth_scroll.scroll_id != scroll_id);
+    }
+
+    pub(crate) fn has_ongoing_smooth_scroll(&self, scroll_id: ExternalScrollId) -> bool {
+        self.smooth_scrolls
+            .borrow()
+            .iter()
+            .any(|smooth_scroll| smooth_scroll.scroll_id == scroll_id)
     }
 
     /// <https://drafts.csswg.org/cssom-view/#perform-a-scroll>
@@ -2551,16 +2609,129 @@ impl Window {
         x: f32,
         y: f32,
         scroll_id: ExternalScrollId,
-        _behavior: ScrollBehavior,
+        behavior: ScrollBehavior,
         element: Option<&Element>,
     ) {
-        // TODO Step 1
-        // TODO(mrobinson, #18709): Add smooth scrolling support to WebRender so that we can
-        // properly process ScrollBehavior here.
-        let (reflow_phases_run, _) = self.reflow(
-            cx,
-            ReflowGoal::UpdateScrollNode(scroll_id, Vector2D::new(x, y)),
-        );
+        // Step 1: Abort any ongoing smooth scroll for box.
+        self.abort_smooth_scroll(scroll_id);
+
+        // A programmatic scroll of a snap container ends at the snap position closest to
+        // the requested one. <https://drafts.csswg.org/css-scroll-snap-1/#choosing>
+        let (x, y) = match element {
+            Some(element) if element.mandatory_scroll_snap_axis().is_some() => {
+                let scrolling_box = if scroll_id.is_root() {
+                    Some(
+                        self.Document()
+                            .viewport_scrolling_box(ScrollContainerQueryFlags::Inclusive),
+                    )
+                } else {
+                    element.scrolling_box(ScrollContainerQueryFlags::Inclusive)
+                };
+                match scrolling_box {
+                    Some(scrolling_box) => {
+                        let snapped = scrolling_box.snapped_position(Vector2D::new(x, y), None);
+                        (snapped.x, snapped.y)
+                    },
+                    None => (x, y),
+                }
+            },
+            _ => (x, y),
+        };
+
+        // Step 2: If the user agent honors the scroll-behavior property and one of the
+        // following are true:
+        //  - behavior is "auto" and element is not null and its computed value of the
+        //    scroll-behavior property is smooth
+        //  - behavior is smooth
+        // ...then perform a smooth scroll of box to position. Otherwise, perform an instant
+        // scroll of box to position.
+        let smooth = match behavior {
+            ScrollBehavior::Smooth => true,
+            ScrollBehavior::Auto => element.and_then(Element::style).is_some_and(|style| {
+                style.clone_scroll_behavior() == ComputedScrollBehavior::Smooth
+            }),
+            ScrollBehavior::Instant => false,
+        };
+        if !smooth {
+            self.perform_an_instant_scroll(cx, Vector2D::new(x, y), scroll_id, element);
+            return;
+        }
+
+        // The scroll tree clamps every step, but the duration and easing are computed from the
+        // distance actually travelled, so clamp the destination to the scroll range first.
+        let to = match element {
+            Some(element) if !scroll_id.is_root() => {
+                let scrolling_area = self
+                    .scrolling_area_query(Some(element.upcast()))
+                    .size
+                    .to_f32();
+                let client_size = element.client_rect().size.to_f32();
+                Vector2D::new(
+                    x.clamp(0., (scrolling_area.width - client_size.width).max(0.)),
+                    y.clamp(0., (scrolling_area.height - client_size.height).max(0.)),
+                )
+            },
+            _ => Vector2D::new(x, y),
+        };
+        let from = self.scroll_offset_query_with_external_scroll_id(scroll_id);
+        if from == to {
+            return;
+        }
+        self.smooth_scrolls.borrow_mut().push(SmoothScroll {
+            scroll_id,
+            element: element.map(Dom::from_ref),
+            from,
+            to,
+            start_time: Instant::now(),
+            duration: SmoothScroll::duration_for_distance((to - from).length()),
+        });
+        self.Document()
+            .add_rendering_update_reason(RenderingUpdateReason::SmoothScrollInProgress);
+    }
+
+    /// Moves every ongoing smooth scroll to its position for this frame. Called during
+    /// *update the rendering*, before the scroll steps, so the scroll events of this frame's
+    /// step are dispatched in the same rendering update.
+    pub(crate) fn advance_smooth_scrolls(&self, cx: &mut JSContext) {
+        if self.smooth_scrolls.borrow().is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let steps: Vec<_> = self
+            .smooth_scrolls
+            .borrow()
+            .iter()
+            .map(|smooth_scroll| {
+                let (position, _) = smooth_scroll.position_at(now);
+                (
+                    smooth_scroll.scroll_id,
+                    smooth_scroll.element.as_deref().map(DomRoot::from_ref),
+                    position,
+                )
+            })
+            .collect();
+        self.smooth_scrolls
+            .borrow_mut()
+            .retain(|smooth_scroll| !smooth_scroll.position_at(now).1);
+        for (scroll_id, element, position) in steps {
+            self.perform_an_instant_scroll(cx, position, scroll_id, element.as_deref());
+        }
+        if !self.smooth_scrolls.borrow().is_empty() {
+            self.Document()
+                .add_rendering_update_reason(RenderingUpdateReason::SmoothScrollInProgress);
+        }
+    }
+
+    /// <https://drafts.csswg.org/cssom-view/#concept-instant-scroll>
+    fn perform_an_instant_scroll(
+        &self,
+        cx: &mut JSContext,
+        position: Vector2D<f32, LayoutPixel>,
+        scroll_id: ExternalScrollId,
+        element: Option<&Element>,
+    ) {
+        let (reflow_phases_run, _) =
+            self.reflow(cx, ReflowGoal::UpdateScrollNode(scroll_id, position));
         if reflow_phases_run.needs_frame() {
             self.paint_api()
                 .generate_frame(vec![self.webview_id().into()]);
@@ -3081,6 +3252,16 @@ impl Window {
             .unwrap_or_default()
     }
 
+    pub(crate) fn scroll_id_for_element(&self, element: &Element) -> ExternalScrollId {
+        ExternalScrollId(
+            combine_id_with_fragment_type(
+                element.upcast::<Node>().to_opaque().id(),
+                FragmentType::FragmentBody,
+            ),
+            self.pipeline_id().into(),
+        )
+    }
+
     /// <https://drafts.csswg.org/cssom-view/#scroll-an-element>
     // TODO(stevennovaryo): Need to update the scroll API to follow the spec since it is quite outdated.
     pub(crate) fn scroll_an_element(
@@ -3091,13 +3272,7 @@ impl Window {
         y: f32,
         behavior: ScrollBehavior,
     ) {
-        let scroll_id = ExternalScrollId(
-            combine_id_with_fragment_type(
-                element.upcast::<Node>().to_opaque().id(),
-                FragmentType::FragmentBody,
-            ),
-            self.pipeline_id().into(),
-        );
+        let scroll_id = self.scroll_id_for_element(element);
 
         // Step 6.
         // > Perform a scroll of box to position, element as the associated element and behavior as
@@ -3995,6 +4170,7 @@ impl Window {
             pending_layout_images: Default::default(),
             pending_images_for_rasterization: Default::default(),
             pending_svg_serialization: Default::default(),
+            smooth_scrolls: Default::default(),
             unminified_css_dir: DomRefCell::new(if unminify_css {
                 Some(unminified_path("unminified-css"))
             } else {

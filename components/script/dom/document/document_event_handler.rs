@@ -48,6 +48,7 @@ use servo_constellation_traits::{KeyboardScroll, ScriptToConstellationMessage};
 use style::Atom;
 use style_traits::CSSPixel;
 use webrender_api::ExternalScrollId;
+use webrender_api::units::LayoutVector2D;
 
 use crate::dom::execcommand::basecommand::CommandName;
 #[cfg(feature = "gamepad")]
@@ -2308,10 +2309,20 @@ impl DocumentEventHandler {
     /// Handle a scroll event triggered by user interactions from the embedder.
     /// <https://drafts.csswg.org/cssom-view/#scrolling-events>
     #[expect(unsafe_code)]
-    pub(crate) fn handle_embedder_scroll_event(&self, scrolled_node: ExternalScrollId) {
+    pub(crate) fn handle_embedder_scroll_event(
+        &self,
+        scrolled_node: ExternalScrollId,
+        previous_offset: Option<LayoutVector2D>,
+    ) {
+        // The user scrolling a box takes over from any smooth scroll script started on it.
+        self.window.abort_smooth_scroll(scrolled_node);
+
         // If it is a viewport scroll.
         let document = self.window.Document();
         if scrolled_node.is_root() {
+            if let Some(previous_offset) = previous_offset {
+                document.note_user_scroll_origin(document.upcast(), previous_offset);
+            }
             document.handle_viewport_scroll_event();
         } else {
             // Otherwise, check whether it is for a relevant element within the document. For a `::before` or `::after`
@@ -2328,6 +2339,9 @@ impl DocumentEventHandler {
                 return;
             };
 
+            if let Some(previous_offset) = previous_offset {
+                document.note_user_scroll_origin(element.upcast(), previous_offset);
+            }
             element.handle_scroll_event();
         }
     }
@@ -2497,27 +2511,29 @@ impl DocumentEventHandler {
             const LINE_WIDTH: f32 = 76.0;
 
             let current_scroll_offset = scrolling_box.scroll_position();
-            (
-                current_scroll_offset,
-                match scroll {
-                    KeyboardScroll::Home => Vector2D::new(0.0, -current_scroll_offset.y),
-                    KeyboardScroll::End => Vector2D::new(
-                        0.0,
-                        -current_scroll_offset.y + scrolling_box.content_size().height -
-                            scrolling_box.size().height,
-                    ),
-                    KeyboardScroll::PageDown => {
-                        Vector2D::new(0.0, scrolling_box.size().height - 2.0 * LINE_HEIGHT)
-                    },
-                    KeyboardScroll::PageUp => {
-                        Vector2D::new(0.0, 2.0 * LINE_HEIGHT - scrolling_box.size().height)
-                    },
-                    KeyboardScroll::Up => Vector2D::new(0.0, -LINE_HEIGHT),
-                    KeyboardScroll::Down => Vector2D::new(0.0, LINE_HEIGHT),
-                    KeyboardScroll::Left => Vector2D::new(-LINE_WIDTH, 0.0),
-                    KeyboardScroll::Right => Vector2D::new(LINE_WIDTH, 0.0),
+            let delta = match scroll {
+                KeyboardScroll::Home => Vector2D::new(0.0, -current_scroll_offset.y),
+                KeyboardScroll::End => Vector2D::new(
+                    0.0,
+                    -current_scroll_offset.y + scrolling_box.content_size().height -
+                        scrolling_box.size().height,
+                ),
+                KeyboardScroll::PageDown => {
+                    Vector2D::new(0.0, scrolling_box.size().height - 2.0 * LINE_HEIGHT)
                 },
-            )
+                KeyboardScroll::PageUp => {
+                    Vector2D::new(0.0, 2.0 * LINE_HEIGHT - scrolling_box.size().height)
+                },
+                KeyboardScroll::Up => Vector2D::new(0.0, -LINE_HEIGHT),
+                KeyboardScroll::Down => Vector2D::new(0.0, LINE_HEIGHT),
+                KeyboardScroll::Left => Vector2D::new(-LINE_WIDTH, 0.0),
+                KeyboardScroll::Right => Vector2D::new(LINE_WIDTH, 0.0),
+            };
+            // Keyboard scrolls are directional: in a snap container they move on to the next
+            // snap position in their direction, even one further away than the scroll amount.
+            let snapped = scrolling_box
+                .snapped_position(current_scroll_offset + delta, Some(current_scroll_offset));
+            (current_scroll_offset, snapped - current_scroll_offset)
         };
 
         // If trying to scroll the viewport of this `Window` and this is the root `Document`
