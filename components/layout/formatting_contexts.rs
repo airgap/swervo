@@ -32,7 +32,7 @@ use crate::table::Table;
 use crate::taffy::TaffyContainer;
 use crate::{
     ArcRefCell, ConstraintSpace, ContainingBlock, IndefiniteContainingBlock, LogicalVec2,
-    PropagatedBoxTreeData, SizeConstraint,
+    PropagatedBoxTreeData,
 };
 
 /// <https://drafts.csswg.org/css-display/#independent-formatting-context>
@@ -295,28 +295,23 @@ impl IndependentFormattingContext {
         let result = self
             .base
             .inline_content_sizes(layout_context, constraint_space, &self.contents);
-        // <https://drafts.csswg.org/css-sizing-4/#aspect-ratio-size-transfers>: a non-replaced
-        // box with an `aspect-ratio` and a definite block size takes its automatic inline size
-        // from the ratio (an inline-block with `height: 50px; aspect-ratio: 2` is 100px wide),
-        // but no narrower than its min-content size. Replaced boxes transfer in their own
-        // content sizes.
+        // Replaced boxes transfer their aspect ratio in their own content sizes.
         if self.is_replaced() {
             return result;
         }
-        let (Some(ratio), SizeConstraint::Definite(block_size)) =
-            (constraint_space.preferred_aspect_ratio, constraint_space.block_size)
-        else {
+        let Some(ratio) = constraint_space.preferred_aspect_ratio else {
             return result;
         };
-        let inline_size = ratio
-            .compute_dependent_size(Direction::Inline, block_size)
-            .max(result.sizes.min_content);
-        InlineContentSizesResult {
-            sizes: ContentSizes {
-                min_content: inline_size,
-                max_content: inline_size,
+        match sizing::content_sizes_with_aspect_ratio(
+            result.sizes,
+            ratio,
+            constraint_space.block_size,
+        ) {
+            Some(sizes) => InlineContentSizesResult {
+                sizes,
+                depends_on_block_constraints: true,
             },
-            depends_on_block_constraints: true,
+            None => result,
         }
     }
 

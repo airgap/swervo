@@ -767,6 +767,89 @@ impl Sizes {
     }
 }
 
+/// <https://drafts.csswg.org/css-sizing-4/#aspect-ratio-size-transfers>: the content sizes of a
+/// non-replaced box with a preferred aspect ratio, given the block size constraint it is laid
+/// out with. A definite block size gives the inline size through the ratio, but no narrower
+/// than the min-content size; otherwise the min and max block sizes are transferred through the
+/// ratio and clamp both content sizes. Returns `None` when nothing is transferred.
+pub(crate) fn content_sizes_with_aspect_ratio(
+    content_sizes: ContentSizes,
+    preferred_aspect_ratio: AspectRatio,
+    block_size: SizeConstraint,
+) -> Option<ContentSizes> {
+    match block_size {
+        SizeConstraint::Definite(block_size) => Some(
+            preferred_aspect_ratio
+                .compute_dependent_size(Direction::Inline, block_size)
+                .max(content_sizes.min_content)
+                .into(),
+        ),
+        SizeConstraint::MinMax(min, None) if min.is_zero() => None,
+        SizeConstraint::MinMax(min, max) => {
+            let (min, max) = transferred_inline_extremums(preferred_aspect_ratio, min, max);
+            Some(content_sizes.map(|size| size.clamp_between_extremums(min, max)))
+        },
+    }
+}
+
+/// <https://drafts.csswg.org/css-sizing-4/#aspect-ratio-size-transfers>: the automatic inline
+/// size of a non-replaced box with a preferred aspect ratio. If it would stretch, a definite
+/// block size instead gives the inline size through the ratio (which the content sizes carry,
+/// see [`content_sizes_with_aspect_ratio`]), and otherwise the stretch size is clamped by the
+/// min and max block sizes transferred through the ratio: `width: auto; max-height: 200px;
+/// aspect-ratio: 1 / 2` is 100px wide.
+pub(crate) fn automatic_inline_size_with_aspect_ratio(
+    automatic_size: Size<Au>,
+    preferred_aspect_ratio: Option<AspectRatio>,
+    is_replaced: bool,
+    block_size: SizeConstraint,
+    stretch_size: Au,
+) -> Size<Au> {
+    let (false, Size::Stretch, Some(ratio)) =
+        (is_replaced, &automatic_size, preferred_aspect_ratio)
+    else {
+        return automatic_size;
+    };
+    match block_size {
+        SizeConstraint::Definite(_) => Size::FitContent,
+        SizeConstraint::MinMax(min, max) => {
+            let (min, max) = transferred_inline_extremums(ratio, min, max);
+            Size::Numeric(stretch_size.clamp_between_extremums(min, max))
+        },
+    }
+}
+
+/// The min and max block sizes transferred to the inline axis through the ratio. A zero minimum
+/// stays zero, like in Blink, so that `box-sizing: border-box` doesn't turn it into a
+/// non-zero inline minimum.
+fn transferred_inline_extremums(ratio: AspectRatio, min: Au, max: Option<Au>) -> (Au, Option<Au>) {
+    let transfer = |size| ratio.compute_dependent_size(Direction::Inline, size);
+    let min = if min.is_zero() { min } else { transfer(min) };
+    (min, max.map(transfer))
+}
+
+/// <https://drafts.csswg.org/css-sizing-4/#aspect-ratio>: the block size that a non-replaced box
+/// with a preferred aspect ratio and an `auto` block size takes from its inline size, clamped by
+/// its min and max block sizes. Its content can still make it taller.
+pub(crate) fn block_size_from_aspect_ratio(
+    preferred_aspect_ratio: Option<AspectRatio>,
+    is_replaced: bool,
+    block_sizes: &Sizes,
+    block_stretch_size: Option<Au>,
+    inline_size: Au,
+) -> Option<Au> {
+    if is_replaced || !block_sizes.preferred.is_initial() {
+        return None;
+    }
+    let (_, min, max) =
+        block_sizes.resolve_each_extrinsic(Size::FitContent, Au::zero(), block_stretch_size);
+    Some(
+        preferred_aspect_ratio?
+            .compute_dependent_size(Direction::Block, inline_size)
+            .clamp_between_extremums(min, max),
+    )
+}
+
 struct LazySizeData<'a> {
     sizes: &'a Sizes,
     axis: Direction,

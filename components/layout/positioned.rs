@@ -28,7 +28,7 @@ use crate::geom::{
     PhysicalSides, PhysicalSize, PhysicalVec, ToLogical, ToLogicalWithContainingBlock,
 };
 use crate::layout_box_base::{IndependentFormattingContextLayoutResult, LayoutBoxBase};
-use crate::sizing::{LazySize, Size, SizeConstraint, Sizes};
+use crate::sizing::{self, LazySize, Size, SizeConstraint, Sizes};
 use crate::style_ext::{Clamp, ComputedValuesExt, ContentBoxSizesAndPBM, DisplayInside};
 use crate::{
     ConstraintSpace, ContainingBlock, ContainingBlockSize, DefiniteContainingBlock,
@@ -639,19 +639,45 @@ impl IndependentFormattingContext {
             self.inline_content_sizes(layout_context, &constraint_space)
                 .sizes
         };
+        // TODO: With insets on both block sides, Blink lets the aspect ratio override the
+        // stretched automatic block size when the inline size is stretched or definite.
+        let aspect_ratio_applies = !matches!(block_automatic_size, Size::Stretch);
+        let inline_automatic_size = if aspect_ratio_applies {
+            sizing::automatic_inline_size_with_aspect_ratio(
+                inline_axis_solver.automatic_size(),
+                preferred_aspect_ratio,
+                self.is_replaced(),
+                tentative_block_size,
+                inline_stretch_size,
+            )
+        } else {
+            inline_axis_solver.automatic_size()
+        };
         let inline_size = inline_axis_solver.computed_sizes.resolve(
             Direction::Inline,
-            inline_axis_solver.automatic_size(),
+            inline_automatic_size,
             Au::zero,
             Some(inline_stretch_size),
             get_inline_content_size,
             is_table,
         );
 
+        let aspect_ratio_block_size = aspect_ratio_applies
+            .then(|| {
+                sizing::block_size_from_aspect_ratio(
+                    preferred_aspect_ratio,
+                    self.is_replaced(),
+                    &block_axis_solver.computed_sizes,
+                    block_stretch_size,
+                    inline_size,
+                )
+            })
+            .flatten();
         let containing_block_for_children = ContainingBlock {
             size: ContainingBlockSize {
                 inline: inline_size,
-                block: tentative_block_size,
+                block: aspect_ratio_block_size
+                    .map_or(tentative_block_size, SizeConstraint::Definite),
             },
             style: &style,
         };
@@ -694,7 +720,8 @@ impl IndependentFormattingContext {
             inline: content_inline_size_for_table.unwrap_or(inline_size),
 
             // Now we can properly solve the block size.
-            block: lazy_block_size.resolve(|| content_block_size),
+            block: lazy_block_size
+                .resolve(|| content_block_size.max(aspect_ratio_block_size.unwrap_or_default())),
         };
 
         let inline_margins = inline_axis_solver.solve_margins(content_size.inline);
