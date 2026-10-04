@@ -41,6 +41,7 @@ use servo_media::player::video::{VideoFrame, VideoFrameRenderer};
 use servo_media::player::{PlaybackState, Player, PlayerError, PlayerEvent, SeekLock, StreamType};
 use servo_media::{ClientContextId, ServoMedia, SupportsMediaType};
 use servo_url::ServoUrl;
+use style::computed_values::visibility::T as Visibility;
 use stylo_atoms::Atom;
 use uuid::Uuid;
 use webrender_api::{
@@ -88,12 +89,13 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::html::htmlelement::HTMLElement;
 use crate::dom::html::htmlsourceelement::HTMLSourceElement;
 use crate::dom::html::htmlvideoelement::HTMLVideoElement;
+use crate::dom::iterators::ShadowIncluding;
 use crate::dom::mediaerror::MediaError;
 use crate::dom::mediafragmentparser::MediaFragmentParser;
 use crate::dom::medialist::MediaList;
 use crate::dom::mediastream::MediaStream;
 use crate::dom::node::virtualmethods::VirtualMethods;
-use crate::dom::node::{Node, NodeDamage, NodeTraits, UnbindContext};
+use crate::dom::node::{BindContext, Node, NodeDamage, NodeTraits, UnbindContext};
 use crate::dom::performance::performanceresourcetiming::InitiatorType;
 use crate::dom::promise::Promise;
 use crate::dom::texttrack::TextTrack;
@@ -189,6 +191,11 @@ pub(crate) struct MediaFrameRenderer {
     current_frame_holder: Option<FrameHolder>,
     /// <https://html.spec.whatwg.org/multipage/#poster-frame>
     poster_frame: Option<MediaFrame>,
+    /// Whether the element paints its frames, see [`Self::set_painted`].
+    painted: bool,
+    /// The newest frame decoded while the element did not paint, which it sends once it does.
+    #[ignore_malloc_size_of = "defined in servo-media"]
+    unsent_frame: Option<VideoFrame>,
 }
 
 impl MediaFrameRenderer {
@@ -208,6 +215,8 @@ impl MediaFrameRenderer {
             very_old_frame: None,
             current_frame_holder: None,
             poster_frame: None,
+            painted: true,
+            unsent_frame: None,
         }
     }
 
@@ -277,6 +286,7 @@ impl MediaFrameRenderer {
         }
 
         self.current_frame_holder = None;
+        self.unsent_frame = None;
 
         let mut updates = smallvec::smallvec![];
 
@@ -295,6 +305,31 @@ impl MediaFrameRenderer {
         if !updates.is_empty() {
             self.paint_api
                 .update_images(self.webview_id.into(), updates);
+        }
+    }
+
+    /// Every decoded frame is copied into shared memory and again by the renderer, and for
+    /// large videos that cost made the renderer fall behind, so frames of an element that
+    /// doesn't paint (hidden, transparent, or without a box) are held back instead. Returns
+    /// whether this sent a frame held back while the element didn't paint, which the element
+    /// then has to show.
+    fn set_painted(&mut self, painted: bool) -> bool {
+        self.painted = painted;
+        if !painted {
+            return false;
+        }
+        let Some(frame) = self.unsent_frame.take() else {
+            return false;
+        };
+        self.render(frame);
+        true
+    }
+
+    /// The size of the newest decoded frame, sent or not.
+    fn newest_frame_size(&self) -> Option<(i32, i32)> {
+        match &self.unsent_frame {
+            Some(frame) => Some((frame.get_width(), frame.get_height())),
+            None => self.current_frame.map(|frame| (frame.width, frame.height)),
         }
     }
 
@@ -320,6 +355,14 @@ impl VideoFrameRenderer for MediaFrameRenderer {
         if self.player_id.is_none() ||
             (frame.is_gl_texture() && self.glplayer_id.read().unwrap().is_none())
         {
+            return;
+        }
+
+        if !self.painted {
+            self.current_frame_holder
+                .get_or_insert_with(|| FrameHolder::new(frame.clone()))
+                .set(frame.clone());
+            self.unsent_frame = Some(frame);
             return;
         }
 
@@ -2721,16 +2764,44 @@ impl HTMLMediaElement {
             return;
         }
 
-        if let Some(frame) = self.video_renderer.lock().unwrap().current_frame {
-            if video_element
-                .set_natural_dimensions(Some(frame.width as u32), Some(frame.height as u32))
-            {
+        let (frame_size, painted) = {
+            let video_renderer = self.video_renderer.lock().unwrap();
+            (video_renderer.newest_frame_size(), video_renderer.painted)
+        };
+        if let Some((width, height)) = frame_size {
+            if video_element.set_natural_dimensions(Some(width as u32), Some(height as u32)) {
                 self.queue_media_element_task_to_fire_event(atom!("resize"));
-            } else {
+            } else if painted {
                 // If the natural dimensions have not been changed, the node should be marked as
                 // damaged to force a repaint with the new frame contents.
                 self.upcast::<Node>().dirty(NodeDamage::Other);
             }
+        }
+    }
+
+    /// Lets the frame renderer know whether this video paints, after a rendering update.
+    pub(crate) fn update_whether_frames_are_painted(&self) {
+        let element = self.upcast::<Element>();
+        let shown = element.style_from_last_restyle().is_some_and(|style| {
+            !style.get_box().clone_display().is_none() &&
+                style.get_inherited_box().visibility == Visibility::Visible
+        });
+        let transparent = self
+            .upcast::<Node>()
+            .inclusive_ancestors(ShadowIncluding::Yes)
+            .filter_map(DomRoot::downcast::<Element>)
+            .any(|ancestor| {
+                ancestor
+                    .style_from_last_restyle()
+                    .is_some_and(|style| style.get_effects().opacity == 0.)
+            });
+        if self
+            .video_renderer
+            .lock()
+            .unwrap()
+            .set_painted(shown && !transparent)
+        {
+            self.upcast::<Node>().dirty(NodeDamage::Other);
         }
     }
 
@@ -3536,9 +3607,17 @@ impl VirtualMethods for HTMLMediaElement {
         };
     }
 
+    fn bind_to_tree(&self, cx: &mut JSContext, context: &BindContext) {
+        self.super_type().unwrap().bind_to_tree(cx, context);
+        if context.tree_connected && self.is::<HTMLVideoElement>() {
+            self.owner_document().register_video_element(self);
+        }
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#playing-the-media-resource:remove-an-element-from-a-document>
     fn unbind_from_tree(&self, cx: &mut JSContext, context: &UnbindContext) {
         self.super_type().unwrap().unbind_from_tree(cx, context);
+        self.owner_document().unregister_video_element(self);
 
         self.remove_controls();
 

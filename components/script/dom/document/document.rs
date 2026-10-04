@@ -171,6 +171,7 @@ use crate::dom::html::htmlheadelement::HTMLHeadElement;
 use crate::dom::html::htmlhtmlelement::HTMLHtmlElement;
 use crate::dom::html::htmliframeelement::HTMLIFrameElement;
 use crate::dom::html::htmlimageelement::HTMLImageElement;
+use crate::dom::html::htmlmediaelement::HTMLMediaElement;
 use crate::dom::html::htmlscriptelement::{HTMLScriptElement, ScriptResult};
 use crate::dom::html::htmltitleelement::HTMLTitleElement;
 use crate::dom::htmldetailselement::DetailsNameGroups;
@@ -581,6 +582,10 @@ pub(crate) struct Document {
     fired_unload: Cell<bool>,
     /// List of responsive images
     responsive_images: DomRefCell<Vec<Dom<HTMLImageElement>>>,
+
+    /// The connected `<video>` elements, whose frame renderers learn after each rendering
+    /// update whether they paint.
+    video_elements: DomRefCell<Vec<Dom<HTMLMediaElement>>>,
 
     /// [`NavigationTiming`] information for this [`Document`].
     #[no_trace]
@@ -3349,6 +3354,16 @@ impl Document {
         }
     }
 
+    pub(crate) fn register_video_element(&self, video: &HTMLMediaElement) {
+        self.video_elements.borrow_mut().push(Dom::from_ref(video));
+    }
+
+    pub(crate) fn unregister_video_element(&self, video: &HTMLMediaElement) {
+        self.video_elements
+            .borrow_mut()
+            .retain(|element| **element != *video);
+    }
+
     pub(crate) fn register_media_controls(&self, id: &str, controls: &ShadowRoot) {
         let did_have_these_media_controls = self
             .media_controls
@@ -3467,6 +3482,9 @@ impl Document {
 
         let (reflow_phases, statistics) = self.window().reflow(cx, ReflowGoal::UpdateTheRendering);
         let phases = phases.union(reflow_phases);
+        for video in self.video_elements.borrow().iter() {
+            video.update_whether_frames_are_painted();
+        }
 
         self.window().paint_api().update_epoch(
             self.webview_id(),
@@ -4191,6 +4209,7 @@ impl Document {
             active_parser_was_aborted: Cell::new(false),
             fired_unload: Cell::new(false),
             responsive_images: Default::default(),
+            video_elements: Default::default(),
             navigation_timing: Default::default(),
             resource_fetch_timing: RefCell::new(None),
             completely_loaded: Cell::new(false),
