@@ -285,26 +285,28 @@ impl LayoutBoxBase {
         child_positioning_context: &PositioningContext,
         result: &IndependentFormattingContextLayoutResult,
     ) {
-        self.cached_layout_result_dirty
-            .store(false, Ordering::Relaxed);
+        let was_dirty = self
+            .cached_layout_result_dirty
+            .swap(false, Ordering::Relaxed);
         let entry = Box::new(IndependentFormattingContextLayoutResultAndInputs {
             result: result.clone(),
             positioning_context: child_positioning_context.clone(),
             containing_block_for_children_size: containing_block_for_children.size.clone(),
             lazy_block_size,
         });
-        // This layout replaced the fragments that the boxes of the contents keep for layout
-        // queries, so the slot not written here no longer matches them and must go. Otherwise
-        // a table cell laid out at one size and then reused from a result at another size
-        // would answer `getBoundingClientRect()` with a fragment that isn't in the tree.
+        // Clearing the dirty flag revalidates both slots, so the one not written here must go.
         match lazy_block_size {
             LazySizeKind::Fixed(_) => {
-                *self.cached_measure_result.borrow_mut() = None;
+                if was_dirty {
+                    *self.cached_measure_result.borrow_mut() = None;
+                }
                 *self.cached_layout_result.borrow_mut() =
                     Some(LayoutResultAndInputs::IndependentFormattingContext(entry));
             },
             LazySizeKind::Intrinsic | LazySizeKind::Constrained => {
-                *self.cached_layout_result.borrow_mut() = None;
+                if was_dirty {
+                    *self.cached_layout_result.borrow_mut() = None;
+                }
                 *self.cached_measure_result.borrow_mut() = Some(entry);
             },
         }
