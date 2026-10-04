@@ -429,6 +429,12 @@ pub trait Layout {
         exclude_transform_and_inline: bool,
     ) -> Option<Rect<Au, CSSPixel>>;
     fn query_box_areas(&self, node: TrustedNodeAddress, area: BoxAreaType) -> CSSPixelRectVec;
+    /// Query the boxes of the glyphs for the given range, in UTF-16 code units, of a text node.
+    fn query_text_range_rects(
+        &self,
+        node: TrustedNodeAddress,
+        utf16_range: Range<usize>,
+    ) -> CSSPixelRectVec;
     fn query_client_rect(&self, node: TrustedNodeAddress) -> Rect<i32, CSSPixel>;
     fn query_current_css_zoom(&self, node: TrustedNodeAddress) -> f32;
     fn query_element_inner_outer_text(&self, node: TrustedNodeAddress) -> String;

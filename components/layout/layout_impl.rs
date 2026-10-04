@@ -6,6 +6,7 @@
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::atomic::Ordering;
 use std::fmt::Debug;
 use std::rc::Rc;
@@ -96,7 +97,7 @@ use crate::query::{
     process_current_css_zoom_query, process_effective_overflow_query,
     process_node_scroll_area_request, process_offset_parent_query, process_padding_request,
     process_resolved_font_style_query, process_resolved_style_request,
-    process_scroll_container_query,
+    process_scroll_container_query, process_text_range_rects_request,
 };
 use crate::fragment_tree::Fragment;
 use crate::traversal::{RecalcStyle, compute_damage_and_rebuild_box_tree};
@@ -483,6 +484,30 @@ impl Layout for LayoutThread {
                 stacking_context_tree,
                 node,
                 area,
+            ))
+        })
+        .unwrap_or_default()
+    }
+
+    /// Get the bounding boxes of the glyphs for a range of a text node's data, one per line box,
+    /// in the coordinate space of the Document. This is used to implement `Range.getClientRects()`.
+    ///
+    /// See <https://drafts.csswg.org/cssom-view/#dom-range-getclientrects>.
+    #[servo_tracing::instrument(skip_all)]
+    fn query_text_range_rects(
+        &self,
+        node: TrustedNodeAddress,
+        utf16_range: Range<usize>,
+    ) -> CSSPixelRectVec {
+        with_layout_state(|| {
+            let node = unsafe { ServoLayoutNode::new(&node) };
+            let stacking_context_tree = self.stacking_context_tree.borrow();
+            let stacking_context_tree = stacking_context_tree.as_ref()?;
+            Some(process_text_range_rects_request(
+                self,
+                stacking_context_tree,
+                node,
+                utf16_range,
             ))
         })
         .unwrap_or_default()

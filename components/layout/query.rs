@@ -4,12 +4,13 @@
 
 //! Utilities for querying the layout, as needed by layout.
 use std::cell::LazyCell;
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use app_units::Au;
 use embedder_traits::UntrustedNodeAddress;
-use euclid::{Point2D, Rect, Size2D};
+use euclid::{Point2D, Rect, Size2D, Vector2D};
 use itertools::Itertools;
 use layout_api::{
     AxesOverflow, BoxAreaType, CSSPixelRectVec, DangerousStyleElementOf, LayoutElement,
@@ -49,10 +50,14 @@ use style_traits::{CSSPixel, ParsingMode, ToCss};
 
 use crate::cell::RefOrAtomicRef;
 use crate::display_list::{StackingContextTree, au_rect_to_length_rect};
-use crate::dom::NodeExt;
-use crate::flow::inline::construct::{TextTransformation, WhitespaceCollapse, capitalize_string};
+use crate::dom::{NodeExt, WeakLayoutBox};
+use crate::flow::inline::construct::{
+    InlineFormattingContextBuilder, TextTransformation, WhitespaceCollapse, capitalize_string,
+    rendered_characters,
+};
+use crate::flow::inline::text_run::TextRunNodeSegment;
 use crate::fragment_tree::{
-    BoxFragment, Fragment, FragmentFlags, FragmentTree, SpecificLayoutInfo, TextFragment,
+    BoxFragment, Fragment, FragmentFlags, FragmentTree, SpecificLayoutInfo, Tag, TextFragment,
 };
 use crate::layout_impl::LayoutThread;
 use crate::style_ext::ComputedValuesExt;
@@ -148,6 +153,206 @@ pub(crate) fn process_box_areas_request(
     fragments
         .filter_map(move |rect| transform_au_rectangle(rect, transform))
         .collect()
+}
+
+/// Get the rectangles of the glyphs for the part of a text node's data in `utf16_range`, one per
+/// text fragment (so one per line box), in the same coordinate space as
+/// [`process_box_areas_request`]. This is used to implement `Range.getClientRects()`.
+///
+/// See <https://drafts.csswg.org/cssom-view/#dom-range-getclientrects>.
+pub(crate) fn process_text_range_rects_request(
+    layout_thread: &LayoutThread,
+    stacking_context_tree: &StackingContextTree,
+    node: ServoLayoutNode<'_>,
+    utf16_range: Range<usize>,
+) -> CSSPixelRectVec {
+    let Some(text_run) = node.text_run() else {
+        return Vec::new();
+    };
+    let text_run = text_run.borrow();
+    let opaque_node = node.opaque();
+    let Some(segment) = text_run
+        .node_segments
+        .iter()
+        .find(|segment| segment.node == opaque_node)
+    else {
+        return Vec::new();
+    };
+    let Some(parent_box) = text_run.parent_box.as_ref().and_then(WeakLayoutBox::upgrade) else {
+        return Vec::new();
+    };
+    let Some(parent_fragments) = parent_box.with_base(|base| base.fragments().clone()) else {
+        return Vec::new();
+    };
+
+    let character_range = character_range_for_utf16_range(
+        &node.text_content(),
+        segment,
+        &text_run.inline_styles.style.borrow(),
+        utf16_range,
+    );
+
+    let mut rects = Vec::new();
+    for fragment in &parent_fragments {
+        let Some(content_rect) =
+            fragment.cumulative_box_area_rect(BoxAreaType::Content, layout_thread.into())
+        else {
+            continue;
+        };
+        collect_text_range_rects(
+            fragment,
+            content_rect.origin.to_vector(),
+            text_run.base_fragment_info.tag,
+            &character_range,
+            &mut rects,
+        );
+    }
+
+    // A collapsed range sits at the end of one line and the start of the next when it is at a
+    // soft wrap opportunity; it only has one position.
+    if character_range.is_empty() {
+        rects.truncate(1);
+    }
+
+    let transform = parent_fragments
+        .first()
+        .and_then(Fragment::retrieve_box_fragment)
+        .and_then(|box_fragment| box_fragment.spatial_tree_node())
+        .map(|scroll_tree_node_id| {
+            stacking_context_tree
+                .paint_info
+                .scroll_tree
+                .cumulative_node_to_root_transform(scroll_tree_node_id)
+        });
+    let Some(transform) = transform else {
+        return rects
+            .into_iter()
+            .map(|rect| Rect::new(rect.origin, Size2D::zero()))
+            .collect();
+    };
+    rects
+        .into_iter()
+        .filter_map(|rect| transform_au_rectangle(rect, transform))
+        .collect()
+}
+
+/// Collect the rectangles for `character_range` of the text fragments with `tag` that are
+/// children of `fragment`, looking through anonymous fragments such as line boxes.
+/// `children_offset` is the origin of the coordinate space of `fragment`'s children.
+fn collect_text_range_rects(
+    fragment: &Fragment,
+    children_offset: Vector2D<Au, CSSPixel>,
+    tag: Option<Tag>,
+    character_range: &Range<usize>,
+    rects: &mut CSSPixelRectVec,
+) {
+    let Some(children) = fragment.children() else {
+        return;
+    };
+    for child in children.iter() {
+        match child {
+            Fragment::Text(text_fragment) if text_fragment.base.tag == tag => {
+                let Some(rect) = text_fragment
+                    .rect_for_character_range(character_range)
+                    .map(|rect| rect.translate(children_offset))
+                else {
+                    continue;
+                };
+                // Line layout may split the text of a line into several fragments (for instance
+                // at every soft wrap opportunity), but the result should have one box per run of
+                // text in a line box, like other engines.
+                match rects.last_mut() {
+                    Some(last)
+                        if last.origin.y == rect.origin.y &&
+                            last.size.height == rect.size.height &&
+                            last.max_x() == rect.min_x() =>
+                    {
+                        last.size.width += rect.size.width;
+                    },
+                    _ => rects.push(rect),
+                }
+            },
+            Fragment::Box(..) | Fragment::Positioning(..) if child.tag().is_none() => {
+                let child_origin = child.base().expect("Has a base").rect().origin;
+                collect_text_range_rects(
+                    child,
+                    children_offset + child_origin.to_vector(),
+                    tag,
+                    character_range,
+                    rects,
+                );
+            },
+            _ => {},
+        }
+    }
+}
+
+/// Map a range of UTF-16 offsets in a text node's data to the characters of the inline
+/// formatting context rendered from them. White space collapsing removes characters and
+/// `text-transform` may expand them, so this replays that transformation on the node's text
+/// and aligns its output with the source characters.
+fn character_range_for_utf16_range(
+    text: &str,
+    segment: &TextRunNodeSegment,
+    style: &ComputedValues,
+    utf16_range: Range<usize>,
+) -> Range<usize> {
+    let source = &text[segment.text_offset..];
+    let rendered: Vec<char> = rendered_characters(
+        source,
+        style,
+        segment.trim_beginning_white_space,
+        segment.starts_on_word_boundary,
+    )
+    .collect();
+
+    // How many rendered characters, at the start of `rest`, came from `character`.
+    let rendered_count = |character: char, rest: &[char]| -> usize {
+        let Some(&next) = rest.first() else {
+            return 0;
+        };
+        if next == character {
+            return 1;
+        }
+        if InlineFormattingContextBuilder::is_document_white_space(character) {
+            // Collapsible white space is either rendered as a single space or removed.
+            return usize::from(next == ' ');
+        }
+        let starts_with = |expansion: &mut dyn Iterator<Item = char>| {
+            let mut count = 0;
+            for expected in expansion {
+                if rest.get(count) != Some(&expected) {
+                    return None;
+                }
+                count += 1;
+            }
+            Some(count)
+        };
+        starts_with(&mut character.to_uppercase())
+            .or_else(|| starts_with(&mut character.to_lowercase()))
+            .unwrap_or(1)
+    };
+
+    let mut utf16_offset = text[..segment.text_offset].encode_utf16().count();
+    let mut rendered_index = 0;
+    let mut start = None;
+    let mut end = None;
+    for character in source.chars() {
+        if start.is_none() && utf16_offset >= utf16_range.start {
+            start = Some(rendered_index);
+        }
+        if utf16_offset >= utf16_range.end {
+            end = Some(rendered_index);
+            break;
+        }
+        utf16_offset += character.len_utf16();
+        rendered_index += rendered_count(character, &rendered[rendered_index..]);
+    }
+    let start = start.unwrap_or(rendered_index);
+    let end = end.unwrap_or(rendered_index);
+
+    let base = segment.character_range.start;
+    (base + start).min(segment.character_range.end)..(base + end).min(segment.character_range.end)
 }
 
 pub fn process_client_rect_request(node: ServoLayoutNode<'_>) -> Rect<i32, CSSPixel> {

@@ -103,6 +103,10 @@ pub(crate) struct TextFragment {
     /// When necessary, this field store the [`TextRunOffsets`] for a particular
     /// [`TextRunLineItem`]. This is currently only used inside of text inputs.
     pub offsets: Option<Box<TextRunOffsets>>,
+    /// The index of the first character of `glyphs` within the characters of the inline
+    /// formatting context, or `None` for generated glyphs that have no DOM text. Used to
+    /// find the geometry of DOM text ranges.
+    pub character_start: Option<usize>,
     /// Whether or not this [`TextFragment`] is an empty fragment added for the
     /// benefit of placing a text cursor on an otherwise empty editable line.
     pub is_empty_for_text_cursor: bool,
@@ -447,6 +451,63 @@ impl TextFragment {
             .max(Au::zero())
             .max(point_in_fragment.y - rect.max_y());
         Au::from_f64_px((dx.to_f64_px().powi(2) + dy.to_f64_px().powi(2)).sqrt())
+    }
+
+    /// The rectangle, relative to this fragment's containing fragment, of the glyphs for the
+    /// characters in `character_range` (characters of the inline formatting context). Returns
+    /// `None` when this fragment holds none of those characters. A collapsed range yields a
+    /// zero-width rectangle at its position. The block size is the font's ascent plus descent,
+    /// matching what other engines report for the boxes of text.
+    ///
+    /// TODO: Right-to-left text, whose glyphs are stored in visual order, is not handled.
+    pub(crate) fn rect_for_character_range(
+        &self,
+        character_range: &std::ops::Range<usize>,
+    ) -> Option<PhysicalRect<Au>> {
+        let fragment_start = self.character_start?;
+        let fragment_end = fragment_start +
+            self.glyphs
+                .iter()
+                .map(|slice| slice.character_count())
+                .sum::<usize>();
+        let intersects = if character_range.is_empty() {
+            (fragment_start..=fragment_end).contains(&character_range.start)
+        } else {
+            character_range.start < fragment_end && character_range.end > fragment_start
+        };
+        if !intersects {
+            return None;
+        }
+
+        let mut start_advance = None;
+        let mut end_advance = None;
+        let mut character_index = fragment_start;
+        let mut advance = Au::zero();
+        for glyph in self.glyphs.iter().flat_map(|slice| slice.glyphs()) {
+            if start_advance.is_none() && character_index >= character_range.start {
+                start_advance = Some(advance);
+            }
+            if character_index >= character_range.end {
+                end_advance = Some(advance);
+                break;
+            }
+            character_index += glyph.character_count();
+            advance += glyph.advance();
+            if glyph.char_is_word_separator() {
+                advance += self.justification_adjustment;
+            }
+        }
+        let start_advance = start_advance.unwrap_or(advance);
+        let end_advance = end_advance.unwrap_or(advance);
+
+        let rect = self.base.rect();
+        Some(PhysicalRect::new(
+            PhysicalPoint::new(rect.origin.x + start_advance, rect.origin.y),
+            Size2D::new(
+                end_advance - start_advance,
+                self.font_metrics.ascent + self.font_metrics.descent,
+            ),
+        ))
     }
 
     /// Given a point relative to this [`TextFragment`], find the most appropriate

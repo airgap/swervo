@@ -22,6 +22,7 @@ use style::computed_values::font_variant_position::T as FontVariantPosition;
 use style::computed_values::text_rendering::T as TextRendering;
 use style::computed_values::white_space_collapse::T as WhiteSpaceCollapse;
 use style::computed_values::word_break::T as WordBreak;
+use style::dom::OpaqueNode;
 use style::properties::ComputedValues;
 use style::str::char_is_whitespace;
 use style::values::computed::{
@@ -255,7 +256,13 @@ impl TextRunSegment {
                 ifc.process_soft_wrap_opportunity();
             }
 
-            ifc.push_glyph_store_to_unbreakable_segment(run.clone(), text_run, &self.info, offsets);
+            ifc.push_glyph_store_to_unbreakable_segment(
+                run.clone(),
+                text_run,
+                &self.info,
+                offsets,
+                character_range_start,
+            );
             character_range_start = new_character_range_end;
         }
     }
@@ -443,6 +450,27 @@ pub(crate) struct TextRun {
     /// by things such as font and script as well as separating out hard line breaks.
     /// segments, and shaped.
     pub items: Vec<TextRunItem>,
+
+    /// The DOM text nodes whose text this [`TextRun`] holds, in order. Adjacent text nodes
+    /// with the same inline styles share a single [`TextRun`].
+    pub node_segments: Vec<TextRunNodeSegment>,
+}
+
+/// The part of a [`TextRun`] produced from one DOM text node. This allows mapping offsets in
+/// the DOM text to glyphs, which is needed for the geometry of DOM ranges.
+#[derive(Debug, MallocSizeOf)]
+pub(crate) struct TextRunNodeSegment {
+    pub node: OpaqueNode,
+    /// The byte offset in the node's text where the text given to layout starts. This is
+    /// non-zero when `::first-letter` took the start of the text.
+    pub text_offset: usize,
+    /// The range of characters in [`super::InlineFormattingContext::text_content`] produced
+    /// from this node's text.
+    pub character_range: Range<usize>,
+    /// The white space collapsing and capitalization state of the inline formatting context
+    /// before this text, needed to reproduce its transformation into rendered characters.
+    pub trim_beginning_white_space: bool,
+    pub starts_on_word_boundary: bool,
 }
 
 impl TextRun {
@@ -451,6 +479,7 @@ impl TextRun {
         inline_styles: SharedInlineStyles,
         text_range: Range<usize>,
         character_range: Range<usize>,
+        node_segment: Option<TextRunNodeSegment>,
         old_text_run: Option<ArcRefCell<TextRun>>,
     ) -> Self {
         // If there was a previous box tree layout of this text run, try to preserve the old shaped text.
@@ -464,6 +493,7 @@ impl TextRun {
             text_range,
             character_range,
             items,
+            node_segments: node_segment.into_iter().collect(),
         }
     }
 

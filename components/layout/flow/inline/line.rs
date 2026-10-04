@@ -616,6 +616,7 @@ impl LineItemLayout<'_, '_> {
                 glyphs: text_item.text,
                 justification_adjustment: self.justification_adjustment,
                 offsets: text_item.offsets,
+                character_start: text_item.character_start,
                 is_empty_for_text_cursor: text_item.is_empty_for_text_cursor,
             })),
             content_rect,
@@ -871,6 +872,10 @@ pub(super) struct TextRunLineItem {
     /// When necessary, this field store the [`TextRunOffsets`] for a particular
     /// [`TextRunLineItem`]. This is currently only used inside of text inputs.
     pub offsets: Option<Box<TextRunOffsets>>,
+    /// The index of the first character of `text` within the characters of the inline
+    /// formatting context, or `None` for generated glyphs (such as a `text-overflow`
+    /// ellipsis) that do not correspond to any text in the DOM.
+    pub character_start: Option<usize>,
     /// Whether or not this [`TextFragment`] is an empty fragment added for the
     /// benefit of placing a text cursor on an otherwise empty editable line.
     pub is_empty_for_text_cursor: bool,
@@ -925,11 +930,12 @@ impl TextRunLineItem {
             .position(|glyph| !glyph.is_whitespace())
             .unwrap_or(self.text.len());
 
-        *whitespace_trimmed += self
-            .text
-            .drain(0..index_of_first_non_whitespace)
-            .map(|glyph| glyph.total_advance())
-            .sum();
+        for glyph in self.text.drain(0..index_of_first_non_whitespace) {
+            *whitespace_trimmed += glyph.total_advance();
+            if let Some(character_start) = self.character_start.as_mut() {
+                *character_start += glyph.character_count();
+            }
+        }
 
         // Only keep going if we only encountered whitespace.
         self.text.is_empty()

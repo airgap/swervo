@@ -1359,6 +1359,7 @@ impl InlineFormattingContextLayout<'_> {
             inline_styles: self.ifc.shared_inline_styles.clone(),
             text: vec![ellipsis.clone()],
             offsets: None,
+            character_start: None,
             is_empty_for_text_cursor: false,
         };
 
@@ -1744,6 +1745,7 @@ impl InlineFormattingContextLayout<'_> {
         text_run: &TextRun,
         info: &Arc<FontAndScriptInfo>,
         offsets: Option<TextRunOffsets>,
+        character_start: usize,
     ) {
         let inline_advance = glyph_store.total_advance();
         let flags = if glyph_store.is_whitespace() {
@@ -1806,6 +1808,7 @@ impl InlineFormattingContextLayout<'_> {
                 inline_styles: text_run.inline_styles.clone(),
                 info: info.clone(),
                 offsets: offsets.map(Box::new),
+                character_start: Some(character_start),
                 is_empty_for_text_cursor: false,
             },
         ));
@@ -1848,6 +1851,7 @@ impl InlineFormattingContextLayout<'_> {
                 inline_styles: self.ifc.shared_inline_styles.clone(),
                 info: Arc::new(FontAndScriptInfo::simple_for_font(font)),
                 offsets: Some(Box::new(offsets)),
+                character_start: None,
                 is_empty_for_text_cursor: true,
             },
         ));

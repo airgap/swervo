@@ -2955,6 +2955,17 @@ impl Window {
             .query_box_areas(node.to_trusted_node_address(), area)
     }
 
+    pub(crate) fn text_range_rects_query(
+        &self,
+        node: &Node,
+        utf16_range: std::ops::Range<usize>,
+    ) -> CSSPixelRectVec {
+        self.layout_reflow(QueryMsg::BoxAreas);
+        self.layout
+            .borrow()
+            .query_text_range_rects(node.to_trusted_node_address(), utf16_range)
+    }
+
     pub(crate) fn client_rect_query(&self, node: &Node) -> Rect<i32, CSSPixel> {
         self.layout_reflow(QueryMsg::ClientRectQuery);
         self.layout

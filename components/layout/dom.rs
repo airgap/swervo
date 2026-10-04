@@ -360,6 +360,8 @@ pub(crate) trait NodeExt<'dom> {
     fn rendering_type(&self) -> NodeRenderingType;
 
     fn fragments_for_pseudo(&self, pseudo_element: Option<PseudoElement>) -> Vec<Fragment>;
+    /// The [`TextRun`] holding this text node's text, if it is rendered.
+    fn text_run(&self) -> Option<ArcRefCell<TextRun>>;
     fn with_layout_box_base(&self, callback: impl FnMut(&LayoutBoxBase));
     fn with_layout_box_base_including_pseudos(&self, callback: impl FnMut(&LayoutBoxBase));
 
@@ -579,6 +581,13 @@ impl<'dom> NodeExt<'dom> for ServoLayoutNode<'dom> {
                 .map(|pseudo_layout_data| pseudo_layout_data.borrow().fragments())
                 .unwrap_or_default(),
             None => layout_data.fragments(),
+        }
+    }
+
+    fn text_run(&self) -> Option<ArcRefCell<TextRun>> {
+        match &*self.inner_layout_data()?.self_box.borrow() {
+            Some(LayoutBox::Text(text_run)) => Some(text_run.clone()),
+            _ => None,
         }
     }
 
