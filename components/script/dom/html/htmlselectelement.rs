@@ -60,6 +60,7 @@ use keyboard_types::{Key, Modifiers, NamedKey};
 use js::context::{JSContext, NoGC};
 use js::rust::HandleObject;
 use style::attr::AttrValue;
+use style::selector_parser::PseudoElement;
 use stylo_dom::ElementState;
 
 const DEFAULT_SELECT_SIZE: u32 = 0;
@@ -77,19 +78,6 @@ const LIST_BOX_CONTAINER_STYLE: &str = "
     display: flex;
     flex-direction: column;
     block-size: 100%;
-";
-
-const CHEVRON_CONTAINER_STYLE: &str = "
-    background-image: url('data:image/svg+xml,<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"180\" height=\"180\" viewBox=\"0 0 180 180\"> <path d=\"M10 50h160L90 130z\" style=\"fill:currentcolor\"/> </svg>');
-    background-size: 100%;
-    background-repeat: no-repeat;
-    background-position: center;
-
-    vertical-align: middle;
-    line-height: 1;
-    display: inline-block;
-    width: 0.75em;
-    height: 0.75em;
 ";
 
 #[derive(JSTraceable, MallocSizeOf)]
@@ -387,11 +375,6 @@ impl HTMLSelectElement {
             CustomElementCreationMode::Asynchronous,
             None,
         );
-        chevron_container.set_string_attribute(
-            cx,
-            &local_name!("style"),
-            CHEVRON_CONTAINER_STYLE.into(),
-        );
         select_box
             .upcast::<Node>()
             .AppendChild(cx, chevron_container.upcast::<Node>())
@@ -400,6 +383,9 @@ impl HTMLSelectElement {
         root.upcast::<Node>()
             .AppendChild(cx, select_box.upcast::<Node>())
             .unwrap();
+        chevron_container
+            .upcast::<Node>()
+            .set_implemented_pseudo_element(PseudoElement::ServoSelectArrow);
     }
 
     /// A list box shows `display size` rows of the options themselves, slotted into a

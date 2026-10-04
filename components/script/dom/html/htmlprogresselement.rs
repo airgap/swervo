@@ -9,8 +9,8 @@ use html5ever::{LocalName, Prefix, QualName, local_name, ns};
 use js::context::JSContext;
 use js::rust::HandleObject;
 use script_bindings::cell::DomRefCell;
+use style::selector_parser::PseudoElement;
 
-use crate::dom::bindings::codegen::Bindings::ElementBinding::Element_Binding::ElementMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLProgressElementBinding::HTMLProgressElementMethods;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::Node_Binding::NodeMethods;
 use crate::dom::bindings::inheritance::Castable;
@@ -37,7 +37,7 @@ pub(crate) struct HTMLProgressElement {
 #[derive(Clone, JSTraceable, MallocSizeOf)]
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
 struct ShadowTree {
-    progress_bar: Dom<Element>,
+    progress_value: Dom<Element>,
 }
 
 impl HTMLProgressElement {
@@ -83,15 +83,32 @@ impl HTMLProgressElement {
             CustomElementCreationMode::Asynchronous,
             None,
         );
+        let progress_value = Element::create(
+            cx,
+            QualName::new(None, ns!(html), local_name!("div")),
+            None,
+            &document,
+            ElementCreator::ScriptCreated,
+            CustomElementCreationMode::Asynchronous,
+            None,
+        );
 
-        // FIXME: This should use ::-moz-progress-bar
-        progress_bar.SetId(cx, "-servo-progress-bar".into());
         root.upcast::<Node>()
             .AppendChild(cx, progress_bar.upcast::<Node>())
             .unwrap();
+        progress_bar
+            .upcast::<Node>()
+            .AppendChild(cx, progress_value.upcast::<Node>())
+            .unwrap();
+        progress_bar
+            .upcast::<Node>()
+            .set_implemented_pseudo_element(PseudoElement::WebkitProgressBar);
+        progress_value
+            .upcast::<Node>()
+            .set_implemented_pseudo_element(PseudoElement::WebkitProgressValue);
 
         let _ = self.shadow_tree.borrow_mut().insert(ShadowTree {
-            progress_bar: progress_bar.as_traced(),
+            progress_value: progress_value.as_traced(),
         });
         self.upcast::<Node>()
             .dirty(crate::dom::node::NodeDamage::Other);
@@ -114,7 +131,7 @@ impl HTMLProgressElement {
         let style = format!("width: {}%", position);
 
         shadow_tree
-            .progress_bar
+            .progress_value
             .set_string_attribute(cx, &local_name!("style"), style.into());
     }
 }
