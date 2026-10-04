@@ -214,6 +214,9 @@ impl From<ServoLayoutNode<'_>> for BaseFragmentInfo {
                 &local_name!("input") => {
                     flags.insert(FragmentFlags::IS_INPUT_ELEMENT);
                 },
+                &local_name!("button") => {
+                    flags.insert(FragmentFlags::IS_BUTTON_ELEMENT);
+                },
                 _ => {},
             }
         };
@@ -267,6 +270,8 @@ bitflags! {
         const IS_COLLAPSED = 1 << 11;
         /// Whether or not the node that created this Fragment is a `<input>` element.
         const IS_INPUT_ELEMENT = 1 << 12;
+        /// Whether or not the node that created this Fragment is a `<button>` element.
+        const IS_BUTTON_ELEMENT = 1 << 13;
 
     }
 }

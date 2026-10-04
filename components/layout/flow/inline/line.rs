@@ -954,8 +954,12 @@ impl TextRunLineItem {
         new_offsets: &Option<TextRunOffsets>,
         new_inline_styles: &SharedInlineStyles,
     ) -> bool {
+        // Right-to-left slices stay separate items: bidi reordering moves whole line items, and
+        // the slices of one item are painted left to right in logical order, which reversed the
+        // words of Hebrew and Arabic text in `nowrap` runs and text inputs.
         if !Arc::ptr_eq(&self.info.font, &new_info.font) ||
             self.info.bidi_level != new_info.bidi_level ||
+            self.info.bidi_level.is_rtl() ||
             !self.inline_styles.ptr_eq(new_inline_styles)
         {
             return false;

@@ -37,7 +37,9 @@ input,
 select,
 textarea {
   font-family: sans-serif;
-  font-size: 0.8333em;
+  /* Chrome's small-control size, fixed rather than relative: controls don't scale with the
+     page's font size there. */
+  font-size: 13.333px;
   appearance: auto;
   letter-spacing: initial;
   line-height: initial;

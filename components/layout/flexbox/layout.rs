@@ -2291,12 +2291,19 @@ impl FlexItemBox {
             }
             .clamp_below_max(content_max_main_size)
         };
-        let content_min_main_size = content_main_sizes.min.resolve_for_min(
-            get_automatic_minimum_size,
-            stretch_size.main,
-            &main_content_sizes,
-            is_table,
-        );
+        // Floored at zero: a `box-sizing: border-box` preferred size smaller than the padding
+        // (`height: 0; padding-bottom: 56%`, the aspect-ratio trick) is a negative content size,
+        // which reached the automatic minimum as the specified size suggestion and collapsed
+        // the item's border box to nothing (Walmart's hero carousel).
+        let content_min_main_size = content_main_sizes
+            .min
+            .resolve_for_min(
+                get_automatic_minimum_size,
+                stretch_size.main,
+                &main_content_sizes,
+                is_table,
+            )
+            .max(Au::zero());
 
         FlexItem {
             box_: self,

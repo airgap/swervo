@@ -1769,7 +1769,13 @@ fn automatic_inline_size<T>(
                 .base
                 .base_fragment_info
                 .flags
-                .intersects(FragmentFlags::IS_REPLACED | FragmentFlags::IS_WIDGET) ||
+                // A block-level `<button>` shrinks to fit like a widget
+                // (<https://html.spec.whatwg.org/multipage/#button-layout>).
+                .intersects(
+                    FragmentFlags::IS_REPLACED |
+                        FragmentFlags::IS_WIDGET |
+                        FragmentFlags::IS_BUTTON_ELEMENT,
+                ) ||
                 context.is_table()
         })
     };
