@@ -8,6 +8,7 @@ use malloc_size_of_derive::MallocSizeOf;
 use style::Zero;
 use style::color::AbsoluteColor;
 use style::computed_values::_servo_top_layer::T as ServoTopLayer;
+use style::computed_value_flags::ComputedValueFlags;
 use style::computed_values::direction::T as Direction;
 use style::computed_values::isolation::T as ComputedIsolation;
 use style::computed_values::mix_blend_mode::T as ComputedMixBlendMode;
@@ -26,7 +27,7 @@ use style::values::computed::basic_shape::ClipPath;
 use style::values::computed::image::Image as ComputedImageLayer;
 use style::values::computed::{
     BorderSideWidth, BorderStyle, Color, Inset, ItemPlacement, LengthPercentage, Margin,
-    SelfAlignment,
+    ScrollbarGutter, SelfAlignment,
 };
 use style::values::generics::box_::Perspective;
 use style::values::generics::position::{GenericAspectRatio, PreferredRatio};
@@ -324,6 +325,8 @@ pub(crate) trait ComputedValuesExt {
         containing_block_writing_mode: WritingMode,
     ) -> LogicalSides<BorderStyleColor>;
     fn physical_margin(&self) -> PhysicalSides<LengthPercentageOrAuto<'_>>;
+    fn scrollbar_gutter(&self) -> PhysicalSides<Au>;
+    fn logical_scrollbar_gutter_sums(&self) -> LogicalVec2<Au>;
     fn margin(
         &self,
         containing_block_writing_mode: WritingMode,
@@ -444,7 +447,15 @@ impl ComputedValuesExt for ComputedValues {
         pbm: &PaddingBorderMargin,
     ) -> LogicalVec2<Size<Au>> {
         match self.get_position().box_sizing {
-            BoxSizing::ContentBox => box_size,
+            // The scrollbar gutter comes out of the content box.
+            // <https://drafts.csswg.org/css-overflow-3/#scrollbar-gutter-property>
+            BoxSizing::ContentBox => {
+                let gutter = self.logical_scrollbar_gutter_sums();
+                box_size.map_inline_and_block_sizes(
+                    |value| value - gutter.inline,
+                    |value| value - gutter.block,
+                )
+            },
             // These may be negative, but will later be clamped by `min-width`/`min-height`
             // which is clamped to zero.
             BoxSizing::BorderBox => box_size.map_inline_and_block_sizes(
@@ -460,7 +471,13 @@ impl ComputedValuesExt for ComputedValues {
         pbm: &PaddingBorderMargin,
     ) -> LogicalVec2<Size<Au>> {
         match self.get_position().box_sizing {
-            BoxSizing::ContentBox => min_box_size,
+            BoxSizing::ContentBox => {
+                let gutter = self.logical_scrollbar_gutter_sums();
+                min_box_size.map_inline_and_block_sizes(
+                    |value| Au::zero().max(value - gutter.inline),
+                    |value| Au::zero().max(value - gutter.block),
+                )
+            },
             // Clamp to zero to make sure the used size components are non-negative
             BoxSizing::BorderBox => min_box_size.map_inline_and_block_sizes(
                 |value| Au::zero().max(value - pbm.padding_border_sums.inline),
@@ -475,7 +492,13 @@ impl ComputedValuesExt for ComputedValues {
         pbm: &PaddingBorderMargin,
     ) -> LogicalVec2<Size<Au>> {
         match self.get_position().box_sizing {
-            BoxSizing::ContentBox => max_box_size,
+            BoxSizing::ContentBox => {
+                let gutter = self.logical_scrollbar_gutter_sums();
+                max_box_size.map_inline_and_block_sizes(
+                    |value| value - gutter.inline,
+                    |value| value - gutter.block,
+                )
+            },
             // This may be negative, but will later be clamped by `min-width`
             // which itself is clamped to zero.
             BoxSizing::BorderBox => max_box_size.map_inline_and_block_sizes(
@@ -494,6 +517,54 @@ impl ComputedValuesExt for ComputedValues {
             &BorderStyleColor::from_border(self.get_border(), &current_color),
             containing_block_writing_mode,
         )
+    }
+
+    /// The space that `scrollbar-gutter` reserves for this box, which layout adds to its border
+    /// widths so that it sits between the border and the padding, outside the scrollport.
+    /// <https://drafts.csswg.org/css-overflow-3/#scrollbar-gutter-property>
+    /// The root element's gutter belongs to the viewport, which doesn't reserve one yet.
+    fn scrollbar_gutter(&self) -> PhysicalSides<Au> {
+        let gutter = self.clone_scrollbar_gutter();
+        if !gutter.contains(ScrollbarGutter::STABLE) {
+            return PhysicalSides::zero();
+        }
+        // Overflow doesn't apply to inline boxes nor to tables and their parts, so they are
+        // never scroll containers.
+        let can_be_scroll_container = match Display::from(self.get_box().display) {
+            Display::GeneratingBox(DisplayGeneratingBox::OutsideInside { outside, inside }) => {
+                match inside {
+                    DisplayInside::Table => false,
+                    DisplayInside::Flow { .. } => outside == DisplayOutside::Block,
+                    DisplayInside::FlowRoot { .. } | DisplayInside::Flex | DisplayInside::Grid => {
+                        true
+                    },
+                }
+            },
+            _ => false,
+        };
+        if self.flags.contains(ComputedValueFlags::IS_ROOT_ELEMENT_STYLE) ||
+            !can_be_scroll_container ||
+            !AxesOverflow::from(self).establishes_scroll_container()
+        {
+            return PhysicalSides::zero();
+        }
+        // The gutter of the scrollbar that scrolls in the block axis sits on the inline-end
+        // edge (the left one in right-to-left text, like in Chrome).
+        let inline_start = match gutter.contains(ScrollbarGutter::BOTH_EDGES) {
+            true => SCROLLBAR_GUTTER_SIZE,
+            false => Au::zero(),
+        };
+        LogicalSides {
+            inline_start,
+            inline_end: SCROLLBAR_GUTTER_SIZE,
+            block_start: Au::zero(),
+            block_end: Au::zero(),
+        }
+        .to_physical(self.writing_mode)
+    }
+
+    fn logical_scrollbar_gutter_sums(&self) -> LogicalVec2<Au> {
+        LogicalSides::from_physical(&self.scrollbar_gutter(), self.writing_mode).sum()
     }
 
     fn physical_margin(&self) -> PhysicalSides<LengthPercentageOrAuto<'_>> {
@@ -1311,12 +1382,16 @@ impl LayoutStyle<'_> {
                     resolve(&border.border_right_width, border.border_right_style),
                     resolve(&border.border_bottom_width, border.border_bottom_style),
                     resolve(&border.border_left_width, border.border_left_style),
-                )
+                ) + self.style().scrollbar_gutter()
             },
         };
         LogicalSides::from_physical(&border_width, containing_block_writing_mode)
     }
 }
+
+/// Chrome on Linux draws classic scrollbars this wide. Servo draws no scrollbars, but pages
+/// are tuned against Chrome's layout, so `scrollbar-gutter: stable` reserves the same space.
+const SCROLLBAR_GUTTER_SIZE: Au = Au(15 * app_units::AU_PER_PX);
 
 impl From<stylo::Display> for Display {
     fn from(packed: stylo::Display) -> Self {

@@ -2375,7 +2375,8 @@ impl<'a> BuilderForBoxFragment<'a> {
 
         let style = self.fragment.style();
         let border = style.get_border();
-        let border_widths = self.fragment.border.to_webrender();
+        // Layout reserves the scrollbar gutter as part of the border widths.
+        let border_widths = (self.fragment.border - style.scrollbar_gutter()).to_webrender();
 
         if border_widths == SideOffsets2D::zero() {
             return;
