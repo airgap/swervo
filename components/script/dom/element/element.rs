@@ -57,7 +57,7 @@ use style::values::computed::{Overflow, ScrollSnapStrictness, ScrollSnapType};
 use style::values::generics::NonNegative;
 use style::values::generics::position::PreferredRatio;
 use style::values::generics::ratio::Ratio;
-use style::values::{AtomIdent, AtomString, CSSFloat, GenericAtomIdent, computed, specified};
+use style::values::{AtomIdent, AtomString, GenericAtomIdent, computed, specified};
 use style::{ArcSlice, CaseSensitivityExt, dom_apis, thread_state};
 use style_traits::CSSPixel;
 use stylo_atoms::Atom;
@@ -1510,13 +1510,16 @@ impl<'dom> LayoutDom<'dom, Element> {
                 }
             });
 
+        let text_control_size = |value: specified::NoCalcLength| {
+            style::values::generics::length::LengthPercentageOrAuto::LengthPercentage(NonNegative(
+                specified::LengthPercentage::Length(value),
+            ))
+        };
         if let Some(size) = size {
             let value = specified::NoCalcLength::from_servo_character_width(size);
-            push(PropertyDeclaration::Width(
-                specified::Size::LengthPercentage(NonNegative(
-                    specified::LengthPercentage::Length(value),
-                )),
-            ));
+            push(PropertyDeclaration::ServoTextControlWidth(text_control_size(
+                value,
+            )));
         }
 
         let width = if let Some(this) = self.downcast::<HTMLIFrameElement>() {
@@ -1632,17 +1635,11 @@ impl<'dom> LayoutDom<'dom, Element> {
         if let Some(cols) = cols {
             let cols = cols as i32;
             if cols > 0 {
-                // TODO(mttr) ServoCharacterWidth uses the size math for <input type="text">, but
-                // the math for <textarea> is a little different since we need to take
-                // scrollbar size into consideration (but we don't have a scrollbar yet!)
-                //
                 // https://html.spec.whatwg.org/multipage/#textarea-effective-width
-                let value = specified::NoCalcLength::from_servo_character_width(cols);
-                push(PropertyDeclaration::Width(
-                    specified::Size::LengthPercentage(NonNegative(
-                        specified::LengthPercentage::Length(value),
-                    )),
-                ));
+                let value = specified::NoCalcLength::from_servo_textarea_columns(cols);
+                push(PropertyDeclaration::ServoTextControlWidth(text_control_size(
+                    value,
+                )));
             }
         }
 
@@ -1652,15 +1649,11 @@ impl<'dom> LayoutDom<'dom, Element> {
         if let Some(rows) = rows {
             let rows = rows as i32;
             if rows > 0 {
-                // TODO(mttr) This should take scrollbar size into consideration.
-                //
                 // https://html.spec.whatwg.org/multipage/#textarea-effective-height
-                let value = specified::NoCalcLength::from_em(rows as CSSFloat);
-                push(PropertyDeclaration::Height(
-                    specified::Size::LengthPercentage(NonNegative(
-                        specified::LengthPercentage::Length(value),
-                    )),
-                ));
+                let value = specified::NoCalcLength::from_servo_textarea_rows(rows);
+                push(PropertyDeclaration::ServoTextControlHeight(text_control_size(
+                    value,
+                )));
             }
         }
 

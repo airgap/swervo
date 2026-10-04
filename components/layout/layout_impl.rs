@@ -2034,6 +2034,8 @@ impl FontMetricsProvider for LayoutFontMetricsProvider {
             ascent: first_font_metrics.ascent.into(),
             average_char_width: Some(first_font_metrics.average_advance.into()),
             max_char_width: Some(first_font_metrics.max_advance.into()),
+            // `line_gap` holds the whole normal line height, not the font's line gap.
+            normal_line_height: Some(first_font_metrics.line_gap.into()),
             script_percent_scale_down: None,
             script_script_percent_scale_down: None,
         }

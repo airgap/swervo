@@ -12,6 +12,7 @@ use style::context::SharedStyleContext;
 use style::logical_geometry::Direction;
 use style::properties::ComputedValues;
 use style::selector_parser::PseudoElement;
+use style::values::generics::length::GenericLengthPercentageOrAuto;
 use style::values::specified::align::AlignFlags;
 
 use crate::context::LayoutContext;
@@ -292,6 +293,24 @@ impl IndependentFormattingContext {
         layout_context: &LayoutContext,
         constraint_space: &ConstraintSpace,
     ) -> InlineContentSizesResult {
+        // A text control's `size` or `cols` attribute gives its intrinsic inline size whatever its
+        // text, as in Chrome (`TextFieldIntrinsicInlineSize`); this is what a percentage width
+        // resolves against in a shrink-to-fit container.
+        if let GenericLengthPercentageOrAuto::LengthPercentage(width) = self
+            .style()
+            .get_position()
+            .clone__servo_text_control_width() &&
+            self.style().writing_mode.is_horizontal()
+        {
+            let size = width.0.to_used_value(Au(0));
+            return InlineContentSizesResult {
+                sizes: ContentSizes {
+                    min_content: size,
+                    max_content: size,
+                },
+                depends_on_block_constraints: false,
+            };
+        }
         let result = self
             .base
             .inline_content_sizes(layout_context, constraint_space, &self.contents);
@@ -495,6 +514,16 @@ impl IndependentFormattingContext {
                 let mut result =
                     bfc.layout(layout_context, positioning_context, containing_block_for_children);
                 align_block_container_content(self.style(), lazy_block_size, &mut result);
+                // A `<textarea>`'s `rows` attribute gives its intrinsic block size whatever its
+                // text, which scrolls instead (Chrome's `TextAreaIntrinsicBlockSize`).
+                if let GenericLengthPercentageOrAuto::LengthPercentage(height) = self
+                    .style()
+                    .get_position()
+                    .clone__servo_text_control_height() &&
+                    self.style().writing_mode.is_horizontal()
+                {
+                    result.content_block_size = height.0.to_used_value(Au(0));
+                }
                 result
             },
             IndependentFormattingContextContents::Flex(fc) => fc.layout(

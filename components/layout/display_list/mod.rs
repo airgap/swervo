@@ -32,12 +32,13 @@ use style::computed_values::text_decoration_style::{
     T as ComputedTextDecorationStyle, T as TextDecorationStyle,
 };
 use style::dom::OpaqueNode;
+use style::computed_value_flags::ComputedValueFlags;
 use style::properties::ComputedValues;
 use style::properties::longhands::visibility::computed_value::T as Visibility;
 use style::properties::style_structs::Border;
 use style::values::computed::basic_shape::ClipPath;
 use style::values::computed::{
-    BorderImageSideWidth, BorderImageWidth, BorderStyle, LengthPercentage,
+    Appearance, BorderImageSideWidth, BorderImageWidth, BorderStyle, LengthPercentage,
     NonNegativeLengthOrNumber, NumberOrPercentage, OutlineStyle,
 };
 use style::values::generics::NonNegative;
@@ -2401,6 +2402,31 @@ impl<'a> BuilderForBoxFragment<'a> {
 
         let current_color = style.get_inherited_text().clone_color();
         let style_color = BorderStyleColor::from_border(border, &current_color);
+        if paints_native_text_field(style) {
+            // Chrome draws an unstyled text field itself (`NativeThemeBase::PaintTextField`): a
+            // 1px border in the field's border colour along the border box edge, with rounded
+            // corners, whatever the width and style of its CSS border.
+            let side = wr::BorderSide {
+                color: rgba(style_color.top.color),
+                style: wr::BorderStyle::Solid,
+            };
+            let details = wr::BorderDetails::Normal(wr::NormalBorder {
+                top: side,
+                right: side,
+                bottom: side,
+                left: side,
+                radius: self.border_radius(),
+                do_aa: true,
+            });
+            let common = builder.common_properties(state, self.border_rect, style);
+            builder.wr().push_border(
+                &common,
+                self.border_rect,
+                SideOffsets2D::new_all_same(1.0),
+                details,
+            );
+            return;
+        }
         let details = wr::BorderDetails::Normal(wr::NormalBorder {
             top: self.build_border_side(style_color.top),
             right: self.build_border_side(style_color.right),
@@ -2943,9 +2969,29 @@ pub(super) fn compute_margin_box_radius(
     }
 }
 
+/// Whether this is a text field that Chrome would draw natively, which it does unless the author
+/// styles its border or background (`LayoutTheme::IsControlStyled`).
+fn paints_native_text_field(style: &ComputedValues) -> bool {
+    let box_style = style.get_box();
+    matches!(
+        box_style.clone__moz_default_appearance(),
+        Appearance::Textfield | Appearance::Textarea
+    ) && box_style.clone_appearance() != Appearance::None &&
+        !style
+            .flags
+            .contains(ComputedValueFlags::HAS_AUTHOR_SPECIFIED_BORDER_BACKGROUND)
+}
+
 impl BoxFragment {
     fn border_radius(&self) -> BorderRadius {
         let style = self.style();
+        let border_rect = self.border_rect();
+        if paints_native_text_field(&style) {
+            // The corner radius of Chrome's native text fields.
+            let mut radius = wr::BorderRadius::uniform(2.0);
+            normalize_radii(&border_rect.to_webrender(), &mut radius);
+            return radius;
+        }
         let border = style.get_border();
         if border.border_top_left_radius.0.is_zero() &&
             border.border_top_right_radius.0.is_zero() &&
@@ -2955,7 +3001,6 @@ impl BoxFragment {
             return BorderRadius::zero();
         }
 
-        let border_rect = self.border_rect();
         let resolve =
             |radius: &LengthPercentage, box_size: Au| radius.to_used_value(box_size).to_f32_px();
         let corner = |corner: &style::values::computed::BorderCornerRadius| {

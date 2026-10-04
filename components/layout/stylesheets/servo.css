@@ -2,11 +2,23 @@ input[type="hidden"] {
   display: none !important;
 }
 
-/* Textual inputs */
-input:not([type="file"]),
-textarea {
+/* Textual inputs take Chrome's borders. Chrome draws text fields natively over these unless the
+   author styles their border or background, and so does layout's display list. */
+input:not([type="file"], [type="image"]) {
   background: white;
-  border: solid grey 1px;
+  border: 2px inset rgb(118, 118, 118);
+  color: black;
+}
+
+input:not([type=button i], [type=submit i], [type=reset i], [type=image i], [type=file i],
+          [type=color i], [type=range i], [type=checkbox i], [type=radio i], [type=hidden i]) {
+  -moz-default-appearance: textfield;
+}
+
+textarea {
+  -moz-default-appearance: textarea;
+  background: white;
+  border: 1px solid rgb(118, 118, 118);
   color: black;
 }
 
