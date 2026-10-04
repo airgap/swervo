@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use layout_api::{
     DangerousStyleElement, DangerousStyleNode, LayoutDamage, LayoutElement, LayoutNode,
-    svg_paint_signature,
+    NodeRenderingType, svg_paint_signature,
 };
 use script::layout_dom::ServoLayoutNode;
 use style::context::{SharedStyleContext, StyleContext};
@@ -595,6 +595,13 @@ impl<'a> ElementDamageSet<'a> {
         damage_for_parent: &mut LayoutDamage,
         inline_size_depends_on_content: bool,
     ) {
+        // A `display: contents` element (including a `<slot>`) has no box of its own, so the
+        // contents of its children contribute directly to the intrinsic size of its parent's box.
+        let inline_size_depends_on_content = inline_size_depends_on_content ||
+            matches!(
+                self.node.rendering_type(),
+                NodeRenderingType::DelegatesRendering
+            );
         let children_need_inline_content_size_recalculation = self
             .from_children
             .contains(LayoutDamage::RecomputeInlineContentSizes) &&
