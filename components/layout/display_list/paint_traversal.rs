@@ -11,6 +11,7 @@ use style::values::computed::TextDecorationLine;
 
 use crate::display_list::{
     ClipId, FragmentTextDecoration, StackingContext, StackingContextFragments,
+    decoration_thickness_override,
 };
 use crate::fragment_tree::{
     BoxFragment, BoxFragmentWithStyle, Fragment, FragmentFlags, IFrameFragment, ImageFragment,
@@ -576,6 +577,7 @@ impl TraversalState {
                         .clone_text_decoration_color()
                         .resolve_to_absolute(color),
                     style: style.clone_text_decoration_style(),
+                    thickness: decoration_thickness_override(style),
                 });
                 Rc::new(new_vector)
             },

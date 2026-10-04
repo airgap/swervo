@@ -23,9 +23,11 @@ use style::color::AbsoluteColor;
 use style::computed_values::overflow_x::T as ComputedOverflow;
 use style::computed_values::position::T as ComputedPosition;
 use style::computed_values::text_decoration_style::T as TextDecorationStyle;
+use style::properties::ComputedValues;
 use style::values::computed::angle::Angle;
 use style::values::computed::{ClipRectOrAuto, Length, TextDecorationLine};
 use style::values::generics::box_::{OverflowClipMarginBox, Perspective};
+use style::values::generics::text::GenericTextDecorationLength;
 use style::values::generics::transform::{
     self, GenericRotate, GenericScale, GenericTranslate, get_normalized_vector_and_angle,
 };
@@ -357,6 +359,19 @@ pub(crate) struct FragmentTextDecoration {
     pub line: TextDecorationLine,
     pub color: AbsoluteColor,
     pub style: TextDecorationStyle,
+    /// An author `text-decoration-thickness` length, resolved against the decorating box's
+    /// font size; `None` uses the font's own underline or strikeout thickness.
+    pub thickness: Option<Au>,
+}
+
+/// <https://drafts.csswg.org/css-text-decor-4/#text-decoration-width-property>
+pub(crate) fn decoration_thickness_override(style: &ComputedValues) -> Option<Au> {
+    match style.clone_text_decoration_thickness() {
+        GenericTextDecorationLength::LengthPercentage(length) => {
+            Some(length.to_used_value(style.get_font().font_size.computed_size().into()))
+        },
+        GenericTextDecorationLength::Auto | GenericTextDecorationLength::FromFont => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, MallocSizeOf, PartialEq)]
@@ -958,6 +973,7 @@ impl BoxFragmentWithStyle<'_> {
                         .clone_text_decoration_color()
                         .resolve_to_absolute(color),
                     style: style.clone_text_decoration_style(),
+                    thickness: decoration_thickness_override(style),
                 });
                 new_text_decoration = Rc::new(new_vector);
                 &new_text_decoration

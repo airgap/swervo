@@ -1154,8 +1154,12 @@ impl Fragment {
             if text_decoration.line.contains(TextDecorationLine::UNDERLINE) {
                 let mut rect = rect;
                 rect.origin.y += font_metrics.ascent - font_metrics.underline_offset;
-                rect.size.height =
-                    decoration_thickness(font_metrics.underline_size, dppx);
+                rect.size.height = decoration_thickness(
+                    text_decoration
+                        .thickness
+                        .unwrap_or(font_metrics.underline_size),
+                    dppx,
+                );
 
                 Self::build_display_list_for_text_decoration(
                     state,
@@ -1171,8 +1175,12 @@ impl Fragment {
         for text_decoration in state.text_decorations.iter() {
             if text_decoration.line.contains(TextDecorationLine::OVERLINE) {
                 let mut rect = rect;
-                rect.size.height =
-                    decoration_thickness(font_metrics.underline_size, dppx);
+                rect.size.height = decoration_thickness(
+                    text_decoration
+                        .thickness
+                        .unwrap_or(font_metrics.underline_size),
+                    dppx,
+                );
                 Self::build_display_list_for_text_decoration(
                     state,
                     &parent_style,
@@ -1223,8 +1231,12 @@ impl Fragment {
             {
                 let mut rect = rect;
                 rect.origin.y += font_metrics.ascent - font_metrics.strikeout_offset;
-                rect.size.height =
-                    decoration_thickness(font_metrics.strikeout_size, dppx);
+                rect.size.height = decoration_thickness(
+                    text_decoration
+                        .thickness
+                        .unwrap_or(font_metrics.strikeout_size),
+                    dppx,
+                );
                 Self::build_display_list_for_text_decoration(
                     state,
                     &parent_style,
