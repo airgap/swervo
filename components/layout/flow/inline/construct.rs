@@ -8,21 +8,22 @@ use std::ops::Range;
 
 use icu_properties::BidiClass;
 use icu_segmenter::WordSegmenter;
-use layout_api::{LayoutNode, SharedSelection};
+use layout_api::{LayoutElement, LayoutNode, SharedSelection};
 use style::computed_values::_webkit_text_security::T as WebKitTextSecurity;
 use style::computed_values::direction::T as Direction;
 use style::computed_values::white_space_collapse::T as WhiteSpaceCollapse;
-use style::dom::NodeInfo;
+use style::dom::{NodeInfo, OpaqueNode};
 use style::properties::ComputedValues;
 use style::selector_parser::PseudoElement;
 use style::values::specified::text::TextTransformCase;
 use unicode_bidi::Level;
 use unicode_categories::UnicodeCategories;
+use web_atoms::local_name;
 
 use super::text_run::{TextRun, TextRunNodeSegment};
 use super::{
-    InlineBox, InlineBoxIdentifier, InlineBoxes, InlineFormattingContext, InlineItem,
-    SharedInlineStyles,
+    EditableText, EditableTextSource, InlineBox, InlineBoxIdentifier, InlineBoxes,
+    InlineFormattingContext, InlineItem, SharedInlineStyles,
 };
 use crate::cell::ArcRefCell;
 use crate::context::LayoutContext;
@@ -58,6 +59,14 @@ pub(crate) struct InlineFormattingContextBuilder {
     /// If the [`InlineFormattingContext`] that we are building has a selection shared with its
     /// originating node in the DOM, this will not be `None`.
     pub shared_selection: Option<SharedSelection>,
+
+    /// The DOM origin of the editable (`contenteditable`) text pushed so far, which lets
+    /// editing map between character offsets in the laid out text and DOM positions.
+    pub editable_text: EditableText,
+
+    /// The text node whose text is being pushed in pieces (around a `::first-letter`) and the
+    /// UTF-16 length of the pieces already pushed.
+    editable_text_node_progress: Option<(OpaqueNode, u32)>,
 
     /// Whether the last processed node ended with whitespace. This is used to
     /// implement rule 4 of <https://www.w3.org/TR/css-text-3/#collapse>:
@@ -341,6 +350,17 @@ impl InlineFormattingContextBuilder {
         box_slot.set(LayoutBox::InlineLevel(inline_item));
 
         let first_letter_text = Cow::Borrowed(&text[first_letter_range.clone()]);
+        // The first letter is pushed for its pseudo-element, but the text after it still
+        // continues at a later DOM offset of the text node.
+        let node = info.node.opaque();
+        let pushed_length = match self.editable_text_node_progress {
+            Some((progress_node, length)) if progress_node == node => length,
+            _ => 0,
+        };
+        self.editable_text_node_progress = Some((
+            node,
+            pushed_length + first_letter_text.encode_utf16().count() as u32,
+        ));
         self.push_text(
             first_letter_text,
             first_letter_range.start,
@@ -367,6 +387,8 @@ impl InlineFormattingContextBuilder {
         text_offset: usize,
         info: &NodeAndStyleInfo<'dom>,
     ) {
+        let editable_source =
+            self.editable_source_for_text(&text, info, info.style.clone_white_space_collapse());
         let trim_beginning_white_space = self.last_inline_box_ended_with_collapsible_white_space;
         let starts_on_word_boundary = self.on_word_boundary;
         let char_iterator = rendered_characters(
@@ -426,6 +448,21 @@ impl InlineFormattingContextBuilder {
 
         self.text_segments.push(new_text);
 
+        if let Some((node, mut dom_offsets, is_line_break)) = editable_source {
+            // Text transforms can change the number of characters (ß becomes SS), which loses
+            // the exact correspondence; keep one offset per laid out character regardless.
+            let end = dom_offsets.pop().expect("Always has an end offset");
+            let last = dom_offsets.last().copied().unwrap_or(end);
+            dom_offsets.resize(character_count, last);
+            dom_offsets.push(end);
+            self.editable_text.sources.push(EditableTextSource {
+                node,
+                is_line_break,
+                character_start: new_character_range.start,
+                dom_offsets,
+            });
+        }
+
         let current_inline_styles = self.shared_inline_styles();
         let node_segment = info.node.is_text_node().then(|| TextRunNodeSegment {
             node: info.node.opaque(),
@@ -480,6 +517,69 @@ impl InlineFormattingContextBuilder {
         if let Some(box_slot) = box_slot {
             box_slot.set(LayoutBox::Text(text_run));
         }
+    }
+
+    /// For text of an editable DOM text node, or the line feed generated for an editable `<br>`,
+    /// returns the node, the UTF-16 offset in it of each character left after white space
+    /// collapsing followed by the offset just past the last one, and whether it is a `<br>`.
+    fn editable_source_for_text(
+        &mut self,
+        text: &str,
+        info: &NodeAndStyleInfo,
+        white_space_collapse: WhiteSpaceCollapse,
+    ) -> Option<(OpaqueNode, Vec<u32>, bool)> {
+        let node = info.node.opaque();
+        if !info.node.is_text_node() {
+            let is_line_break = info
+                .node
+                .as_element()
+                .is_some_and(|element| element.local_name() == &local_name!("br"));
+            if !is_line_break || !info.node.is_editable() {
+                return None;
+            }
+            // Before the `<br>` is offset 0 in it, after it is offset 1.
+            let mut dom_offsets = vec![0; text.chars().count()];
+            dom_offsets.push(1);
+            return Some((node, dom_offsets, true));
+        }
+
+        let piece_start = match self.editable_text_node_progress {
+            Some((progress_node, length)) if progress_node == node => length,
+            _ => 0,
+        };
+        let piece_length = text.encode_utf16().count() as u32;
+        self.editable_text_node_progress = Some((node, piece_start + piece_length));
+        if !info.node.is_editable() {
+            return None;
+        }
+
+        let collapsed: Vec<char> = WhitespaceCollapse::new(
+            text.chars(),
+            white_space_collapse,
+            self.last_inline_box_ended_with_collapsible_white_space,
+        )
+        .collect();
+        // Collapsing only drops characters and turns white space into spaces, so each remaining
+        // character is the first DOM character from where the previous one was taken that it
+        // can have come from.
+        let mut dom_offsets = Vec::with_capacity(collapsed.len() + 1);
+        let mut end = piece_start;
+        let mut offset = piece_start;
+        for character in text.chars() {
+            if let Some(&wanted) = collapsed.get(dom_offsets.len()) &&
+                (wanted == character ||
+                    (wanted == ' ' && Self::is_document_white_space(character)))
+            {
+                dom_offsets.push(offset);
+                end = offset + character.len_utf16() as u32;
+            }
+            offset += character.len_utf16() as u32;
+        }
+        if dom_offsets.is_empty() {
+            return None;
+        }
+        dom_offsets.push(end);
+        Some((node, dom_offsets, false))
     }
 
     pub(crate) fn enter_display_contents(&mut self, shared_inline_styles: SharedInlineStyles) {

@@ -11,7 +11,7 @@ pub(crate) use clip::ClipId;
 use euclid::{Box2D, Point2D, Rect, Scale, SideOffsets2D, Size2D, UnknownUnit, Vector2D};
 use fonts::{FontRef, ShapedTextSlice};
 use gradient::WebRenderGradient;
-use layout_api::ReflowStatistics;
+use layout_api::{EditingSelection, ReflowStatistics};
 use net_traits::image_cache::Image as CachedImage;
 use paint_api::display_list::{PaintDisplayListInfo, SpatialTreeNodeInfo};
 use paint_api::{CrossProcessPaintApi, SerializableImageData};
@@ -62,6 +62,7 @@ use crate::display_list::background::BackgroundPainter;
 use crate::display_list::conversions::FilterToWebRender;
 pub(crate) use crate::display_list::conversions::ToWebRender;
 use crate::display_list::paint_traversal::{PaintTraversal, PaintTraversalHandler, TraversalState};
+use crate::flow::inline::EditableText;
 use crate::fragment_tree::{
     BackgroundMode, BaseFragment, BoxFragment, BoxFragmentWithStyle, ContainingBlockCalculation,
     Fragment, FragmentFlags, FragmentStatus, FragmentTree, IFrameFragment, ImageFragment,
@@ -137,6 +138,9 @@ pub(crate) struct DisplayListBuilder<'a> {
 
     /// Statistics collected about the reflow, in order to write tests for incremental layout.
     reflow_statistics: &'a mut ReflowStatistics,
+
+    /// The selection of the focused editing host, painted over its editable text.
+    editing_selection: Option<&'a EditingSelection>,
 }
 
 struct InspectorHighlight {
@@ -177,7 +181,7 @@ impl InspectorHighlight {
     }
 }
 
-impl DisplayListBuilder<'_> {
+impl<'a> DisplayListBuilder<'a> {
     #[expect(clippy::too_many_arguments)]
     pub(crate) fn build(
         stacking_context_tree: &mut StackingContextTree,
@@ -187,6 +191,7 @@ impl DisplayListBuilder<'_> {
         webview_id: WebViewId,
         device_pixel_ratio: Scale<f32, StyloCSSPixel, StyloDevicePixel>,
         highlighted_dom_node: Option<OpaqueNode>,
+        editing_selection: Option<&EditingSelection>,
         debug: &DiagnosticsLogging,
         paint_timing_handler: &mut PaintTimingHandler,
         reflow_statistics: &mut ReflowStatistics,
@@ -221,6 +226,7 @@ impl DisplayListBuilder<'_> {
             device_pixel_ratio,
             paint_timing_handler,
             reflow_statistics,
+            editing_selection,
         };
 
         // Clear any caret color from previous display list constructions.
@@ -1324,6 +1330,55 @@ impl Fragment {
         );
     }
 
+    /// The part of the selection of a focused editing host that falls in this text fragment, as
+    /// character offsets of its inline formatting context.
+    fn editing_selection_in_text_fragment(
+        fragment: &TextFragment,
+        character_range: &std::ops::Range<usize>,
+        editable_text: &EditableText,
+        editing_selection: &EditingSelection,
+    ) -> Option<(std::ops::Range<usize>, bool)> {
+        if let Some((node, offset)) = editing_selection.caret {
+            let caret = editable_text.character_offset(node, offset)?;
+            // Where a line wraps at a space, the space ends the first line but is not painted, and
+            // the offset after it starts the next line. Paint the caret there only once, on the
+            // next line.
+            let laid_out_characters: usize = fragment
+                .glyphs
+                .iter()
+                .map(|glyph_store| glyph_store.character_count())
+                .sum();
+            let wrapped_at_end = laid_out_characters < character_range.len();
+            if caret < character_range.start ||
+                caret > character_range.end ||
+                (caret == character_range.end && wrapped_at_end)
+            {
+                return None;
+            }
+            return Some((caret..caret, true));
+        }
+
+        let mut selected: Option<std::ops::Range<usize>> = None;
+        for (node, dom_range) in &editing_selection.selected_text {
+            let (Some(start), Some(end)) = (
+                editable_text.character_offset(*node, dom_range.start),
+                editable_text.character_offset(*node, dom_range.end),
+            ) else {
+                continue;
+            };
+            let start = start.max(character_range.start);
+            let end = end.min(character_range.end);
+            if start >= end {
+                continue;
+            }
+            selected = Some(match selected {
+                Some(selected) => selected.start.min(start)..selected.end.max(end),
+                None => start..end,
+            });
+        }
+        Some((selected?, false))
+    }
+
     // TODO: This caret/text selection implementation currently does not account for vertical text
     // and RTL text properly.
     fn build_display_list_for_text_selection(
@@ -1338,13 +1393,37 @@ impl Fragment {
             return;
         };
 
-        let shared_selection = offsets.shared_selection.borrow();
-        if !shared_selection.enabled {
-            return;
-        }
+        // The selected characters of the inline formatting context, and whether they are a caret.
+        let (selection, is_caret) = match (&offsets.shared_selection, &offsets.editable_text) {
+            (Some(shared_selection), _) => {
+                let shared_selection = shared_selection.borrow();
+                if !shared_selection.enabled {
+                    return;
+                }
+                (
+                    shared_selection.character_range.clone(),
+                    shared_selection.range.is_empty(),
+                )
+            },
+            (None, Some(editable_text)) => {
+                let Some(editing_selection) = builder.editing_selection else {
+                    return;
+                };
+                let Some(selection) = Self::editing_selection_in_text_fragment(
+                    fragment,
+                    &offsets.character_range,
+                    editable_text,
+                    editing_selection,
+                ) else {
+                    return;
+                };
+                selection
+            },
+            (None, None) => return,
+        };
 
-        if offsets.character_range.start > shared_selection.character_range.end ||
-            offsets.character_range.end < shared_selection.character_range.start
+        if offsets.character_range.start > selection.end ||
+            offsets.character_range.end < selection.start
         {
             return;
         }
@@ -1356,7 +1435,7 @@ impl Fragment {
         if fragment.is_empty_for_text_cursor &&
             !offsets
                 .character_range
-                .contains(&shared_selection.character_range.start)
+                .contains(&selection.start)
         {
             return;
         }
@@ -1368,7 +1447,7 @@ impl Fragment {
         for glyph_store in fragment.glyphs.iter() {
             let glyph_store_character_count = glyph_store.character_count();
             if current_character_index + glyph_store_character_count <
-                shared_selection.character_range.start
+                selection.start
             {
                 current_advance += glyph_store.total_advance() +
                     (justification_adjustment * glyph_store.total_word_separators() as i32);
@@ -1376,12 +1455,12 @@ impl Fragment {
                 continue;
             }
 
-            if current_character_index >= shared_selection.character_range.end {
+            if current_character_index >= selection.end {
                 break;
             }
 
             for glyph in glyph_store.glyphs() {
-                if current_character_index >= shared_selection.character_range.start {
+                if current_character_index >= selection.start {
                     start_advance = start_advance.or(Some(current_advance));
                 }
 
@@ -1391,7 +1470,7 @@ impl Fragment {
                     current_advance += justification_adjustment;
                 }
 
-                if current_character_index <= shared_selection.character_range.end {
+                if current_character_index <= selection.end {
                     end_advance = Some(current_advance);
                 }
             }
@@ -1401,7 +1480,7 @@ impl Fragment {
         let end_x = end_advance.unwrap_or(current_advance);
 
         let parent_style = fragment.base.style();
-        if !shared_selection.range.is_empty() {
+        if !is_caret {
             let selection_rect = Rect::new(
                 containing_block_rect.origin +
                     Vector2D::new(fragment_x_offset + start_x, Au::zero()),

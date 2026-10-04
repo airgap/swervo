@@ -104,6 +104,7 @@ use style::computed_values::text_wrap_mode::T as TextWrapMode;
 use style::computed_values::white_space_collapse::T as WhiteSpaceCollapse;
 use style::computed_values::word_break::T as WordBreak;
 use style::context::{QuirksMode, SharedStyleContext};
+use style::dom::OpaqueNode;
 use style::properties::ComputedValues;
 use style::values::computed::Overflow;
 use style::values::specified::box_::DisplayInside;
@@ -190,11 +191,88 @@ pub(crate) struct InlineFormattingContext {
     #[ignore_malloc_size_of = "This is stored primarily in the DOM"]
     shared_selection: Option<SharedSelection>,
 
+    /// If this [`InlineFormattingContext`] has editable (`contenteditable`) text, where in the
+    /// DOM that text came from.
+    #[ignore_malloc_size_of = "Proportional to the text content, which is measured"]
+    editable_text: Option<Arc<EditableText>>,
+
     /// The cached multiplier for `tab-size: <number>`:
     /// <https://drafts.csswg.org/css-text/#tab-size-property>
     /// > the advance width of the space character (U+0020) of the nearest block container ancestor
     /// > of the preserved tab, including its associated `letter-spacing` and `word-spacing`.
     tab_size_multiplier: OnceLock<Au>,
+}
+
+/// The DOM node that produced a range of the text of an [`InlineFormattingContext`].
+#[derive(Debug, MallocSizeOf)]
+pub(crate) struct EditableTextSource {
+    /// A text node, or a `<br>` for the line feed generated for it.
+    pub node: OpaqueNode,
+    /// Whether the node is a `<br>`.
+    pub is_line_break: bool,
+    /// The index of the first character this node produced in the inline formatting context.
+    pub character_start: usize,
+    /// For every character produced, the UTF-16 offset in the node where it starts, then the
+    /// offset just past the last one. White space collapsing drops DOM characters, so the
+    /// offsets need not be contiguous.
+    pub dom_offsets: Vec<u32>,
+}
+
+impl EditableTextSource {
+    fn character_end(&self) -> usize {
+        self.character_start + self.dom_offsets.len() - 1
+    }
+}
+
+/// Maps character offsets in the text of an [`InlineFormattingContext`] to the DOM positions
+/// of editable content and back, for placing and painting the caret of an editing host.
+#[derive(Debug, Default, MallocSizeOf)]
+pub(crate) struct EditableText {
+    /// The sources in text order.
+    pub sources: Vec<EditableTextSource>,
+}
+
+impl EditableText {
+    /// The DOM position (node and UTF-16 offset) of the given character offset. At the boundary
+    /// of two nodes this is the end of the first, unless the first is a line break.
+    pub(crate) fn dom_position(&self, character: usize) -> Option<(OpaqueNode, u32)> {
+        let mut index = self
+            .sources
+            .partition_point(|source| source.character_end() < character);
+        // The end of a line break is the start of the next line, so what follows it is the
+        // position there.
+        if self.sources.get(index).is_some_and(|source| {
+            source.is_line_break && source.character_end() == character
+        }) && self
+            .sources
+            .get(index + 1)
+            .is_some_and(|next| next.character_start == character)
+        {
+            index += 1;
+        }
+        let source = self.sources.get(index)?;
+        if character < source.character_start {
+            return None;
+        }
+        Some((
+            source.node,
+            source.dom_offsets[character - source.character_start],
+        ))
+    }
+
+    /// The character offset of the given DOM position, if the node is in this text. Positions
+    /// inside collapsed white space map to the character after the white space kept.
+    pub(crate) fn character_offset(&self, node: OpaqueNode, offset: u32) -> Option<usize> {
+        let mut sources = self.sources.iter().filter(|source| source.node == node);
+        let first = sources.next()?;
+        let source = std::iter::once(first)
+            .chain(sources)
+            .take_while(|source| source.dom_offsets[0] <= offset)
+            .last()
+            .unwrap_or(first);
+        let characters = &source.dom_offsets[..source.dom_offsets.len() - 1];
+        Some(source.character_start + characters.partition_point(|start| *start < offset))
+    }
 }
 
 /// [`TextRun`] and `TextFragment`s need a handle on their parent inline box (or inline
@@ -1313,7 +1391,10 @@ impl InlineFormattingContextLayout<'_> {
             },
         };
         let editable_or_block_level = line_items.iter().any(|item| match item {
-            LineItem::TextRun(_, text_run) => text_run.offsets.is_some(),
+            LineItem::TextRun(_, text_run) => text_run
+                .offsets
+                .as_ref()
+                .is_some_and(|offsets| offsets.shared_selection.is_some()),
             LineItem::BlockLevel(..) => true,
             _ => false,
         });
@@ -1814,15 +1895,22 @@ impl InlineFormattingContextLayout<'_> {
         ));
     }
 
-    /// If the current line is empty and this [`InlineFormattingContext`] has a selection, push an
-    /// empty [`LineItem::TextRun`] so that text carets can be placed on otherwise empty lines.
+    /// If the current line is empty and this [`InlineFormattingContext`] has a selection, or is
+    /// editable, push an empty [`LineItem::TextRun`] so that text carets can be placed on
+    /// otherwise empty lines.
     fn possibly_push_empty_text_run_to_line_for_text_caret(&mut self) {
         let line_start_offset = self.current_line.starting_character_offset;
-        let Some(shared_selection) = self.ifc.shared_selection.clone() else {
+        // In editable content only lines ended by a line break are kept: the empty line after a
+        // final line break is not laid out, unlike the one after a final line feed in a
+        // `<textarea>`.
+        if self.ifc.shared_selection.is_none() &&
+            (self.ifc.editable_text.is_none() || self.finishing_last_line)
+        {
             return;
-        };
+        }
         let offsets = TextRunOffsets {
-            shared_selection,
+            shared_selection: self.ifc.shared_selection.clone(),
+            editable_text: self.ifc.editable_text.clone(),
             character_range: line_start_offset..line_start_offset + 1,
         };
 
@@ -2142,6 +2230,8 @@ impl InlineFormattingContext {
             is_single_line_text_input,
             has_right_to_left_content,
             shared_selection: builder.shared_selection,
+            editable_text: (!builder.editable_text.sources.is_empty())
+                .then(|| Arc::new(builder.editable_text)),
             tab_size_multiplier: Default::default(),
         }
     }

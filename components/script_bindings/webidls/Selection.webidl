@@ -22,6 +22,8 @@ readonly attribute Node? anchorNode;
   [Throws] undefined collapseToStart();
   [Throws] undefined collapseToEnd();
   [Throws] undefined extend(Node node, optional unsigned long offset = 0);
+  undefined modify(optional DOMString alter = "", optional DOMString direction = "",
+                   optional DOMString granularity = "");
   [Throws]
   undefined setBaseAndExtent(Node anchorNode, unsigned long anchorOffset, Node focusNode, unsigned long focusOffset);
   [Throws] undefined selectAllChildren(Node node);

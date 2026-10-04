@@ -22,11 +22,11 @@ use fonts::{FontContext, FontContextWebFontMethods, WebFontDocumentContext};
 use fonts_traits::StylesheetWebFontLoadFinishedCallback;
 use icu_locid::subtags::Language;
 use layout_api::{
-    AxesOverflow, BoxAreaType, CSSPixelRectVec, DangerousStyleNode, IFrameSizes, Layout,
-    LayoutConfig, LayoutDamage, LayoutElement, LayoutFactory, LayoutNode, NodeRenderingType,
-    OffsetParentResponse, PhysicalSides, QueryMsg, ReflowGoal, ReflowPhasesRun, ReflowRequest,
-    ReflowRequestRestyle, ReflowResult, ReflowStatistics, ScrollContainerQueryFlags,
-    ScrollContainerResponse, TrustedNodeAddress, with_layout_state,
+    AxesOverflow, BoxAreaType, CSSPixelRectVec, CaretLine, DangerousStyleNode, EditingSelection,
+    IFrameSizes, Layout, LayoutConfig, LayoutDamage, LayoutElement, LayoutFactory, LayoutNode,
+    NodeRenderingType, OffsetParentResponse, PhysicalSides, QueryMsg, ReflowGoal, ReflowPhasesRun,
+    ReflowRequest, ReflowRequestRestyle, ReflowResult, ReflowStatistics,
+    ScrollContainerQueryFlags, ScrollContainerResponse, TrustedNodeAddress, with_layout_state,
 };
 use log::{debug, warn};
 use malloc_size_of::{MallocConditionalSizeOf, MallocSizeOf, MallocSizeOfOps};
@@ -93,7 +93,7 @@ use crate::cell::WeakRefCell;
 use crate::dom::{LayoutBox, NodeExt};
 use crate::query::{
     find_character_offset_in_fragment_descendants, get_the_text_steps, process_box_area_request,
-    process_box_areas_request, process_client_rect_request,
+    process_box_areas_request, process_caret_stops_query, process_client_rect_request,
     process_containing_block_descendant_query, process_containing_block_query,
     process_current_css_zoom_query, process_effective_overflow_query,
     process_node_scroll_area_request, process_offset_parent_query, process_padding_request,
@@ -238,6 +238,10 @@ pub struct LayoutThread {
     ///
     /// If this changed, then we need to create a new display list.
     previously_highlighted_dom_node: Cell<Option<OpaqueNode>>,
+
+    /// The selection of the focused editing host painted by the last display list. If this
+    /// changed, then we need to create a new display list.
+    previously_painted_editing_selection: RefCell<Option<EditingSelection>>,
 
     /// Handler for all Paint Timings
     paint_timing_handler: RefCell<Option<PaintTimingHandler>>,
@@ -661,6 +665,18 @@ impl Layout for LayoutThread {
     }
 
     #[servo_tracing::instrument(skip_all)]
+    fn query_caret_stops(&self, node: TrustedNodeAddress) -> Vec<CaretLine> {
+        with_layout_state(|| {
+            let node = unsafe { ServoLayoutNode::new(&node) };
+            let stacking_context_tree = self.stacking_context_tree.borrow();
+            let Some(stacking_context_tree) = stacking_context_tree.as_ref() else {
+                return Vec::new();
+            };
+            process_caret_stops_query(&node, stacking_context_tree)
+        })
+    }
+
+    #[servo_tracing::instrument(skip_all)]
     fn query_elements_from_point(
         &self,
         point: webrender_api::units::LayoutPoint,
@@ -890,6 +906,7 @@ impl LayoutThread {
             resolved_images_cache: Default::default(),
             debug: opts::get().debug.clone(),
             previously_highlighted_dom_node: Cell::new(None),
+            previously_painted_editing_selection: Default::default(),
             paint_timing_handler: Default::default(),
             user_stylesheets: config.user_stylesheets,
             accessibility_active: Cell::new(false),
@@ -1373,7 +1390,10 @@ impl LayoutThread {
         self.prepare_stylist_for_reflow(reflow_request, document, &guards, &user_agent_stylesheets)
             .process_style(dangerous_root_element, Some(&snapshot_map));
 
-        if self.previously_highlighted_dom_node.get() != reflow_request.highlighted_dom_node {
+        if self.previously_highlighted_dom_node.get() != reflow_request.highlighted_dom_node ||
+            *self.previously_painted_editing_selection.borrow() !=
+                reflow_request.editing_selection
+        {
             // Need to manually force layout to build a new display list regardless of whether the box tree
             // changed or not.
             self.need_new_display_list.set(true);
@@ -1674,6 +1694,7 @@ impl LayoutThread {
             self.webview_id,
             self.device().device_pixel_ratio(),
             reflow_request.highlighted_dom_node,
+            reflow_request.editing_selection.as_ref(),
             &self.debug,
             paint_timing_handler,
             reflow_statistics,
@@ -1706,6 +1727,8 @@ impl LayoutThread {
         self.need_new_display_list.set(false);
         self.previously_highlighted_dom_node
             .set(reflow_request.highlighted_dom_node);
+        *self.previously_painted_editing_selection.borrow_mut() =
+            reflow_request.editing_selection.clone();
         true
     }
 
@@ -2110,7 +2133,9 @@ impl ReflowPhases {
                 QueryMsg::FlushForUpdateTheRenderingQuery |
                 QueryMsg::OffsetParentQuery |
                 QueryMsg::ScrollingAreaOrOffsetQuery |
-                QueryMsg::TextIndexQuery => Self::StackingContextTreeConstruction,
+                QueryMsg::TextIndexQuery | QueryMsg::CaretStopsQuery => {
+                    Self::StackingContextTreeConstruction
+                },
                 QueryMsg::ClientRectQuery |
                 QueryMsg::CurrentCSSZoomQuery |
                 QueryMsg::EffectiveOverflow |

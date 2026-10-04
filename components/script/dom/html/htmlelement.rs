@@ -68,7 +68,8 @@ use crate::dom::iterators::ShadowIncluding;
 use crate::dom::medialist::MediaList;
 use crate::dom::node::virtualmethods::VirtualMethods;
 use crate::dom::node::{
-    BindContext, MoveContext, Node, NodeTraits, UnbindContext, from_untrusted_node_address,
+    BindContext, MoveContext, Node, NodeDamage, NodeTraits, UnbindContext,
+    from_untrusted_node_address,
 };
 use crate::dom::scrolling_box::{ScrollAxisState, ScrollRequirement};
 use crate::dom::shadowroot::ShadowRoot;
@@ -1278,6 +1279,11 @@ impl VirtualMethods for HTMLElement {
         match (attr.local_name(), mutation) {
             (&local_name!("accesskey"), ..) => {
                 self.update_assigned_access_key();
+            },
+            // Layout records where editable text comes from in the DOM when it builds boxes for
+            // it, so the boxes of the content whose editability changed need rebuilding.
+            (&local_name!("contenteditable"), ..) => {
+                self.upcast::<Node>().dirty(NodeDamage::Other);
             },
             (&local_name!("form"), mutation) if self.is_form_associated_custom_element() => {
                 self.form_attribute_mutated(cx, mutation);

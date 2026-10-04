@@ -131,6 +131,12 @@ textarea::selection {
   color: black;
 }
 
+/* Layout paints the selection of editing hosts too; other browsers keep the text colour. */
+[contenteditable]::selection,
+[contenteditable] ::selection {
+  background: rgba(176, 214, 255, 1.0);
+}
+
 /* Button type inputs */
 button,
 select,

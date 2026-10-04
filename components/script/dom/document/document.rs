@@ -32,8 +32,8 @@ use js::context::{JSContext, NoGC};
 use js::realm::CurrentRealm;
 use js::rust::{HandleObject, HandleValue, MutableHandleValue};
 use layout_api::{
-    PendingRestyle, ReflowGoal, ReflowPhasesRun, ReflowStatistics, RestyleReason,
-    ScrollContainerQueryFlags, TrustedNodeAddress,
+    EditingSelection, PendingRestyle, ReflowGoal, ReflowPhasesRun, ReflowStatistics,
+    RestyleReason, ScrollContainerQueryFlags, TrustedNodeAddress,
 };
 use metrics::{InteractiveFlag, InteractiveWindow, ProgressiveWebMetrics};
 use net_traits::CookieSource::NonHTTP;
@@ -80,6 +80,7 @@ use url::{Host, Position};
 
 use crate::animations::Animations;
 use crate::document_loader::{DocumentLoader, LoadType};
+use crate::dom::abstractrange::bp_position;
 use crate::dom::animationtimeline::AnimationTimeline;
 use crate::dom::attr::Attr;
 use crate::dom::beforeunloadevent::BeforeUnloadEvent;
@@ -158,6 +159,7 @@ use crate::dom::history::History;
 use crate::dom::html::htmlallcollection::HTMLAllCollection;
 use crate::dom::html::htmlanchorelement::HTMLAnchorElement;
 use crate::dom::html::htmlareaelement::HTMLAreaElement;
+use crate::dom::html::htmlbrelement::HTMLBRElement;
 use crate::dom::html::htmlbaseelement::HTMLBaseElement;
 use crate::dom::html::htmlcollection::{CollectionFilter, HTMLCollection};
 use crate::dom::html::htmlelement::HTMLElement;
@@ -5042,6 +5044,47 @@ impl Document {
         self.highlighted_dom_node.get()
     }
 
+    /// The selection that layout paints when it is inside the focused editing host: the caret
+    /// of a collapsed selection, or the selected text.
+    pub(crate) fn editing_selection_for_layout(&self) -> Option<EditingSelection> {
+        let range = self.selection.get()?.active_range()?;
+        let focused_area = self.focus_handler().focused_area();
+        let editing_host = range.start_container().editing_host_of()?;
+        if *editing_host != *focused_area.element()?.upcast::<Node>() {
+            return None;
+        }
+
+        if range.collapsed() {
+            let (node, offset) =
+                caret_position_in_laid_out_text(&range.start_container(), range.start_offset())?;
+            return Some(EditingSelection {
+                caret: Some((node.to_opaque(), offset)),
+                selected_text: Vec::new(),
+            });
+        }
+
+        let (start, start_offset) = (range.start_container(), range.start_offset());
+        let (end, end_offset) = (range.end_container(), range.end_offset());
+        let selected_text = editing_host
+            .traverse_preorder(ShadowIncluding::No)
+            .filter(|node| node.is::<Text>())
+            .filter_map(|node| {
+                let selected_start = if node == start { start_offset } else { 0 };
+                let selected_end = if node == end { end_offset } else { node.len() };
+                let after_start = bp_position(&node, selected_end, &start, start_offset) ==
+                    Some(Ordering::Greater);
+                let before_end =
+                    bp_position(&node, selected_start, &end, end_offset) == Some(Ordering::Less);
+                (after_start && before_end && selected_start < selected_end)
+                    .then(|| (node.to_opaque(), selected_start..selected_end))
+            })
+            .collect();
+        Some(EditingSelection {
+            caret: None,
+            selected_text,
+        })
+    }
+
     pub(crate) fn custom_element_reaction_stack(&self) -> Rc<CustomElementReactionStack> {
         self.custom_element_reaction_stack.clone()
     }
@@ -7097,5 +7140,42 @@ impl Iterator for SameOriginDescendantNavigablesIterator {
             };
         }
         None
+    }
+}
+
+/// Where layout paints the caret of a selection collapsed at (`node`, `offset`): a position in
+/// a text node, or before (0) or after (1) a `<br>`. A position between elements becomes the
+/// nearest such position, preferring the end of text before it.
+fn caret_position_in_laid_out_text(node: &Node, offset: u32) -> Option<(DomRoot<Node>, u32)> {
+    let mut node = DomRoot::from_ref(node);
+    let mut offset = offset;
+    loop {
+        if node.is::<Text>() {
+            return Some((node, offset));
+        }
+        let before = offset
+            .checked_sub(1)
+            .and_then(|index| node.children().nth(index as usize));
+        let after = node.children().nth(offset as usize);
+        match (before, after) {
+            (Some(before), _) if before.is::<Text>() => {
+                let length = before.len();
+                return Some((before, length));
+            },
+            (_, Some(after)) if after.is::<Text>() || after.is::<HTMLBRElement>() => {
+                return Some((after, 0));
+            },
+            // After a final `<br>` there is no further line; its start is the caret position.
+            (Some(before), None) if before.is::<HTMLBRElement>() => return Some((before, 0)),
+            (_, Some(after)) if after.is::<Element>() => {
+                node = after;
+                offset = 0;
+            },
+            (Some(before), _) if before.is::<Element>() => {
+                offset = before.len();
+                node = before;
+            },
+            _ => return None,
+        }
     }
 }

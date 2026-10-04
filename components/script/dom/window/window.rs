@@ -111,6 +111,7 @@ use crate::dom::bindings::codegen::Bindings::ImageBitmapBinding::{
 };
 use crate::dom::bindings::codegen::Bindings::MediaQueryListBinding::MediaQueryList_Binding::MediaQueryListMethods;
 use crate::dom::bindings::codegen::Bindings::MessagePortBinding::StructuredSerializeOptions;
+use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use crate::dom::bindings::codegen::Bindings::ReportingObserverBinding::Report;
 use crate::dom::bindings::codegen::Bindings::RequestBinding::{RequestInfo, RequestInit};
 use crate::dom::bindings::codegen::Bindings::VoidFunctionBinding::VoidFunction;
@@ -182,7 +183,7 @@ use crate::dom::storage::Storage;
 #[cfg(feature = "bluetooth")]
 use crate::dom::testrunner::TestRunner;
 use crate::dom::trustedtypes::trustedtypepolicyfactory::TrustedTypePolicyFactory;
-use crate::dom::types::{ImageBitmap, MouseEvent, SVGSVGElement, UIEvent};
+use crate::dom::types::{HTMLBRElement, ImageBitmap, MouseEvent, SVGSVGElement, Text, UIEvent};
 use crate::dom::useractivation::UserActivationTimestamp;
 use crate::dom::visualviewport::{VisualViewport, VisualViewportChanges};
 #[cfg(feature = "webgpu")]
@@ -271,6 +272,21 @@ struct PendingLayoutImageAncillaryData {
     node: Dom<Node>,
     #[no_trace]
     destination: LayoutImageDestination,
+}
+
+/// A caret position in editable text, as laid out.
+pub(crate) struct LaidOutCaretStop {
+    pub(crate) node: DomRoot<Node>,
+    pub(crate) offset: u32,
+    /// The horizontal position of the caret in the viewport.
+    pub(crate) x: Au,
+}
+
+/// The caret positions of a line box, left to right, and its vertical extent in the viewport.
+pub(crate) struct LaidOutCaretLine {
+    pub(crate) top: Au,
+    pub(crate) bottom: Au,
+    pub(crate) stops: Vec<LaidOutCaretStop>,
 }
 
 #[dom_struct]
@@ -2695,6 +2711,7 @@ impl Window {
             animations: document.animations().sets.clone(),
             animating_images: document.image_animation_manager().animating_images(),
             highlighted_dom_node: document.highlighted_dom_node().map(|node| node.to_opaque()),
+            editing_selection: document.editing_selection_for_layout(),
             document_context,
             rooted_nodes_for_accessibility_integrity_check,
         };
@@ -3188,6 +3205,57 @@ impl Window {
         self.layout
             .borrow()
             .query_text_index(node.to_trusted_node_address(), point_in_viewport)
+    }
+
+    /// The caret positions in the editable text of `editing_host`, by line. Positions after a
+    /// line break are left out: they are the start of the next line.
+    pub(crate) fn caret_stops_query(&self, editing_host: &Node) -> Vec<LaidOutCaretLine> {
+        self.layout_reflow(QueryMsg::CaretStopsQuery);
+        let lines = self
+            .layout
+            .borrow()
+            .query_caret_stops(editing_host.to_trusted_node_address());
+        lines
+            .into_iter()
+            .filter_map(|line| {
+                let mut stops: Vec<LaidOutCaretStop> = Vec::new();
+                for stop in line.stops {
+                    let node = unsafe { from_untrusted_node_address(stop.node) };
+                    let (node, offset) = if node.is::<HTMLBRElement>() {
+                        if stop.offset == 1 {
+                            continue;
+                        }
+                        let parent = node.GetParentNode().expect("Laid out nodes have a parent");
+                        (parent, node.index())
+                    } else {
+                        let follows_line_feed = node.downcast::<Text>().is_some_and(|text| {
+                            stop.offset > 0 &&
+                                text.data().encode_utf16().nth(stop.offset as usize - 1) ==
+                                    Some('\n' as u16)
+                        });
+                        if follows_line_feed {
+                            continue;
+                        }
+                        (node, stop.offset)
+                    };
+                    // Positions at the same place, such as the end of one text node and the start
+                    // of the next, or inside a cluster of zero-width glyphs, are one stop.
+                    if stops.last().is_some_and(|last| last.x == stop.x) {
+                        continue;
+                    }
+                    stops.push(LaidOutCaretStop {
+                        node,
+                        offset,
+                        x: stop.x,
+                    });
+                }
+                (!stops.is_empty()).then_some(LaidOutCaretLine {
+                    top: line.top,
+                    bottom: line.bottom,
+                    stops,
+                })
+            })
+            .collect()
     }
 
     pub(crate) fn elements_from_point_query(

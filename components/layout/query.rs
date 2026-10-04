@@ -13,9 +13,9 @@ use embedder_traits::UntrustedNodeAddress;
 use euclid::{Point2D, Rect, Size2D, Vector2D};
 use itertools::Itertools;
 use layout_api::{
-    AxesOverflow, BoxAreaType, CSSPixelRectVec, DangerousStyleElementOf, LayoutElement,
-    LayoutElementType, LayoutNode, LayoutNodeType, OffsetParentResponse, PhysicalSides,
-    ScrollContainerQueryFlags, ScrollContainerResponse,
+    AxesOverflow, BoxAreaType, CSSPixelRectVec, CaretLine, CaretStop, DangerousStyleElementOf,
+    LayoutElement, LayoutElementType, LayoutNode, LayoutNodeType, OffsetParentResponse,
+    PhysicalSides, ScrollContainerQueryFlags, ScrollContainerResponse,
 };
 use paint_api::display_list::ScrollTree;
 use script::layout_dom::ServoLayoutNode;
@@ -1683,6 +1683,125 @@ pub fn find_character_offset_in_fragment_descendants(
             .fragment
             .character_offset(closest_fragment.point_in_fragment)
     })
+}
+
+/// The caret positions of the editable text in the fragments of `node` (an editing host),
+/// grouped into lines from top to bottom, each in left to right order. Positions are in the
+/// viewport.
+pub fn process_caret_stops_query(
+    node: &ServoLayoutNode,
+    stacking_context_tree: &StackingContextTree,
+) -> Vec<CaretLine> {
+    fn collect_text_fragments(
+        fragment: &Fragment,
+        origin: Vector2D<Au, CSSPixel>,
+        text_fragments: &mut Vec<(Arc<TextFragment>, Rect<Au, CSSPixel>)>,
+    ) {
+        if let Fragment::Text(text_fragment) = fragment {
+            if text_fragment
+                .offsets
+                .as_ref()
+                .is_some_and(|offsets| offsets.editable_text.is_some())
+            {
+                let rect = text_fragment.base.rect().translate(origin);
+                text_fragments.push((text_fragment.clone(), rect));
+            }
+            return;
+        }
+        let Some(children) = fragment.children() else {
+            return;
+        };
+        let origin = origin +
+            fragment
+                .base()
+                .map(|base| base.rect().origin.to_vector())
+                .unwrap_or_default();
+        for child in children.iter() {
+            collect_text_fragments(child, origin, text_fragments);
+        }
+    }
+
+    let mut text_fragments = Vec::new();
+    for fragment in &node.fragments_for_pseudo(None) {
+        // The children of the editing host are positioned relative to its content box, whose
+        // position in the viewport this finds.
+        let Some(viewport_origin_in_fragment) =
+            stacking_context_tree.offset_in_fragment(fragment, Point2D::zero())
+        else {
+            continue;
+        };
+        let Some(children) = fragment.children() else {
+            continue;
+        };
+        for child in children.iter() {
+            collect_text_fragments(
+                child,
+                -viewport_origin_in_fragment.to_vector(),
+                &mut text_fragments,
+            );
+        }
+    }
+
+    let mut lines: Vec<CaretLine> = Vec::new();
+    text_fragments.sort_by_key(|(_, rect)| rect.min_y());
+    for (text_fragment, rect) in text_fragments {
+        let offsets = text_fragment
+            .offsets
+            .as_ref()
+            .expect("Only collected fragments with offsets");
+        let editable_text = offsets
+            .editable_text
+            .as_ref()
+            .expect("Only collected fragments with editable text");
+
+        let mut stops = Vec::new();
+        let mut push_stop = |character: usize, x: Au| {
+            if let Some((node, offset)) = editable_text.dom_position(character) {
+                stops.push(CaretStop {
+                    node: node.into(),
+                    offset,
+                    x,
+                });
+            }
+        };
+        let mut character = offsets.character_range.start;
+        let mut x = rect.min_x();
+        push_stop(character, x);
+        for glyph_store in &text_fragment.glyphs {
+            for glyph in glyph_store.glyphs() {
+                x += glyph.advance();
+                if glyph.char_is_word_separator() {
+                    x += text_fragment.justification_adjustment;
+                }
+                character += glyph.character_count();
+                push_stop(character, x);
+            }
+        }
+
+        // Fragments of one line box can have different heights, but each contains the middle
+        // of the others.
+        let middle = rect.min_y() + rect.height().scale_by(0.5);
+        match lines
+            .iter_mut()
+            .find(|line| line.top <= middle && middle < line.bottom)
+        {
+            Some(line) => {
+                line.top = line.top.min(rect.min_y());
+                line.bottom = line.bottom.max(rect.max_y());
+                line.stops.extend(stops);
+            },
+            None => lines.push(CaretLine {
+                top: rect.min_y(),
+                bottom: rect.max_y(),
+                stops,
+            }),
+        }
+    }
+    for line in &mut lines {
+        line.stops.sort_by_key(|stop| stop.x);
+    }
+    lines.sort_by_key(|line| line.top);
+    lines
 }
 
 pub fn process_containing_block_query(node: ServoLayoutNode) -> Option<UntrustedNodeAddress> {

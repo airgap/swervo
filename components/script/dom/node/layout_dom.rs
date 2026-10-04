@@ -6,6 +6,7 @@
 
 use std::borrow::Cow;
 
+use html5ever::{local_name, ns};
 use layout_api::{
     GenericLayoutData, HTMLCanvasData, HTMLMediaData, LayoutElementType, LayoutNodeType,
     SVGElementData, SharedSelection,
@@ -275,6 +276,30 @@ impl<'dom> LayoutDom<'dom, Node> {
         shadow_root
             .downcast::<HTMLTextAreaElement>()
             .map(|textarea| textarea.selection_for_layout())
+    }
+
+    /// Whether the contenteditable attribute of the nearest inclusive ancestor that sets it
+    /// makes this node editable; mirrors `Node::editing_host_of`.
+    pub(crate) fn is_editable_for_layout(self) -> bool {
+        let mut node = Some(self);
+        while let Some(current) = node {
+            if let Some(element) = current.downcast::<Element>() &&
+                let Some(value) =
+                    element.get_attr_val_for_layout(&ns!(), &local_name!("contenteditable"))
+            {
+                if value.is_empty() ||
+                    value.eq_ignore_ascii_case("true") ||
+                    value.eq_ignore_ascii_case("plaintext-only")
+                {
+                    return true;
+                }
+                if value.eq_ignore_ascii_case("false") {
+                    return false;
+                }
+            }
+            node = current.parent_node_ref();
+        }
+        false
     }
 
     pub(crate) fn image_url(self) -> Option<ServoUrl> {

@@ -160,6 +160,38 @@ pub struct ScriptSelection {
 }
 
 pub type SharedSelection = Arc<AtomicRefCell<ScriptSelection>>;
+
+/// The selection inside a focused editing host (`contenteditable`), in DOM terms. Unlike a
+/// [`ScriptSelection`] it can span many text nodes and inline formatting contexts.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EditingSelection {
+    /// The insertion point of a collapsed selection: a text node or a `<br>` and a UTF-16
+    /// offset in it (0 or 1 for a `<br>`).
+    pub caret: Option<(OpaqueNode, u32)>,
+    /// The selected UTF-16 range of every text node in a non-collapsed selection.
+    pub selected_text: Vec<(OpaqueNode, Range<u32>)>,
+}
+
+/// A position where a caret can be placed in editable text, as laid out.
+#[derive(Clone, Debug)]
+pub struct CaretStop {
+    /// The text node, or the `<br>`, that this position is in.
+    pub node: UntrustedNodeAddress,
+    /// A UTF-16 offset in the text node, or 0 (before) / 1 (after) for a `<br>`.
+    pub offset: u32,
+    /// The horizontal position of the caret in the viewport.
+    pub x: Au,
+}
+
+/// The caret positions of one line box, in visual order.
+#[derive(Clone, Debug)]
+pub struct CaretLine {
+    /// The top of the line in the viewport.
+    pub top: Au,
+    /// The bottom of the line in the viewport.
+    pub bottom: Au,
+    pub stops: Vec<CaretStop>,
+}
 pub struct HTMLCanvasData {
     pub image_key: Option<ImageKey>,
     pub width: u32,
@@ -472,6 +504,8 @@ pub trait Layout {
         node: TrustedNodeAddress,
         point: Point2D<Au, CSSPixel>,
     ) -> Option<usize>;
+    /// The caret positions of the editable text inside the given editing host, by line.
+    fn query_caret_stops(&self, node: TrustedNodeAddress) -> Vec<CaretLine>;
     fn query_elements_from_point(&self, point: LayoutPoint) -> Vec<ElementsFromPointResult>;
     fn query_effective_overflow(&self, node: TrustedNodeAddress) -> Option<AxesOverflow>;
     fn stylist_mut(&mut self) -> &mut Stylist;
@@ -626,6 +660,7 @@ pub enum QueryMsg {
     ScrollingAreaOrOffsetQuery,
     StyleQuery,
     TextIndexQuery,
+    CaretStopsQuery,
     PaddingQuery,
     FlushForUpdateTheRenderingQuery,
 }
@@ -672,6 +707,7 @@ bitflags! {
         const ThemeChanged = 1 << 4;
         const ViewportChanged = 1 << 5;
         const PaintWorkletLoaded = 1 << 6;
+        const SelectionChanged = 1 << 7;
     }
 }
 
@@ -777,6 +813,8 @@ pub struct ReflowRequest {
     pub animating_images: Arc<RwLock<AnimatingImages>>,
     /// The node highlighted by the devtools, if any
     pub highlighted_dom_node: Option<OpaqueNode>,
+    /// The selection of the focused editing host, which layout paints.
+    pub editing_selection: Option<EditingSelection>,
     /// The current font context.
     pub document_context: WebFontDocumentContext,
     /// Nodes which were removed from the DOM tree since the last reflow, which were rooted in

@@ -5,9 +5,14 @@
 use std::cell::Cell;
 use std::cmp::Ordering;
 
+use app_units::Au;
 use dom_struct::dom_struct;
+use euclid::Point2D;
 use js::context::{JSContext, NoGC};
+use layout_api::RestyleReason;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
+use style::Zero;
+use style_traits::CSSPixel;
 
 use crate::dom::abstractrange::bp_position;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::{GetRootNodeOptions, NodeMethods};
@@ -23,6 +28,18 @@ use crate::dom::document::Document;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::node::{Node, NodeTraits};
 use crate::dom::range::Range;
+use crate::dom::text::Text;
+use crate::dom::window::{LaidOutCaretLine, LaidOutCaretStop};
+
+/// The unit a caret moves by, as in `Selection.modify()`.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum CaretMovement {
+    Character,
+    Word,
+    Line,
+    LineBoundary,
+    DocumentBoundary,
+}
 
 #[derive(Clone, Copy, JSTraceable, MallocSizeOf)]
 enum Direction {
@@ -93,6 +110,9 @@ impl Selection {
         // > selection changes to something different, the state override and value
         // > override must be unset for every command.
         self.document.clear_command_overrides();
+
+        // Layout paints the caret and selected text of editing hosts.
+        self.document.add_restyle_reason(RestyleReason::SelectionChanged);
 
         // Step 1. If target's has scheduled selectionchange event is true, abort these steps.
         if self.has_scheduled_selectionchange_event.get() {
@@ -194,6 +214,199 @@ impl Selection {
             })
             .unwrap_or(0)
     }
+
+    /// Moves the focus of the selection (`extend`) or the whole selection to the caret position
+    /// closest to `point` (in the viewport) in the editable text of `editing_host`.
+    pub(crate) fn move_to_point_in_editing_host(
+        &self,
+        cx: &mut JSContext,
+        editing_host: &Node,
+        point: Point2D<Au, CSSPixel>,
+        extend: bool,
+    ) {
+        let lines = self.document.window().caret_stops_query(editing_host);
+        let distance_to_line = |line: &LaidOutCaretLine| {
+            (line.top - point.y).max(point.y - line.bottom).max(Au::zero())
+        };
+        let Some(line) = lines.iter().min_by_key(|line| distance_to_line(line)) else {
+            return;
+        };
+        // Past either end of the line the caret goes to that end, like in other browsers.
+        let Some(stop) = line
+            .stops
+            .iter()
+            .min_by_key(|stop| (stop.x - point.x).abs())
+        else {
+            return;
+        };
+        self.move_to_stop(cx, stop, extend);
+    }
+
+    /// <https://w3c.github.io/selection-api/#dom-selection-modify>, for selections in
+    /// editable content, using the caret positions of the laid out text.
+    pub(crate) fn modify_in_editable_content(
+        &self,
+        cx: &mut JSContext,
+        extend: bool,
+        forward: bool,
+        movement: CaretMovement,
+    ) {
+        let (Some(range), Some(focus_node)) = (self.range.get(), self.focus_node()) else {
+            return;
+        };
+        let Some(editing_host) = focus_node.editing_host_of() else {
+            return;
+        };
+
+        // Moving a non-collapsed selection by a character collapses it to the side it moves to.
+        let (start_node, start_offset) = if !extend && !range.collapsed() {
+            if movement == CaretMovement::Character {
+                let result = if forward {
+                    self.CollapseToEnd(cx)
+                } else {
+                    self.CollapseToStart(cx)
+                };
+                result.expect("The selection has a range");
+                return;
+            }
+            if forward {
+                (range.end_container(), range.end_offset())
+            } else {
+                (range.start_container(), range.start_offset())
+            }
+        } else {
+            (focus_node, self.focus_offset())
+        };
+
+        let lines = self.document.window().caret_stops_query(&editing_host);
+        let positions: Vec<(usize, usize)> = lines
+            .iter()
+            .enumerate()
+            .flat_map(|(line_index, line)| {
+                (0..line.stops.len()).map(move |stop_index| (line_index, stop_index))
+            })
+            .collect();
+        let stop_at =
+            |(line_index, stop_index): (usize, usize)| &lines[line_index].stops[stop_index];
+        let Some(current) = positions
+            .iter()
+            .position(|&position| {
+                let stop = stop_at(position);
+                *stop.node == *start_node && stop.offset == start_offset
+            })
+            .or_else(|| {
+                positions.iter().position(|&position| {
+                    let stop = stop_at(position);
+                    bp_position(&stop.node, stop.offset, &start_node, start_offset) !=
+                        Some(Ordering::Less)
+                })
+            })
+            .or(positions.len().checked_sub(1))
+        else {
+            return;
+        };
+        let (current_line, _) = positions[current];
+
+        // Whether the character between two consecutive positions is part of a word; a line
+        // break is not.
+        let is_word_character_between = |first: usize, second: usize| {
+            let (first, second) = (positions[first], positions[second]);
+            first.0 == second.0 &&
+                character_before(stop_at(second))
+                    .is_some_and(|character| character.is_alphanumeric() || character == '_')
+        };
+
+        let target = match movement {
+            CaretMovement::Character if forward => (current + 1).min(positions.len() - 1),
+            CaretMovement::Character => current.saturating_sub(1),
+            // Like other browsers on Linux, words are left at their end going forward and at their
+            // start going backward.
+            CaretMovement::Word if forward => {
+                let mut target = current;
+                while target + 1 < positions.len() && !is_word_character_between(target, target + 1)
+                {
+                    target += 1;
+                }
+                while target + 1 < positions.len() &&
+                    is_word_character_between(target, target + 1)
+                {
+                    target += 1;
+                }
+                target
+            },
+            CaretMovement::Word => {
+                let mut target = current;
+                while target > 0 && !is_word_character_between(target - 1, target) {
+                    target -= 1;
+                }
+                while target > 0 && is_word_character_between(target - 1, target) {
+                    target -= 1;
+                }
+                target
+            },
+            CaretMovement::Line => {
+                let target_line = if forward {
+                    Some(current_line + 1).filter(|line| *line < lines.len())
+                } else {
+                    current_line.checked_sub(1)
+                };
+                match target_line {
+                    Some(target_line) => {
+                        let x = stop_at(positions[current]).x;
+                        let line_start = positions
+                            .iter()
+                            .position(|position| position.0 == target_line)
+                            .expect("Every line has a position");
+                        let (closest, _) = lines[target_line]
+                            .stops
+                            .iter()
+                            .enumerate()
+                            .min_by_key(|(_, stop)| (stop.x - x).abs())
+                            .expect("Every line has a position");
+                        line_start + closest
+                    },
+                    // There is no line to move to, so go to the start or end of this one.
+                    None if forward => positions.len() - 1,
+                    None => 0,
+                }
+            },
+            CaretMovement::LineBoundary => {
+                let mut on_line = positions
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, position)| position.0 == current_line)
+                    .map(|(index, _)| index);
+                if forward {
+                    on_line.last()
+                } else {
+                    on_line.next()
+                }
+                .expect("The current line has a position")
+            },
+            CaretMovement::DocumentBoundary if forward => positions.len() - 1,
+            CaretMovement::DocumentBoundary => 0,
+        };
+        self.move_to_stop(cx, stop_at(positions[target]), extend);
+    }
+
+    fn move_to_stop(&self, cx: &mut JSContext, stop: &LaidOutCaretStop, extend: bool) {
+        let result = if extend && self.range.get().is_some() {
+            self.Extend(cx, &stop.node, stop.offset)
+        } else {
+            self.Collapse(cx, Some(&stop.node), stop.offset)
+        };
+        result.expect("Caret stops are valid boundary points");
+    }
+}
+
+/// The character just before a caret position in a text node, if any.
+fn character_before(stop: &LaidOutCaretStop) -> Option<char> {
+    let text = stop.node.downcast::<Text>()?;
+    let offset = stop.offset as usize;
+    let units: Vec<u16> = text.data().encode_utf16().take(offset).collect();
+    char::decode_utf16(units.iter().rev().take(2).rev().copied())
+        .last()?
+        .ok()
 }
 
 impl SelectionMethods<crate::DomTypeHolder> for Selection {
@@ -588,6 +801,61 @@ impl SelectionMethods<crate::DomTypeHolder> for Selection {
         self.direction.set(direction);
 
         Ok(())
+    }
+
+    /// <https://w3c.github.io/selection-api/#dom-selection-modify>
+    fn Modify(
+        &self,
+        cx: &mut JSContext,
+        alter: DOMString,
+        direction: DOMString,
+        granularity: DOMString,
+    ) {
+        // Step 1. If alter is not ASCII case-insensitive match with "extend" or "move", abort
+        // these steps.
+        let extend = match &*alter.str().to_ascii_lowercase() {
+            "extend" => true,
+            "move" => false,
+            _ => return,
+        };
+        // Step 2. If direction is not ASCII case-insensitive match with "forward", "backward",
+        // "left", or "right", abort these steps.
+        // TODO: "left" and "right" depend on the direction of the text; only left-to-right
+        // text is handled.
+        let forward = match &*direction.str().to_ascii_lowercase() {
+            "forward" | "right" => true,
+            "backward" | "left" => false,
+            _ => return,
+        };
+        // Step 3. If granularity is not ASCII case-insensitive match with "character", "word",
+        // "sentence", "line", "paragraph", "lineboundary", "sentenceboundary",
+        // "paragraphboundary", "documentboundary", abort these steps.
+        // TODO: Sentences and paragraphs are not supported.
+        let movement = match &*granularity.str().to_ascii_lowercase() {
+            "character" => CaretMovement::Character,
+            "word" => CaretMovement::Word,
+            "line" => CaretMovement::Line,
+            "lineboundary" => CaretMovement::LineBoundary,
+            "documentboundary" => CaretMovement::DocumentBoundary,
+            _ => return,
+        };
+        // Step 4. If this selection is empty, abort these steps.
+        // Step 5. Let effectiveDirection be backwards.
+        // Step 6. If direction is ASCII case-insensitive match with "forward", set
+        // effectiveDirection to forwards.
+        // Step 7. If direction is ASCII case-insensitive match with "right" and inline base
+        // direction of this selection's focus is ltr, set effectiveDirection to forwards.
+        // Step 8. If direction is ASCII case-insensitive match with "left" and inline base
+        // direction of this selection's focus is rtl, set effectiveDirection to forwards.
+        // Step 9. Set this selection's direction to effectiveDirection.
+        // Step 10. If alter is ASCII case-insensitive match with "extend", set this
+        // selection's focus to the location as if the user had requested to extend selection
+        // by granularity.
+        // Step 11. Otherwise, set this selection's focus and anchor to the location as if the
+        // user had requested to move selection by granularity.
+        //
+        // TODO: Only caret positions in editable content are known.
+        self.modify_in_editable_content(cx, extend, forward, movement);
     }
 
     /// <https://w3c.github.io/selection-api/#dom-selection-selectallchildren>

@@ -172,6 +172,10 @@ pub trait LayoutNode<'dom>: Copy + Debug + NodeInfo + Send + Sync {
     /// If this node manages a selection, this returns the shared selection for the node.
     fn selection(&self) -> Option<SharedSelection>;
 
+    /// Whether this node is editable or an editing host (inside `contenteditable` content):
+    /// <https://html.spec.whatwg.org/multipage/#editable>.
+    fn is_editable(&self) -> bool;
+
     /// If this is an image element, returns its URL. If this is not an image element, fails.
     fn image_url(&self) -> Option<ServoUrl>;
 

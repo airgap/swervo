@@ -21,7 +21,9 @@ use style::values::specified::box_::DisplayOutside;
 use unicode_bidi::{BidiInfo, Level};
 
 use super::inline_box::{InlineBoxContainerState, InlineBoxIdentifier, InlineBoxTreePathToken};
-use super::{InlineFormattingContextLayout, LineBlockSizes, SharedInlineStyles, line_height};
+use super::{
+    EditableText, InlineFormattingContextLayout, LineBlockSizes, SharedInlineStyles, line_height,
+};
 use crate::cell::ArcRefCell;
 use crate::flow::inline::text_run::FontAndScriptInfo;
 use crate::fragment_tree::{BaseFragment, BaseFragmentInfo, BoxFragment, Fragment, TextFragment};
@@ -856,9 +858,13 @@ impl LineItem {
 
 #[derive(Debug, MallocSizeOf)]
 pub(crate) struct TextRunOffsets {
-    /// The selection range of the containing inline formatting context.
+    /// The selection range of the containing inline formatting context, for text controls.
     #[ignore_malloc_size_of = "This is stored primarily in the DOM"]
-    pub shared_selection: SharedSelection,
+    pub shared_selection: Option<SharedSelection>,
+    /// The DOM origin of the text of the containing inline formatting context, for editable
+    /// content.
+    #[ignore_malloc_size_of = "Measured in the inline formatting context"]
+    pub editable_text: Option<Arc<EditableText>>,
     /// The range of characters this [`TextRun`] represents within the entire text of its
     /// inline formatting context.
     pub character_range: Range<usize>,

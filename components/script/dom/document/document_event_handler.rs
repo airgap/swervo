@@ -20,6 +20,7 @@ use embedder_traits::{
 use embedder_traits::{
     GamepadEvent as EmbedderGamepadEvent, GamepadSupportedHapticEffects, GamepadUpdateType,
 };
+use app_units::Au;
 use euclid::{Point2D, Vector2D};
 use js::context::JSContext;
 use keyboard_types::{Code, Key, KeyState, Modifiers, NamedKey};
@@ -71,6 +72,7 @@ use crate::dom::keyboardevent::KeyboardEvent;
 use crate::dom::node::{self, Node, NodeTraits};
 use crate::dom::pointerevent::{PointerEvent, PointerId};
 use crate::dom::scrolling_box::{ScrollAxisState, ScrollRequirement, ScrollingBoxAxis};
+use crate::dom::selection::CaretMovement;
 use crate::dom::types::{
     ClipboardEvent, CompositionEvent, DataTransfer, Element, Event, EventTarget, GlobalScope,
     HTMLAnchorElement, HTMLElement, HTMLLabelElement, MouseEvent, Touch, TouchEvent, TouchList,
@@ -1026,6 +1028,23 @@ impl DocumentEventHandler {
                     document
                         .focus_handler()
                         .focus(cx, node.find_click_focusable_area());
+
+                    // Pressing the primary button in an editing host puts the caret where it was
+                    // pressed, or extends the selection there with Shift.
+                    if event.button == MouseButton::Left &&
+                        let Some(editing_host) = hit_test_result.node.editing_host_of() &&
+                        let Some(point) = mouse_event.point_in_viewport() &&
+                        let Some(selection) = document.GetSelection(cx)
+                    {
+                        selection.move_to_point_in_editing_host(
+                            cx,
+                            &editing_host,
+                            point.map(Au::from_f32_px),
+                            input_event
+                                .active_keyboard_modifiers
+                                .contains(Modifiers::SHIFT),
+                        );
+                    }
                 }
 
                 // Step 9. If mbutton is the secondary mouse button, then
@@ -2253,6 +2272,16 @@ impl DocumentEventHandler {
             return;
         }
 
+        if node.editing_host_of().is_some() {
+            if self.maybe_move_caret_for_key(cx, event) {
+                return;
+            }
+            // A space typed into an editing host is text, not a request to scroll.
+            if matches!(event.key(), Key::Character(string) if &string == " ") {
+                return;
+            }
+        }
+
         let mut is_space = false;
         let scroll = match event.key() {
             Key::Named(NamedKey::ArrowDown) => KeyboardScroll::Down,
@@ -2291,6 +2320,39 @@ impl DocumentEventHandler {
         }
 
         self.do_keyboard_scroll(cx, scroll);
+    }
+
+    /// Moves the caret of an editing host for the arrow, Home and End keys, extending the
+    /// selection with Shift, as `Selection.modify()` does. Returns whether the key moved it.
+    fn maybe_move_caret_for_key(&self, cx: &mut JSContext, event: &KeyboardEvent) -> bool {
+        let modifiers = event.modifiers();
+        if modifiers.intersects(Modifiers::ALT | Modifiers::META) {
+            return false;
+        }
+        let control = modifiers.contains(Modifiers::CONTROL);
+        let (forward, movement) = match event.key() {
+            Key::Named(NamedKey::ArrowLeft) if control => (false, CaretMovement::Word),
+            Key::Named(NamedKey::ArrowLeft) => (false, CaretMovement::Character),
+            Key::Named(NamedKey::ArrowRight) if control => (true, CaretMovement::Word),
+            Key::Named(NamedKey::ArrowRight) => (true, CaretMovement::Character),
+            Key::Named(NamedKey::ArrowUp) => (false, CaretMovement::Line),
+            Key::Named(NamedKey::ArrowDown) => (true, CaretMovement::Line),
+            Key::Named(NamedKey::Home) if control => (false, CaretMovement::DocumentBoundary),
+            Key::Named(NamedKey::Home) => (false, CaretMovement::LineBoundary),
+            Key::Named(NamedKey::End) if control => (true, CaretMovement::DocumentBoundary),
+            Key::Named(NamedKey::End) => (true, CaretMovement::LineBoundary),
+            _ => return false,
+        };
+        let Some(selection) = self.window.Document().GetSelection(cx) else {
+            return false;
+        };
+        selection.modify_in_editable_content(
+            cx,
+            modifiers.contains(Modifiers::SHIFT),
+            forward,
+            movement,
+        );
+        true
     }
 
     pub(crate) fn do_keyboard_scroll(&self, cx: &mut JSContext, scroll: KeyboardScroll) {

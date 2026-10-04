@@ -241,12 +241,10 @@ impl TextRunSegment {
         let mut character_range_start = self.character_range.start;
         for (run_index, run) in self.runs.iter().enumerate() {
             let new_character_range_end = character_range_start + run.character_count();
-            let offsets = ifc
-                .ifc
-                .shared_selection
-                .clone()
-                .map(|shared_selection| TextRunOffsets {
-                    shared_selection,
+            let offsets = (ifc.ifc.shared_selection.is_some() || ifc.ifc.editable_text.is_some())
+                .then(|| TextRunOffsets {
+                    shared_selection: ifc.ifc.shared_selection.clone(),
+                    editable_text: ifc.ifc.editable_text.clone(),
                     character_range: character_range_start..new_character_range_end,
                 });
 
