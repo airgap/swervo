@@ -10,6 +10,7 @@ use js::context::JSContext;
 use js::rust::HandleObject;
 use script_bindings::cell::DomRefCell;
 use style::selector_parser::PseudoElement;
+use stylo_dom::ElementState;
 
 use crate::dom::bindings::codegen::Bindings::HTMLProgressElementBinding::HTMLProgressElementMethods;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::Node_Binding::NodeMethods;
@@ -126,9 +127,20 @@ impl HTMLProgressElement {
 
     /// Update the visual width of bar
     fn update_state(&self, cx: &mut JSContext) {
+        // <https://html.spec.whatwg.org/multipage/#selector-indeterminate>
+        let indeterminate = !self
+            .upcast::<Element>()
+            .has_attribute(&local_name!("value"));
+        self.upcast::<Element>()
+            .set_state(ElementState::INDETERMINATE, indeterminate);
+
         let shadow_tree = self.shadow_tree(cx);
-        let position = (*self.Value() / *self.Max()) * 100.0;
-        let style = format!("width: {}%", position);
+        // An indeterminate bar takes its size and motion from the UA sheet.
+        let style = if indeterminate {
+            String::new()
+        } else {
+            format!("width: {}%", (*self.Value() / *self.Max()) * 100.0)
+        };
 
         shadow_tree
             .progress_value

@@ -718,6 +718,19 @@ progress::-webkit-progress-value {
   background: #0075ff;
 }
 
+/* Chrome's indeterminate bar is a fifth of the track sweeping across it and back every 2.5s
+   (`LayoutProgress` and `ThemePainterDefault::PaintProgressBar`). */
+progress:indeterminate::-webkit-progress-value {
+  inline-size: 20%;
+  border-radius: 20px;
+  animation: -servo-progress-indeterminate 1.25s linear infinite alternate;
+}
+
+@keyframes -servo-progress-indeterminate {
+  from { margin-inline-start: 0; }
+  to { margin-inline-start: 80%; }
+}
+
 slot {
   display: contents;
 }
@@ -770,6 +783,11 @@ slot {
 
   progress::-webkit-progress-value {
     background: green;
+  }
+
+  progress:indeterminate::-webkit-progress-value {
+    animation: none;
+    inline-size: 0;
   }
 
   meter::-webkit-meter-bar {
