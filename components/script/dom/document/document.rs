@@ -134,6 +134,7 @@ use crate::dom::customelementregistry::{
 use crate::dom::customevent::CustomEvent;
 use crate::dom::document::accessibility_data::AccessibilityData;
 use crate::dom::document::focus::{DocumentFocusHandler, FocusableArea};
+use crate::dom::document::top_layer::DocumentTopLayer;
 use crate::dom::document::tree_ordered_index_map::TreeOrderedIndexMap;
 use crate::dom::document_embedder_controls::DocumentEmbedderControls;
 use crate::dom::document_event_handler::DocumentEventHandler;
@@ -398,6 +399,8 @@ pub(crate) struct Document {
     event_handler: DocumentEventHandler,
     /// A helper used to process and store data related to focus handling.
     focus_handler: DocumentFocusHandler,
+    /// The top layer and the popover, dialog and close watcher state that feeds it.
+    top_layer: DocumentTopLayer,
     /// A helper to handle showing and hiding user interface controls in the embedding layer.
     embedder_controls: DocumentEmbedderControls,
     id_map: TreeOrderedIndexMap,
@@ -3751,6 +3754,7 @@ impl Document {
             quirks_mode: Cell::new(QuirksMode::NoQuirks),
             event_handler: DocumentEventHandler::new(window),
             focus_handler: DocumentFocusHandler::new(window, has_focus),
+            top_layer: Default::default(),
             embedder_controls: DocumentEmbedderControls::new(window),
             id_map: TreeOrderedIndexMap::id(),
             name_map: TreeOrderedIndexMap::name(),
@@ -3905,6 +3909,10 @@ impl Document {
     /// Get the [`Document`]'s [`DocumentFocusHandler`].
     pub(crate) fn focus_handler(&self) -> &DocumentFocusHandler {
         &self.focus_handler
+    }
+
+    pub(crate) fn top_layer(&self) -> &DocumentTopLayer {
+        &self.top_layer
     }
 
     /// Get the [`Document`]'s [`DocumentEmbedderControls`].

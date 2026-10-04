@@ -64,6 +64,9 @@ use crate::dom::html::htmlfieldsetelement::HTMLFieldSetElement;
 use crate::dom::html::htmlformelement::{
     FormControl, FormDatum, FormDatumValue, FormSubmitterElement, HTMLFormElement, SubmittedFrom,
 };
+use crate::dom::html::popover::{
+    popover_target_action_getter, popovertarget_associated_element, set_popover_target_element,
+};
 use crate::dom::htmlinputelement::radio_input_type::{
     broadcast_radio_checked, perform_radio_group_validation,
 };
@@ -1493,6 +1496,30 @@ impl HTMLInputElementMethods<crate::DomTypeHolder> for HTMLInputElement {
     // https://html.spec.whatwg.org/multipage/#dom-input-usemap
     make_setter!(SetUseMap, "usemap");
 
+    /// <https://html.spec.whatwg.org/multipage/#dom-popovertargetelement>
+    fn GetPopoverTargetElement(&self, cx: &mut JSContext) -> Option<DomRoot<Element>> {
+        popovertarget_associated_element(cx, self.upcast())
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-popovertargetelement>
+    fn SetPopoverTargetElement(&self, cx: &mut JSContext, value: Option<&Element>) {
+        set_popover_target_element(cx, self.upcast(), value);
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-popovertargetaction>
+    fn PopoverTargetAction(&self) -> DOMString {
+        popover_target_action_getter(self.upcast())
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-popovertargetaction>
+    fn SetPopoverTargetAction(&self, cx: &mut JSContext, value: DOMString) {
+        self.upcast::<Element>().set_string_attribute(
+            cx,
+            &local_name!("popovertargetaction"),
+            value,
+        );
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#dom-input-indeterminate>
     fn Indeterminate(&self) -> bool {
         self.upcast::<Element>()
@@ -2797,6 +2824,12 @@ impl Activatable for HTMLInputElement {
                 .as_specific()
                 .activation_behavior(cx, self, event, target);
         }
+
+        // <https://html.spec.whatwg.org/multipage/#the-input-element:activation-behaviour>
+        // > 3. Run the popover target attribute activation behavior given element and event's
+        // >    target.
+        self.upcast::<HTMLElement>()
+            .popover_target_attribute_activation_behavior(cx, target);
     }
 }
 

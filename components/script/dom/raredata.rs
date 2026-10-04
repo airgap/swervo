@@ -11,12 +11,14 @@ use stylo_atoms::Atom;
 
 use crate::dom::UniqueId;
 use crate::dom::bindings::root::{Dom, MutNullableDom};
+use crate::dom::bindings::str::DOMString;
 use crate::dom::customelementregistry::{
     CustomElementDefinition, CustomElementReaction, CustomElementRegistry, CustomElementState,
 };
 use crate::dom::domtokenlist::DOMTokenList;
 use crate::dom::elementinternals::ElementInternals;
 use crate::dom::html::htmlslotelement::SlottableData;
+use crate::dom::html::popover::PopoverState;
 use crate::dom::intersectionobserver::IntersectionObserverRegistration;
 use crate::dom::mutationobserver::RegisteredObserver;
 use crate::dom::nodelist::NodeList;
@@ -107,4 +109,21 @@ pub(crate) struct ElementRareData {
 
     /// <https://html.spec.whatwg.org/multipage/#previously-focused-element>
     pub(crate) previously_focused_element: MutNullableDom<Element>,
+
+    /// <https://html.spec.whatwg.org/multipage/#popover-invoker>
+    pub(crate) popover_invoker: MutNullableDom<Element>,
+    /// <https://html.spec.whatwg.org/multipage/#opened-in-popover-mode>
+    #[no_trace]
+    pub(crate) opened_in_popover_mode: Option<PopoverState>,
+    /// <https://html.spec.whatwg.org/multipage/#popover-showing-or-hiding>
+    pub(crate) popover_showing_or_hiding: bool,
+    /// The old state of the <https://html.spec.whatwg.org/multipage/#popover-toggle-task-tracker>,
+    /// if a toggle event task is queued.
+    pub(crate) popover_toggle_task_old_state: Option<DOMString>,
+    /// Identifies the most recently queued popover toggle event task, so that superseded tasks
+    /// can skip firing.
+    pub(crate) popover_toggle_task_generation: u64,
+    /// The explicitly set attr-element of the `popovertarget` attribute:
+    /// <https://html.spec.whatwg.org/multipage/#explicitly-set-attr-element>
+    pub(crate) explicitly_set_popover_target_element: MutNullableDom<Element>,
 }

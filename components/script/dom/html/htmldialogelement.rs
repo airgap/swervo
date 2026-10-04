@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 use std::borrow::Borrow;
+use std::cell::Cell;
 
 use dom_struct::dom_struct;
 use html5ever::{LocalName, Prefix, local_name, ns};
@@ -15,23 +16,40 @@ use stylo_dom::ElementState;
 use crate::dom::bindings::codegen::Bindings::HTMLDialogElementBinding::HTMLDialogElementMethods;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
-use crate::dom::bindings::root::DomRoot;
+use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::document::Document;
-use crate::dom::element::Element;
+use crate::dom::element::attributes::storage::AttrRef;
+use crate::dom::element::{AttributeMutation, Element};
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::html::htmlelement::HTMLElement;
 use crate::dom::htmlbuttonelement::{CommandState, HTMLButtonElement};
 use crate::dom::iterators::ShadowIncluding;
 use crate::dom::node::virtualmethods::VirtualMethods;
-use crate::dom::node::{Node, NodeTraits};
+use crate::dom::node::{BindContext, Node, NodeTraits, UnbindContext};
 use crate::dom::toggleevent::ToggleEvent;
+
+/// <https://html.spec.whatwg.org/multipage/#attr-dialog-closedby>
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum ClosedByState {
+    Any,
+    CloseRequest,
+    None,
+}
 
 #[dom_struct]
 pub(crate) struct HTMLDialogElement {
     htmlelement: HTMLElement,
     return_value: DomRefCell<DOMString>,
+    /// <https://html.spec.whatwg.org/multipage/#enable-close-watcher-for-requestclose()>
+    enable_close_watcher_for_request_close: Cell<bool>,
+    /// <https://html.spec.whatwg.org/multipage/#dialog-request-close-return-value>
+    request_close_return_value: DomRefCell<Option<DOMString>>,
+    /// <https://html.spec.whatwg.org/multipage/#dialog-request-close-source-element>
+    request_close_source_element: MutNullableDom<Element>,
+    /// <https://html.spec.whatwg.org/multipage/#close-watcher-is-running-cancel-action>
+    is_running_cancel_action: Cell<bool>,
 }
 
 impl HTMLDialogElement {
@@ -43,6 +61,10 @@ impl HTMLDialogElement {
         HTMLDialogElement {
             htmlelement: HTMLElement::new_inherited(local_name, prefix, document),
             return_value: DomRefCell::new(DOMString::new()),
+            enable_close_watcher_for_request_close: Cell::new(false),
+            request_close_return_value: DomRefCell::new(None),
+            request_close_source_element: Default::default(),
+            is_running_cancel_action: Cell::new(false),
         }
     }
 
@@ -98,7 +120,12 @@ impl HTMLDialogElement {
             )));
         }
 
-        // TODO: Step 5. If subject is in the popover showing state, then throw an "InvalidStateError" DOMException.
+        // Step 5. If subject is in the popover showing state, then throw an "InvalidStateError" DOMException.
+        if self.upcast::<HTMLElement>().is_popover_showing() {
+            return Err(Error::InvalidState(Some(
+                "Cannot call showModal() on a dialog that is showing as a popover.".into(),
+            )));
+        }
 
         // Step 6. If the result of firing an event named beforetoggle, using ToggleEvent, with the cancelable attribute initialized to true, the oldState attribute initialized to "closed", the newState attribute initialized to "open", and the source attribute initialized to source at subject is false, then return.
         let event = ToggleEvent::new(
@@ -126,7 +153,10 @@ impl HTMLDialogElement {
             return Ok(());
         }
 
-        // TODO: Step 9. If subject is in the popover showing state, then return.
+        // Step 9. If subject is in the popover showing state, then return.
+        if self.upcast::<HTMLElement>().is_popover_showing() {
+            return Ok(());
+        }
 
         // Step 10. Queue a dialog toggle event task given subject, "closed", "open", and source.
         self.queue_dialog_toggle_event_task("closed", "open", source);
@@ -135,14 +165,24 @@ impl HTMLDialogElement {
         subject.set_bool_attribute(cx, &local_name!("open"), true);
         subject.set_open_state(true);
 
-        // TODO: Step 12. Assert: subject's close watcher is not null.
+        // Step 12. Assert: subject's close watcher is not null.
+        let document = self.owner_document();
+        debug_assert!(
+            document
+                .top_layer()
+                .is_close_watcher_active(self.upcast::<HTMLElement>())
+        );
 
         // Step 13. Set is modal of subject to true.
         self.upcast::<Element>().set_modal_state(true);
 
-        // TODO: Step 14. Set subject's node document to be blocked by the modal dialog subject.
+        // Step 14. Set subject's node document to be blocked by the modal dialog subject.
+        // Being blocked is derived from the topmost modal dialog in the top layer.
 
-        // TODO: Step 15. If subject's node document's top layer does not already contain subject, then add an element to the top layer given subject.
+        // Step 15. If subject's node document's top layer does not already contain subject, then add an element to the top layer given subject.
+        if !document.top_layer().contains(subject) {
+            document.top_layer().add(subject);
+        }
 
         // Step 16. Set subject's previously focused element to the focused element.
         self.upcast::<HTMLElement>().set_previously_focused_element(
@@ -152,15 +192,12 @@ impl HTMLDialogElement {
                 .element(),
         );
 
-        // TODO: Step 17. Let document be subject's node document.
-
-        // TODO: Step 18. Let hideUntil be the result of running topmost popover ancestor given subject, document's showing hint popover list, null, and false.
-
-        // TODO: Step 19. If hideUntil is null, then set hideUntil to the result of running topmost popover ancestor given subject, document's showing auto popover list, null, and false.
-
-        // TODO: Step 20. If hideUntil is null, then set hideUntil to document.
-
-        // TODO: Step 21. Run hide all popovers until given hideUntil, false, and true.
+        // Step 17. Let document be subject's node document.
+        // Step 18. Let hideUntil be the result of running topmost popover ancestor given subject, document's showing hint popover list, null, and false.
+        // Step 19. If hideUntil is null, then set hideUntil to the result of running topmost popover ancestor given subject, document's showing auto popover list, null, and false.
+        // Step 20. If hideUntil is null, then set hideUntil to document.
+        // Step 21. Run hide all popovers until given hideUntil, false, and true.
+        self.hide_popovers_not_containing_self(cx);
 
         // Step 22. Run the dialog focusing steps given subject.
         self.run_dialog_focusing_steps(cx);
@@ -206,10 +243,12 @@ impl HTMLDialogElement {
         subject.remove_attribute(cx, &ns!(), &local_name!("open"));
         subject.set_open_state(false);
 
-        // TODO: Step 6. If is modal of subject is true, then request an element to be removed from the top layer given subject.
-
+        // Step 6. If is modal of subject is true, then request an element to be removed from the top layer given subject.
         // Step 7. Let wasModal be the value of subject's is modal flag.
         let was_modal = subject.state().contains(ElementState::MODAL);
+        if was_modal {
+            subject.owner_document().top_layer().remove(subject);
+        }
 
         // Step 8. Set is modal of subject to false.
         self.upcast::<Element>().set_modal_state(false);
@@ -219,9 +258,11 @@ impl HTMLDialogElement {
             *self.return_value.borrow_mut() = new_value;
         }
 
-        // TODO: Step 10. Set subject's request close return value to null.
+        // Step 10. Set subject's request close return value to null.
+        *self.request_close_return_value.borrow_mut() = None;
 
-        // TODO: Step 11. Set subject's request close source element to null.
+        // Step 11. Set subject's request close source element to null.
+        self.request_close_source_element.set(None);
 
         // Step 12. If subject's previously focused element is not null, then:
         if let Some(element) = self.upcast::<HTMLElement>().previously_focused_element() {
@@ -253,6 +294,153 @@ impl HTMLDialogElement {
             .task_manager()
             .user_interaction_task_source()
             .queue_simple_event(target, atom!("close"));
+    }
+
+    /// Steps 17 to 21 of showing a modal dialog and steps 8 to 12 of show(): hide every popover
+    /// that is not an ancestor of this dialog.
+    fn hide_popovers_not_containing_self(&self, cx: &mut JSContext) {
+        let document = self.owner_document();
+        let hide_until = HTMLElement::topmost_popover_ancestor(
+            self.upcast(),
+            &document.top_layer().showing_auto_popover_list(),
+            None,
+            false,
+        );
+        HTMLElement::hide_all_popovers_until(cx, &document, hide_until.as_deref(), false, true);
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#computed-closed-by-state>
+    pub(crate) fn computed_closed_by_state(&self) -> ClosedByState {
+        let element = self.upcast::<Element>();
+        // > 1. If dialog's closedby attribute is in the Auto state, then: if dialog's is modal is
+        // >    true, return Close Request; otherwise return None.
+        // > 2. Return the state of dialog's closedby attribute.
+        match element
+            .get_attribute_string_value(&local_name!("closedby"))
+            .map(|value| value.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("any") => ClosedByState::Any,
+            Some("closerequest") => ClosedByState::CloseRequest,
+            Some("none") => ClosedByState::None,
+            _ if element.state().contains(ElementState::MODAL) => ClosedByState::CloseRequest,
+            _ => ClosedByState::None,
+        }
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dialog-setup-steps>
+    fn run_dialog_setup_steps(&self) {
+        // > 1. Assert: subject has an open attribute.
+        // > 2. Assert: subject is connected.
+        // > 3. Assert: subject's node document's open dialogs list does not contain subject.
+        // > 4. Add subject to subject's node document's open dialogs list.
+        let document = self.owner_document();
+        document.top_layer().add_open_dialog(self);
+        // > 5. Set subject's close watcher to the result of establishing a close watcher given
+        // >    subject's relevant global object, with cancelAction, closeAction and
+        // >    getEnabledState as defined by the close watcher methods on this element.
+        document
+            .top_layer()
+            .establish_close_watcher(self.upcast::<HTMLElement>());
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dialog-cleanup-steps>
+    fn run_dialog_cleanup_steps(&self) {
+        let document = self.owner_document();
+        // > 1. Remove subject from subject's node document's open dialogs list.
+        document.top_layer().remove_open_dialog(self);
+        // > 2. If subject's close watcher is not null, then destroy subject's close watcher and
+        // >    set subject's close watcher to null.
+        document
+            .top_layer()
+            .destroy_close_watcher(self.upcast::<HTMLElement>());
+    }
+
+    /// The getEnabledState of the dialog's close watcher, set up in the
+    /// <https://html.spec.whatwg.org/multipage/#dialog-setup-steps>.
+    pub(crate) fn close_watcher_enabled_state(&self) -> bool {
+        // > 1. If dialog's enable close watcher for request close is true, then return true.
+        // > 2. If dialog's computed closed-by state is not None, then return true.
+        // > 3. Return false.
+        self.enable_close_watcher_for_request_close.get() ||
+            self.computed_closed_by_state() != ClosedByState::None
+    }
+
+    pub(crate) fn is_running_cancel_action(&self) -> bool {
+        self.is_running_cancel_action.get()
+    }
+
+    /// The cancelAction of the dialog's close watcher, run as steps 7 to 9 of
+    /// <https://html.spec.whatwg.org/multipage/#close-watcher-request-close>.
+    pub(crate) fn run_close_watcher_cancel_action(
+        &self,
+        cx: &mut JSContext,
+        can_prevent_close: bool,
+    ) -> bool {
+        self.is_running_cancel_action.set(true);
+        // > Return the result of firing an event named cancel at dialog, with the cancelable
+        // > attribute initialized to canPreventClose.
+        let event = Event::new(
+            cx,
+            self.owner_window().upcast(),
+            atom!("cancel"),
+            EventBubbles::DoesNotBubble,
+            if can_prevent_close {
+                EventCancelable::Cancelable
+            } else {
+                EventCancelable::NotCancelable
+            },
+        );
+        let should_continue = event.fire(cx, self.upcast::<EventTarget>());
+        self.is_running_cancel_action.set(false);
+        should_continue
+    }
+
+    /// The closeAction of the dialog's close watcher.
+    pub(crate) fn run_close_watcher_close_action(&self, cx: &mut JSContext) {
+        // > Close the dialog given dialog, dialog's request close return value, and dialog's
+        // > request close source element.
+        let result = self.request_close_return_value.borrow().clone();
+        let source = self.request_close_source_element.get();
+        self.close_the_dialog(cx, result, source);
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dialog-request-close>
+    fn request_close(
+        &self,
+        cx: &mut JSContext,
+        return_value: Option<DOMString>,
+        source: Option<DomRoot<Element>>,
+    ) {
+        let subject = self.upcast::<Element>();
+        // > 1. If subject does not have an open attribute, then return.
+        if !subject.has_attribute(&local_name!("open")) {
+            return;
+        }
+        // > 2. If subject is not connected or subject's node document is not fully active, then
+        // >    return.
+        let document = self.owner_document();
+        if !subject.is_connected() || !document.is_fully_active() {
+            return;
+        }
+        // > 3. Assert: subject's close watcher is not null.
+        debug_assert!(
+            document
+                .top_layer()
+                .is_close_watcher_active(self.upcast::<HTMLElement>())
+        );
+        // > 4. Set subject's enable close watcher for request close to true.
+        self.enable_close_watcher_for_request_close.set(true);
+        // > 5. Set subject's request close return value to returnValue.
+        *self.request_close_return_value.borrow_mut() = return_value;
+        // > 6. Set subject's request close source element to source.
+        self.request_close_source_element.set(source.as_deref());
+        // > 7. Request to close subject's close watcher with false.
+        document
+            .top_layer()
+            .request_to_close(cx, self.upcast::<HTMLElement>(), false);
+        // > 8. Set subject's enable close watcher for request close to false.
+        self.enable_close_watcher_for_request_close.set(false);
     }
 
     /// <https://html.spec.whatwg.org/multipage/#queue-a-dialog-toggle-event-task>
@@ -305,7 +493,7 @@ impl HTMLDialogElement {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dialog-focusing-steps>
-    fn run_dialog_focusing_steps(&self, cx: &mut JSContext) {
+    pub(crate) fn run_dialog_focusing_steps(&self, cx: &mut JSContext) {
         // TODO: Step 1. If the allow focus steps given subject's node document return false, then return.
 
         // Step 2. Let control be null.
@@ -375,6 +563,13 @@ impl HTMLDialogElementMethods<crate::DomTypeHolder> for HTMLDialogElement {
             )));
         }
 
+        // Chrome throws for a dialog showing as a popover too, like showModal() does in step 5.
+        if self.upcast::<HTMLElement>().is_popover_showing() {
+            return Err(Error::InvalidState(Some(
+                "Cannot call show() on a dialog that is showing as a popover.".into(),
+            )));
+        }
+
         // Step 3. If the result of firing an event named beforetoggle, using ToggleEvent, with the cancelable attribute initialized to true, the oldState attribute initialized to "closed", and the newState attribute initialized to "open" at this is false, then return.
         let event = ToggleEvent::new(
             cx,
@@ -411,15 +606,12 @@ impl HTMLDialogElementMethods<crate::DomTypeHolder> for HTMLDialogElement {
                 .element(),
         );
 
-        // TODO: Step 8. Let document be this's node document.
-
-        // TODO: Step 9. Let hideUntil be the result of running topmost popover ancestor given this, document's showing hint popover list, null, and false.
-
-        // TODO: Step 10. If hideUntil is null, then set hideUntil to the result of running topmost popover ancestor given this, document's showing auto popover list, null, and false.
-
-        // TODO: Step 11. If hideUntil is null, then set hideUntil to document.
-
-        // TODO: Step 12. Run hide all popovers until given hideUntil, false, and true.
+        // Step 8. Let document be this's node document.
+        // Step 9. Let hideUntil be the result of running topmost popover ancestor given this, document's showing hint popover list, null, and false.
+        // Step 10. If hideUntil is null, then set hideUntil to the result of running topmost popover ancestor given this, document's showing auto popover list, null, and false.
+        // Step 11. If hideUntil is null, then set hideUntil to document.
+        // Step 12. Run hide all popovers until given hideUntil, false, and true.
+        self.hide_popovers_not_containing_self(cx);
 
         // Step 13. Run the dialog focusing steps given this.
         self.run_dialog_focusing_steps(cx);
@@ -438,6 +630,30 @@ impl HTMLDialogElementMethods<crate::DomTypeHolder> for HTMLDialogElement {
         // Step 2. Close the dialog this with returnValue and null.
         self.close_the_dialog(cx, return_value, None);
     }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-dialog-requestclose>
+    fn RequestClose(&self, cx: &mut JSContext, return_value: Option<DOMString>) {
+        // Step 1. If returnValue is not given, then set it to null.
+        // Step 2. Request to close the dialog this with returnValue and null.
+        self.request_close(cx, return_value, None);
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-dialog-closedby>
+    fn ClosedBy(&self) -> DOMString {
+        // > The closedBy getter steps are to return the keyword corresponding to the computed
+        // > closed-by state given this.
+        DOMString::from(match self.computed_closed_by_state() {
+            ClosedByState::Any => "any",
+            ClosedByState::CloseRequest => "closerequest",
+            ClosedByState::None => "none",
+        })
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-dialog-closedby>
+    fn SetClosedBy(&self, cx: &mut JSContext, value: DOMString) {
+        self.upcast::<Element>()
+            .set_string_attribute(cx, &local_name!("closedby"), value);
+    }
 }
 
 impl VirtualMethods for HTMLDialogElement {
@@ -445,11 +661,73 @@ impl VirtualMethods for HTMLDialogElement {
         Some(self.upcast::<HTMLElement>() as &dyn VirtualMethods)
     }
 
+    /// <https://html.spec.whatwg.org/multipage/#the-dialog-element:concept-element-attributes-change-ext>
+    fn attribute_mutated(
+        &self,
+        cx: &mut JSContext,
+        attr: AttrRef<'_>,
+        mutation: AttributeMutation,
+    ) {
+        self.super_type()
+            .unwrap()
+            .attribute_mutated(cx, attr, mutation);
+        // > 2. If localName is not open, then return.
+        if attr.local_name() != &local_name!("open") || !self.upcast::<Node>().is_connected() {
+            return;
+        }
+        match mutation {
+            // > 4. If value is null and oldValue is not null, then run the dialog cleanup steps
+            // >    given element.
+            AttributeMutation::Removed => self.run_dialog_cleanup_steps(),
+            // > 5. If value is not null and oldValue is null, then run the dialog setup steps
+            // >    given element.
+            AttributeMutation::Set(None, _) => self.run_dialog_setup_steps(),
+            AttributeMutation::Set(Some(_), _) => {},
+        }
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#the-dialog-element:html-element-insertion-steps>
+    fn bind_to_tree(&self, cx: &mut JSContext, context: &BindContext) {
+        if let Some(super_type) = self.super_type() {
+            super_type.bind_to_tree(cx, context);
+        }
+        // > 1. If insertedNode's node document is not fully active, then return.
+        // > 2. If insertedNode has an open attribute and is connected, then run the dialog setup
+        // >    steps given insertedNode.
+        if context.tree_connected &&
+            self.owner_document().is_fully_active() &&
+            self.upcast::<Element>().has_attribute(&local_name!("open"))
+        {
+            self.run_dialog_setup_steps();
+        }
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#the-dialog-element:html-element-removing-steps>
+    fn unbind_from_tree(&self, cx: &mut JSContext, context: &UnbindContext) {
+        if let Some(super_type) = self.super_type() {
+            super_type.unbind_from_tree(cx, context);
+        }
+        let element = self.upcast::<Element>();
+        // > 1. If removedNode has an open attribute, then run the dialog cleanup steps given
+        // >    removedNode.
+        if element.has_attribute(&local_name!("open")) {
+            self.run_dialog_cleanup_steps();
+        }
+        // > 2. If removedNode's node document's top layer contains removedNode, then remove an
+        // >    element from the top layer immediately given removedNode.
+        self.owner_document().top_layer().remove(element);
+        // > 3. Set is modal of removedNode to false.
+        element.set_modal_state(false);
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#the-dialog-element:is-valid-command-steps>
     fn is_valid_command_steps(&self, command: CommandState) -> bool {
-        // Step 1. If command is in the Close state, the Request Close state (TODO), or the
+        // Step 1. If command is in the Close state, the Request Close state, or the
         // ShowModal state, then return true.
-        if command == CommandState::Close || command == CommandState::ShowModal {
+        if matches!(
+            command,
+            CommandState::Close | CommandState::RequestClose | CommandState::ShowModal
+        ) {
             return true;
         }
         // Step 2. Return false.
@@ -471,7 +749,10 @@ impl VirtualMethods for HTMLDialogElement {
             return true;
         }
 
-        // TODO Step 1. If element is in the popover showing state, then return.
+        // Step 1. If element is in the popover showing state, then return.
+        if self.upcast::<HTMLElement>().is_popover_showing() {
+            return false;
+        }
         let element = self.upcast::<Element>();
 
         // Step 2. If command is in the Close state and element has an open attribute, then
@@ -482,8 +763,13 @@ impl VirtualMethods for HTMLDialogElement {
             return true;
         }
 
-        // TODO Step 3. If command is in the Request Close state and element has an open attribute,
+        // Step 3. If command is in the Request Close state and element has an open attribute,
         // then request to close the dialog element with source's optional value and source.
+        if command == CommandState::RequestClose && element.has_attribute(&local_name!("open")) {
+            let button_element = DomRoot::from_ref(source.upcast::<Element>());
+            self.request_close(cx, source.optional_value(), Some(button_element));
+            return true;
+        }
 
         // Step 4. If command is the Show Modal state and element does not have an open attribute,
         // then show a modal dialog given element and source.

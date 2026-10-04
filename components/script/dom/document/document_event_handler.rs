@@ -58,6 +58,7 @@ use crate::dom::bindings::trace::NoTrace;
 use crate::dom::clipboardevent::ClipboardEventType;
 use crate::dom::document::FireMouseEventType;
 use crate::dom::document::focus::FocusableArea;
+use crate::dom::document::top_layer::LightDismissEventType;
 use crate::dom::event::{EventBubbles, EventCancelable, EventComposed, EventFlags};
 #[cfg(feature = "gamepad")]
 use crate::dom::gamepad::gamepad::{Gamepad, contains_user_gesture};
@@ -918,9 +919,8 @@ impl DocumentEventHandler {
         }
 
         // https://w3c.github.io/uievents/#hit-test
-        // Prevent mouse event if element is disabled.
-        // TODO: also inert.
-        if element.is_actually_disabled() {
+        // Prevent mouse event if element is disabled or inert.
+        if element.is_actually_disabled() || element.is_inert() {
             return;
         }
 
@@ -992,6 +992,18 @@ impl DocumentEventHandler {
                 self.mouse_buttons_down.set(mouse_buttons_down + 1);
 
                 pointer_event.upcast::<Event>().fire(cx, &pointer_target);
+                // <https://html.spec.whatwg.org/multipage/#run-light-dismiss-activities> for
+                // pointerdown and pointerup closes popovers and dialogs clicked outside of.
+                if mouse_buttons_down == 0 &&
+                    let Some(target) = pointer_target.downcast::<Node>()
+                {
+                    document.top_layer().run_light_dismiss_activities(
+                        cx,
+                        &mouse_event,
+                        LightDismissEventType::PointerDown,
+                        target,
+                    );
+                }
 
                 // Process pending pointer capture after firing event, but skip if we just
                 // released a disconnected capture to avoid immediately re-capturing.
@@ -1063,6 +1075,16 @@ impl DocumentEventHandler {
                     .unwrap_or_else(|| DomRoot::from_ref(node.upcast::<EventTarget>()));
 
                 pointer_event.upcast::<Event>().fire(cx, &pointer_target);
+                if mouse_buttons_down == 1 &&
+                    let Some(target) = pointer_target.downcast::<Node>()
+                {
+                    document.top_layer().run_light_dismiss_activities(
+                        cx,
+                        &mouse_event,
+                        LightDismissEventType::PointerUp,
+                        target,
+                    );
+                }
 
                 // Decrement button count after firing event, so setPointerCapture/releasePointerCapture
                 // work during the pointerup handler (pointer is still "active").
@@ -1559,6 +1581,18 @@ impl DocumentEventHandler {
         let mut flags = event.flags();
         if flags.contains(EventFlags::Canceled) {
             return flags.into();
+        }
+
+        // <https://html.spec.whatwg.org/multipage/#close-requests>: an Escape keydown that the
+        // page did not cancel is a close request, which closes the topmost modal dialog or auto
+        // popover.
+        if keyboard_event.event.state == KeyState::Down &&
+            keyboard_event.event.key == Key::Named(NamedKey::Escape)
+        {
+            self.window
+                .Document()
+                .top_layer()
+                .process_close_watchers(cx);
         }
 
         // <https://w3c.github.io/clipboard-apis/#clipboard-actions>: the platform's cut, copy and

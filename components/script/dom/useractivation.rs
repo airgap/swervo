@@ -7,6 +7,7 @@ use std::ops::Add;
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use script_bindings::codegen::GenericBindings::UserActivationBinding::UserActivationMethods;
+use script_bindings::codegen::GenericBindings::WindowBinding::WindowMethods;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 use servo_base::cross_process_instant::CrossProcessInstant;
 use time::Duration;
@@ -75,7 +76,7 @@ impl UserActivation {
 
             // Step 5.2.
             // > Notify the close watcher manager about user activation given window.
-            // TODO: impl close watcher
+            window.Document().top_layer().notify_about_user_activation();
         }
     }
 }

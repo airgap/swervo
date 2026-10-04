@@ -499,6 +499,10 @@ pub(crate) struct Window {
     #[no_trace]
     last_activation_timestamp: Cell<UserActivationTimestamp>,
 
+    /// <https://html.spec.whatwg.org/multipage/#last-history-action-activation-timestamp>
+    #[no_trace]
+    last_history_action_activation_timestamp: Cell<UserActivationTimestamp>,
+
     /// A flag to indicate whether the developer tools has requested
     /// live updates from the window.
     devtools_wants_updates: Cell<bool>,
@@ -1931,7 +1935,7 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
         // Step 3.1: Parse pseudoElt as a <pseudo-element-selector>, and let type be the result.
         // TODO(#43095): This is quite hacky and it would be better to have a parsing function that
         // is integrated with stylo `PseudoElement` itself. Comparing with stylo, we are now currently
-        // missing `::backdrop`, `::color-swatch`, and `::details-content`.
+        // missing `::color-swatch` and `::details-content`.
         let pseudo = pseudo.map(|mut s| {
             s.make_ascii_lowercase();
             s
@@ -1946,6 +1950,7 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
             Some(ref pseudo) if pseudo == "::selection" => Some(PseudoElement::Selection),
             Some(ref pseudo) if pseudo == "::marker" => Some(PseudoElement::Marker),
             Some(ref pseudo) if pseudo == "::placeholder" => Some(PseudoElement::Placeholder),
+            Some(ref pseudo) if pseudo == "::backdrop" => Some(PseudoElement::Backdrop),
             Some(ref pseudo) if pseudo.starts_with(':') => {
                 // Step 3.2: If type is failure, or is a ::slotted() or ::part()
                 // pseudo-element, let obj be null.
@@ -3747,6 +3752,40 @@ impl Window {
                     pref!(dom_transient_activation_duration_ms)
     }
 
+    /// <https://html.spec.whatwg.org/multipage/#history-action-activation>
+    pub(crate) fn has_history_action_activation(&self) -> bool {
+        // > When the last history-action activation timestamp of W is not equal to the last
+        // > activation timestamp of W, then W is said to have history-action activation.
+        self.last_history_action_activation_timestamp.get() != self.last_activation_timestamp.get()
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#consume-history-action-user-activation>
+    pub(crate) fn consume_history_action_user_activation(&self) {
+        // > 1. If W's navigable is null, then return.
+        if self.undiscarded_window_proxy().is_none() {
+            return;
+        }
+        // > 2. Let top be W's navigable's top-level traversable.
+        // TODO: This wouldn't work if top level document is in another ScriptThread.
+        let Some(top_level_document) = self.top_level_document_if_local() else {
+            return;
+        };
+        // > 3. Let navigables be the inclusive descendant navigables of top's active document.
+        // > 4. Let windows be the list of Window objects constructed by taking the active window
+        // >    of each item in navigables.
+        // > 5. For each window in windows, set window's last history-action activation timestamp
+        // >    to window's last activation timestamp.
+        let consume = |window: &Window| {
+            window
+                .last_history_action_activation_timestamp
+                .set(window.last_activation_timestamp.get());
+        };
+        consume(top_level_document.window());
+        for document in SameOriginDescendantNavigablesIterator::new(top_level_document) {
+            consume(document.window());
+        }
+    }
+
     pub(crate) fn consume_last_activation_timestamp(&self) {
         if self.last_activation_timestamp.get() != UserActivationTimestamp::PositiveInfinity {
             self.set_last_activation_timestamp(UserActivationTimestamp::NegativeInfinity);
@@ -3915,6 +3954,9 @@ impl Window {
             has_changed_visual_viewport_dimension: Default::default(),
             pending_media_query_evaluation: Default::default(),
             last_activation_timestamp: Cell::new(UserActivationTimestamp::PositiveInfinity),
+            last_history_action_activation_timestamp: Cell::new(
+                UserActivationTimestamp::PositiveInfinity,
+            ),
             devtools_wants_updates: Default::default(),
         });
 

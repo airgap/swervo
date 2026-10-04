@@ -11,6 +11,7 @@ pub(crate) mod documentfragment;
 pub(crate) mod documentorshadowroot;
 pub(crate) mod documenttype;
 pub(crate) mod focus;
+pub(crate) mod top_layer;
 mod tree_ordered_index_map;
 pub(crate) mod visibilitystateentry;
 

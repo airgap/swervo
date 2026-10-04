@@ -12,9 +12,27 @@ use xml5ever::local_name;
 
 use crate::dom::Node;
 use crate::dom::document::focus::FocusableAreaKind;
+use crate::dom::node::NodeTraits;
 use crate::dom::types::{Element, HTMLElement};
 
 impl Element {
+    /// <https://html.spec.whatwg.org/multipage/#inert>
+    ///
+    /// Only inertness from <https://html.spec.whatwg.org/multipage/#blocked-by-a-modal-dialog> is
+    /// supported: the `inert` attribute is not implemented.
+    pub(crate) fn is_inert(&self) -> bool {
+        // > While document is blocked by a modal dialog subject, every node that is connected to
+        // > document, with the exception of the subject element and its flat tree descendants,
+        // > must become inert.
+        let Some(dialog) = self.owner_document().top_layer().blocking_modal_dialog() else {
+            return false;
+        };
+        !self
+            .upcast::<Node>()
+            .inclusive_ancestors_in_flat_tree()
+            .any(|ancestor| &*ancestor == dialog.upcast::<Node>())
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#focusable-area>
     ///
     /// The list of focusable areas at this point in the specification is both incomplete and leaves
@@ -28,7 +46,11 @@ impl Element {
     pub(crate) fn focusable_area_kind(&self) -> FocusableAreaKind {
         // Do not allow unrendered, disconnected, or disabled nodes to be focusable areas ever.
         let node: &Node = self.upcast();
-        if !node.is_connected() || !self.has_css_layout_box() || self.is_actually_disabled() {
+        if !node.is_connected() ||
+            !self.has_css_layout_box() ||
+            self.is_actually_disabled() ||
+            self.is_inert()
+        {
             return Default::default();
         }
 
@@ -56,7 +78,7 @@ impl Element {
         // > the element is not actually disabled;
         // Note: Checked above
         // > the element is not inert;
-        // TODO: Handle this.
+        // Note: Checked above
         // > the element is either being rendered, delegating its rendering to its children, or
         // > being used as relevant canvas fallback content.
         // Note: Checked above
