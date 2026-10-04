@@ -331,7 +331,11 @@ impl PlatformFontMethods for PlatformFont {
             // This converts the value to a float without losing precision.
             y_scale = freetype_metrics.y_scale as f64 / 65535.0 / 64.0;
 
-            max_advance = (face.as_ref().max_advance_width as f64) * y_scale;
+            // The bounding box width, which is what Skia reports as the max char width (and what
+            // macOS's CTFont gives here). Chrome sizes text fields by it; hhea's advanceWidthMax
+            // differs (17.8px against 24.6px for 13.33px Liberation Sans).
+            let bbox = face.as_ref().bbox;
+            max_advance = ((bbox.xMax - bbox.xMin) as f64) * y_scale;
             max_ascent = (face.as_ref().ascender as f64) * y_scale;
             max_descent = -(face.as_ref().descender as f64) * y_scale;
             line_height = (face.as_ref().height as f64) * y_scale;
