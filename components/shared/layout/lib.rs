@@ -706,6 +706,9 @@ bitflags! {
         const ViewportChanged = 1 << 5;
         const PaintWorkletLoaded = 1 << 6;
         const SelectionChanged = 1 << 7;
+        /// A reflow for a query about styles restyled without laying out, leaving the
+        /// damage of that restyle to the next reflow.
+        const LayoutDeferred = 1 << 8;
     }
 }
 
@@ -744,6 +747,9 @@ bitflags! {
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub struct ReflowPhasesRun: u8 {
         const RanLayout = 1 << 0;
+        /// Styles were updated but layout was left for a later reflow, which has to start
+        /// from the same dirty root. See [`RestyleReason::LayoutDeferred`].
+        const DeferredLayout = 1 << 1;
         const BuiltStackingContextTree = 1 << 2;
         const BuiltDisplayList = 1 << 3;
         const UpdatedScrollNodeOffset = 1 << 4;

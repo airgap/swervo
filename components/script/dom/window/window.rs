@@ -2904,6 +2904,7 @@ impl Window {
 
         let restyle_reason = document.restyle_reason();
         document.clear_restyle_reasons();
+        let mut dirty_root_element = None;
         let restyle = if restyle_reason.needs_restyle() {
             debug!("Invalidating layout cache due to reflow condition {restyle_reason:?}",);
             // Invalidate any existing cached layout values.
@@ -2913,10 +2914,12 @@ impl Window {
 
             let stylesheets_changed = document.flush_stylesheets_for_reflow();
             let pending_restyles = document.drain_pending_restyles();
-            let dirty_root = document
+            dirty_root_element = document
                 .take_dirty_root()
                 .filter(|_| !stylesheets_changed)
-                .or_else(|| document.GetDocumentElement())
+                .or_else(|| document.GetDocumentElement());
+            let dirty_root = dirty_root_element
+                .as_ref()
                 .map(|root| root.upcast::<Node>().to_trusted_node_address());
 
             Some(ReflowRequestRestyle {
@@ -2962,6 +2965,16 @@ impl Window {
         };
 
         debug!("script: layout complete");
+        if reflow_result
+            .reflow_phases_run
+            .contains(ReflowPhasesRun::DeferredLayout)
+        {
+            // Layout left the damage of this restyle below the dirty root for the next reflow.
+            if let Some(dirty_root) = dirty_root_element {
+                document.note_node_with_dirty_descendants(dirty_root.upcast());
+            }
+            document.add_restyle_reason(RestyleReason::LayoutDeferred);
+        }
         if let Some(marker) = marker {
             self.emit_timeline_marker(marker.end());
         }

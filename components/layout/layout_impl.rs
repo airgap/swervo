@@ -25,7 +25,7 @@ use layout_api::{
     AxesOverflow, BoxAreaType, CSSPixelRectVec, CaretLine, DangerousStyleNode, EditingSelection,
     IFrameSizes, Layout, LayoutConfig, LayoutDamage, LayoutElement, LayoutFactory, LayoutNode,
     NodeRenderingType, OffsetParentResponse, PhysicalSides, QueryMsg, ReflowGoal, ReflowPhasesRun,
-    ReflowRequest, ReflowRequestRestyle, ReflowResult, ReflowStatistics,
+    ReflowRequest, ReflowRequestRestyle, ReflowResult, ReflowStatistics, RestyleReason,
     ScrollContainerQueryFlags, ScrollContainerResponse, TrustedNodeAddress, with_layout_state,
 };
 use log::{debug, warn};
@@ -1486,13 +1486,32 @@ impl LayoutThread {
                 RecalcStyle::pre_traverse(original_dirty_root, shared)
             };
 
-            if !token.should_traverse() {
+            // A deferred layout still has damage to process below the dirty root.
+            let should_traverse = token.should_traverse();
+            if !should_traverse && !restyle.reason.contains(RestyleReason::LayoutDeferred) {
                 layout_context.style_context.stylist.rule_tree().maybe_gc();
                 return Default::default();
             }
 
-            dirty_root = driver::traverse_dom(&recalc_style_traversal, token, rayon_pool).as_node();
-            self.register_styled_containers(&layout_context);
+            dirty_root = if should_traverse {
+                let dirty_root =
+                    driver::traverse_dom(&recalc_style_traversal, token, rayon_pool).as_node();
+                self.register_styled_containers(&layout_context);
+                dirty_root
+            } else {
+                original_dirty_root.as_node()
+            };
+        }
+
+        // The restyle damage stays on the elements, and the dirty descendant bits leading to
+        // them, until a reflow that needs layout processes it. Styles that query containers
+        // depend on the sizes the containers get from that layout.
+        if !device_has_changed &&
+            !self.uses_container_queries.get() &&
+            !ReflowPhases::needs_layout(&reflow_request.reflow_goal)
+        {
+            layout_context.style_context.stylist.rule_tree().maybe_gc();
+            return (ReflowPhasesRun::DeferredLayout, IFrameSizes::default());
         }
 
         let root_node = root_element.as_node();
@@ -2271,9 +2290,25 @@ bitflags! {
 }
 
 impl ReflowPhases {
+    /// Whether the given [`ReflowGoal`] needs layout, beyond styles. Like other browsers, a
+    /// query about styles alone only restyles, which kept scripts that alternate style changes
+    /// and `getComputedStyle()` from laying out the whole page each time.
+    fn needs_layout(reflow_goal: &ReflowGoal) -> bool {
+        match reflow_goal {
+            ReflowGoal::LayoutQuery(QueryMsg::StyleQuery | QueryMsg::ResolvedFontStyleQuery) => {
+                false
+            },
+            ReflowGoal::LayoutQuery(QueryMsg::ResolvedStyleQuery(property)) => {
+                resolved_value_depends_on_layout(property)
+            },
+            _ => true,
+        }
+    }
+
     /// Return the necessary phases of layout for the given [`ReflowGoal`]. Note that all
     /// [`ReflowGoals`] need the basic restyle + box tree layout + fragment tree layout,
-    /// so [`ReflowPhases::empty()`] implies that.
+    /// unless [`ReflowPhases::needs_layout`] says otherwise, so [`ReflowPhases::empty()`]
+    /// implies that.
     fn necessary(reflow_goal: &ReflowGoal) -> Self {
         let is_inset_longhand = |longhand: LonghandId| {
             matches!(
@@ -2334,6 +2369,60 @@ impl ReflowPhases {
                 Self::StackingContextTreeConstruction | Self::DisplayListConstruction
             },
         }
+    }
+}
+
+/// Whether the resolved value of `property` can be a used value, which needs layout. This
+/// should be kept in sync with `process_resolved_style_request()`.
+/// <https://drafts.csswg.org/cssom/#resolved-values>
+fn resolved_value_depends_on_layout(property: &PropertyId) -> bool {
+    let depends_on_layout = |longhand: LonghandId| {
+        matches!(
+            longhand,
+            LonghandId::Width |
+                LonghandId::Height |
+                LonghandId::InlineSize |
+                LonghandId::BlockSize |
+                LonghandId::MinWidth |
+                LonghandId::MinHeight |
+                LonghandId::MinInlineSize |
+                LonghandId::MinBlockSize |
+                LonghandId::Top |
+                LonghandId::Right |
+                LonghandId::Bottom |
+                LonghandId::Left |
+                LonghandId::InsetBlockStart |
+                LonghandId::InsetBlockEnd |
+                LonghandId::InsetInlineStart |
+                LonghandId::InsetInlineEnd |
+                LonghandId::MarginTop |
+                LonghandId::MarginRight |
+                LonghandId::MarginBottom |
+                LonghandId::MarginLeft |
+                LonghandId::MarginBlockStart |
+                LonghandId::MarginBlockEnd |
+                LonghandId::MarginInlineStart |
+                LonghandId::MarginInlineEnd |
+                LonghandId::PaddingTop |
+                LonghandId::PaddingRight |
+                LonghandId::PaddingBottom |
+                LonghandId::PaddingLeft |
+                LonghandId::PaddingBlockStart |
+                LonghandId::PaddingBlockEnd |
+                LonghandId::PaddingInlineStart |
+                LonghandId::PaddingInlineEnd |
+                LonghandId::Transform |
+                LonghandId::GridTemplateRows |
+                LonghandId::GridTemplateColumns
+        )
+    };
+    match property {
+        PropertyId::NonCustom(property) => match property.longhand_or_shorthand() {
+            Ok(longhand) => depends_on_layout(longhand),
+            Err(ShorthandId::All) => true,
+            Err(shorthand) => shorthand.longhands().any(depends_on_layout),
+        },
+        PropertyId::Custom(_) => false,
     }
 }
 
