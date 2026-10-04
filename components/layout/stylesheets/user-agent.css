@@ -69,8 +69,8 @@ dialog:popover-open { display: block; }
   border: solid;
   padding: 0.25em;
   overflow: auto;
-  background-color: white; /* FIXME: should be Canvas */
-  color: black; /* FIXME: should be CanvasText */
+  background-color: Canvas;
+  color: CanvasText;
 }
 :popover-open::backdrop {
   pointer-events: none !important;
@@ -84,8 +84,8 @@ dialog {
   margin: auto;
   border: solid;
   padding: 1em;
-  background-color: white; /* FIXME: should be Canvas */
-  color: black; /* FIXME: should be CanvasText */
+  background-color: Canvas;
+  color: CanvasText;
 }
 dialog:modal {
   position: fixed;
