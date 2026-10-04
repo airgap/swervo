@@ -2584,6 +2584,7 @@ impl UnshapedTextRun<'_> {
             east_asian: FontVariantEastAsian::NORMAL,
             feature_settings: FontFeatureSettings::normal(),
             position: FontVariantPosition::Normal,
+            trimmed_punctuation: Vec::new(),
         };
 
         let glyphs = font.shape_text(self.string, &options);

@@ -30,6 +30,7 @@ use num_traits::Zero;
 use read_fonts::types::Tag;
 
 use super::{GlyphShapingResult, ShapedGlyph, unicode_script_to_iso15924_tag};
+use crate::han_kerning::HALT;
 use crate::platform::font::FontTable;
 use crate::{
     BASE, Font, FontBaseline, FontTableMethods, GlyphId, ShapedText, ShapingFlags, ShapingOptions,
@@ -287,6 +288,19 @@ impl Shaper {
                     end: hb_buffer_get_length(hb_buffer),
                 })
                 .collect();
+            // Feature ranges are in clusters, which are the UTF-8 byte offsets added above.
+            features.extend(options.trimmed_punctuation.iter().map(|offset| {
+                let character = text[*offset..]
+                    .chars()
+                    .next()
+                    .expect("Trimmed punctuation offsets are character boundaries");
+                hb_feature_t {
+                    tag: u32::from_be_bytes(HALT.to_be_bytes()),
+                    value: 1,
+                    start: *offset as c_uint,
+                    end: (*offset + character.len_utf8()) as c_uint,
+                }
+            }));
             hb_shape(
                 self.hb_font,
                 hb_buffer,

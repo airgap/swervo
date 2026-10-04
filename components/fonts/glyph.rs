@@ -572,6 +572,34 @@ pub struct ShapedTextSlice {
 }
 
 impl ShapedTextSlice {
+    /// Split this [`ShapedTextSlice`] into slices of one glyph cluster each: the places where
+    /// `overflow-wrap` may break a word. A cluster of several characters, like a ligature, stays
+    /// whole.
+    pub fn split_into_clusters(&self) -> Vec<Arc<ShapedTextSlice>> {
+        let mut slicer = ShapedTextSlicer {
+            current_glyph_offset: if self.shaped_text.is_rtl {
+                self.glyph_range.end
+            } else {
+                self.glyph_range.start
+            },
+            shaped_text: self.shaped_text.clone(),
+        };
+        let mut remaining_characters = self.character_count;
+        let mut clusters = Vec::new();
+        while remaining_characters > 0 {
+            let character_count = slicer
+                .next_cluster_character_count()
+                .clamp(1, remaining_characters);
+            remaining_characters -= character_count;
+            clusters.push(slicer.slice_for_character_count(
+                character_count,
+                self.is_whitespace,
+                self.ends_with_whitespace && remaining_characters == 0,
+            ));
+        }
+        clusters
+    }
+
     /// Return the [`ShapedText`] that backs this [`ShapedTextSlice`].
     #[inline]
     pub fn shaped_text(&self) -> Arc<ShapedText> {
@@ -676,6 +704,25 @@ impl ShapedTextSlicer {
             current_glyph_offset,
             shaped_text,
         }
+    }
+
+    /// The number of characters of the next glyph cluster to be consumed.
+    fn next_cluster_character_count(&self) -> usize {
+        let mut glyphs = if self.shaped_text.is_rtl {
+            Either::Left(
+                self.shaped_text
+                    .glyph_slice(0..self.current_glyph_offset)
+                    .rev(),
+            )
+        } else {
+            Either::Right(
+                self.shaped_text
+                    .glyph_slice(self.current_glyph_offset..self.shaped_text.glyph_count()),
+            )
+        };
+        glyphs
+            .find(|glyph| glyph.character_count() != 0)
+            .map_or(0, |glyph| glyph.character_count())
     }
 
     /// Given a desired character count, consume that number of characters worth

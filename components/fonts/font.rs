@@ -5,7 +5,7 @@
 use std::borrow::ToOwned;
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::ops::Deref;
+use std::ops::{Deref, Range};
 use std::sync::{Arc, OnceLock};
 use std::{iter, str};
 
@@ -14,6 +14,7 @@ use bitflags::bitflags;
 use euclid::default::{Point2D, Rect};
 use euclid::num::Zero;
 use fonts_traits::FontDescriptor;
+use icu_locid::LanguageIdentifier;
 use icu_locid::subtags::Language;
 use log::debug;
 use malloc_size_of_derive::MallocSizeOf;
@@ -41,6 +42,8 @@ use webrender_api::{FontInstanceFlags, FontInstanceKey, FontVariation};
 use crate::font_context::UnloadedFontFace;
 use crate::platform::font::{FontTable, PlatformFont};
 use crate::platform::font_list::fallback_font_families;
+use crate::han_kerning::HanKerningData;
+use crate::platform::han_generic_font_family;
 use crate::{
     EmojiPresentationPreference, FallbackFontSelectionOptions, FontContext, FontData,
     FontDataAndIndex, FontDataError, FontIdentifier, FontTemplateDescriptor, FontTemplateRef,
@@ -295,6 +298,9 @@ pub struct Font {
     /// FIXME: This should be removed entirely in favor of better caching if necessary.
     /// See <https://github.com/servo/servo/pull/11273#issuecomment-222332873>.
     can_do_fast_shaping: OnceLock<bool>,
+
+    /// How this font's fullwidth punctuation can be set half-width, if it can.
+    han_kerning: OnceLock<Option<HanKerningData>>,
 }
 
 impl std::fmt::Debug for Font {
@@ -359,6 +365,7 @@ impl Font {
             synthesized_small_caps,
             has_color_bitmap_or_colr_table: OnceLock::new(),
             can_do_fast_shaping: OnceLock::new(),
+            han_kerning: OnceLock::new(),
         })
     }
 
@@ -448,6 +455,10 @@ pub struct ShapingOptions {
     pub position: FontVariantPosition,
     /// Various flags.
     pub flags: ShapingFlags,
+    /// The byte offsets in the shaped text of the fullwidth punctuation to set half-width, as
+    /// `text-spacing-trim` collapses the spacing of adjacent punctuation. See
+    /// [`Font::trimmed_punctuation`].
+    pub trimmed_punctuation: Vec<usize>,
 }
 
 impl ShapingOptions {
@@ -472,6 +483,7 @@ struct ShapeCacheEntry {
     language: Language,
     font_features: Box<[(Tag, u32)]>,
     flags: ShapingFlags,
+    trimmed_punctuation: Vec<usize>,
 }
 
 impl Font {
@@ -488,6 +500,7 @@ impl Font {
             language: options.language,
             flags: options.flags,
             font_features,
+            trimmed_punctuation: options.trimmed_punctuation.clone(),
         };
 
         if let Some(shaped_text) = self.cached_shape_data.read().shaped_text.get(&lookup_key) {
@@ -511,6 +524,18 @@ impl Font {
         cache.shaped_text.insert(lookup_key, shaped_text.clone());
 
         shaped_text
+    }
+
+    /// The byte offsets, relative to `range.start`, of the fullwidth punctuation in `text[range]`
+    /// that `text-spacing-trim: normal` sets half-width when it is shaped with this font. The
+    /// characters just outside `range` are taken into account as its neighbours.
+    pub fn trimmed_punctuation(&self, text: &str, range: Range<usize>) -> Vec<usize> {
+        if text[range.clone()].is_ascii() {
+            return Vec::new();
+        }
+        self.han_kerning
+            .get_or_init(|| HanKerningData::for_font(self))
+            .map_or_else(Vec::new, |data| data.trimmed_punctuation(text, range))
     }
 
     /// Whether not a particular text and [`ShapingOptions`] combination can use
@@ -702,11 +727,35 @@ pub struct FontGroup {
 
 impl FontGroup {
     pub(crate) fn new(style: &FontStyleStruct, descriptor: FontDescriptor) -> FontGroup {
+        let language = style._x_lang.0.parse::<LanguageIdentifier>().ok();
         let families: SmallVec<[FontGroupFamily; 8]> = style
             .font_family
             .families
             .iter()
-            .map(FontGroupFamily::local_or_web)
+            .flat_map(|family| {
+                let han_family = match (family, &language) {
+                    (SingleFontFamily::Generic(generic), Some(language)) => {
+                        let generic = match style.font_family.is_initial {
+                            true => GenericFontFamily::None,
+                            false => *generic,
+                        };
+                        han_generic_font_family(language, generic)
+                    },
+                    _ => None,
+                };
+                // The CJK font goes first so it renders all the text, as Chrome's replaced
+                // generic does; the generic itself still applies if it is not installed.
+                han_family
+                    .map(|name| {
+                        let family = SingleFontFamily::FamilyName(FamilyName {
+                            name: name.into(),
+                            syntax: FontFamilyNameSyntax::Quoted,
+                        });
+                        FontFamilyDescriptor::new(family, FontSearchScope::Local).into()
+                    })
+                    .into_iter()
+                    .chain(iter::once(FontGroupFamily::local_or_web(family)))
+            })
             .collect();
 
         FontGroup {

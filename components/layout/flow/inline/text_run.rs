@@ -20,6 +20,7 @@ use style::Zero;
 use style::computed_values::font_kerning::T as FontKerning;
 use style::computed_values::font_variant_position::T as FontVariantPosition;
 use style::computed_values::text_rendering::T as TextRendering;
+use style::computed_values::text_spacing_trim::T as TextSpacingTrim;
 use style::computed_values::white_space_collapse::T as WhiteSpaceCollapse;
 use style::computed_values::word_break::T as WordBreak;
 use style::dom::OpaqueNode;
@@ -150,6 +151,7 @@ impl From<&FontAndScriptInfo> for ShapingOptions {
             feature_settings: info.feature_settings.clone(),
             position: info.position,
             flags,
+            trimmed_punctuation: Vec::new(),
         }
     }
 }
@@ -174,6 +176,9 @@ pub(crate) struct TextRunSegment {
     /// The shaped runs within this segment.
     #[conditional_malloc_size_of]
     pub runs: Vec<Arc<ShapedTextSlice>>,
+
+    /// The [`ShapingOptions::trimmed_punctuation`] the runs were shaped with.
+    pub trimmed_punctuation: Vec<usize>,
 }
 
 impl TextRunSegment {
@@ -188,6 +193,7 @@ impl TextRunSegment {
             character_range,
             runs: Vec::new(),
             break_at_start: false,
+            trimmed_punctuation: Vec::new(),
         }
     }
 
@@ -238,6 +244,15 @@ impl TextRunSegment {
             soft_wrap_policy = SegmentStartSoftWrapPolicy::Force;
         }
 
+        let overflow_wrap_breaks_words = {
+            let style = text_run.inline_styles.style.borrow();
+            let text_style = style.get_inherited_text();
+            text_style.word_break != WordBreak::BreakAll &&
+                matches!(
+                    text_style.overflow_wrap,
+                    OverflowWrap::Anywhere | OverflowWrap::BreakWord
+                )
+        };
         let mut character_range_start = self.character_range.start;
         for (run_index, run) in self.runs.iter().enumerate() {
             let new_character_range_end = character_range_start + run.character_count();
@@ -254,13 +269,38 @@ impl TextRunSegment {
                 ifc.process_soft_wrap_opportunity();
             }
 
-            ifc.push_glyph_store_to_unbreakable_segment(
-                run.clone(),
-                text_run,
-                &self.info,
-                offsets,
-                character_range_start,
-            );
+            // `overflow-wrap` only breaks inside a word that does not fit on a line of its own,
+            // so the word is split into clusters only when it would overflow.
+            if overflow_wrap_breaks_words &&
+                !run.is_whitespace() &&
+                ifc.unbreakable_segment_would_overflow(run.total_advance())
+            {
+                let mut cluster_character_start = character_range_start;
+                for cluster in run.split_into_clusters() {
+                    let cluster_character_end = cluster_character_start + cluster.character_count();
+                    let offsets = offsets.as_ref().map(|offsets| TextRunOffsets {
+                        shared_selection: offsets.shared_selection.clone(),
+                        character_range: cluster_character_start..cluster_character_end,
+                    });
+                    ifc.process_overflow_wrap_opportunity(cluster.total_advance());
+                    ifc.push_glyph_store_to_unbreakable_segment(
+                        cluster,
+                        text_run,
+                        &self.info,
+                        offsets,
+                        cluster_character_start,
+                    );
+                    cluster_character_start = cluster_character_end;
+                }
+            } else {
+                ifc.push_glyph_store_to_unbreakable_segment(
+                    run.clone(),
+                    text_run,
+                    &self.info,
+                    offsets,
+                    character_range_start,
+                );
+            }
             character_range_start = new_character_range_end;
         }
     }
@@ -282,7 +322,14 @@ impl TextRunSegment {
         let linebreaks = linebreaker.advance_to_linebreaks_in_range(self.byte_range.clone());
         let linebreak_iter = linebreaks.iter().chain(std::iter::once(&range.end));
 
-        let options: ShapingOptions = (&*self.info).into();
+        let mut options: ShapingOptions = (&*self.info).into();
+        if parent_style.get_inherited_text().text_spacing_trim == TextSpacingTrim::Normal {
+            options.trimmed_punctuation = self
+                .info
+                .font
+                .trimmed_punctuation(formatting_context_text, range.clone());
+        }
+        self.trimmed_punctuation = options.trimmed_punctuation.clone();
         let shaped_text = old_text_run_item
             .and_then(|old_text_run_item| {
                 let TextRunItem::TextSegment(old_text_segment) = old_text_run_item else {
@@ -398,7 +445,10 @@ impl TextRunSegment {
     }
 
     fn is_compatible_with_old_shaping_result(&self, old_segment: &Self) -> bool {
-        *old_segment.info == *self.info && self.byte_range == old_segment.byte_range
+        // Which punctuation is trimmed also depends on the text around the segment.
+        *old_segment.info == *self.info &&
+            self.byte_range == old_segment.byte_range &&
+            self.trimmed_punctuation == old_segment.trimmed_punctuation
     }
 }
 

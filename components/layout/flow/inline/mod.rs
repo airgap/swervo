@@ -108,7 +108,7 @@ use style::context::{QuirksMode, SharedStyleContext};
 use style::dom::OpaqueNode;
 use style::properties::ComputedValues;
 use style::selector_parser::PseudoElement;
-use style::values::computed::Overflow;
+use style::values::computed::{Overflow, OverflowWrap};
 use style::values::specified::box_::{Display as StyloDisplay, DisplayInside};
 use style::values::specified::text::TextOverflowSide;
 use style::properties::style_structs::InheritedText;
@@ -2106,6 +2106,41 @@ impl InlineFormattingContextLayout<'_> {
         !padding.is_zero() || !border.is_zero() || !margin.is_zero()
     }
 
+    /// Whether adding `inline_size` more content to the current unbreakable segment would make
+    /// it overflow the current line.
+    fn unbreakable_segment_would_overflow(&self, inline_size: Au) -> bool {
+        let available_inline_size = self
+            .current_line
+            .placement_among_floats
+            .get()
+            .map_or(self.containing_block().size.inline, |placement| {
+                placement.size.inline
+            });
+        self.current_line.inline_position + self.current_line_segment.inline_size + inline_size >
+            available_inline_size
+    }
+
+    /// Process a soft wrap opportunity inside a word from `overflow-wrap: anywhere | break-word`
+    /// before content of size `next_inline_size`. Per
+    /// <https://drafts.csswg.org/css-text-3/#overflow-wrap-property> it is only taken if there are
+    /// no otherwise-acceptable break points in the line: when the word does not fit even after
+    /// moving it to a line of its own.
+    fn process_overflow_wrap_opportunity(&mut self, next_inline_size: Au) {
+        if self.text_wrap_mode == TextWrapMode::Nowrap ||
+            !self.current_line_segment.has_content ||
+            !self.unbreakable_segment_would_overflow(next_inline_size)
+        {
+            return;
+        }
+        if self.current_line.has_content {
+            self.process_line_break(false /* forced_line_break */);
+            if !self.unbreakable_segment_would_overflow(next_inline_size) {
+                return;
+            }
+        }
+        self.process_soft_wrap_opportunity();
+    }
+
     /// Commit the current unbrekable segment to the current line. In addition, this will
     /// place all floats in the unbreakable segment and expand the line dimensions.
     fn commit_current_segment_to_line(&mut self) {
@@ -3421,7 +3456,21 @@ impl<'layout_data> ContentSizesComputation<'layout_data> {
             }
 
             self.commit_pending_whitespace();
-            self.add_inline_size(advance);
+            // Unlike `break-word`, the opportunities `overflow-wrap: anywhere` introduces count
+            // for the min-content size.
+            if can_wrap &&
+                style_text.overflow_wrap == OverflowWrap::Anywhere &&
+                style_text.word_break != WordBreak::BreakAll
+            {
+                for (cluster_index, cluster) in run.split_into_clusters().iter().enumerate() {
+                    if cluster_index != 0 {
+                        self.line_break_opportunity();
+                    }
+                    self.add_inline_size(cluster.total_advance());
+                }
+            } else {
+                self.add_inline_size(advance);
+            }
 
             // Typically whitespace glyphs are placed in a separate store,
             // but for `white-space: break-spaces` we place the first whitespace

@@ -36,9 +36,10 @@ button,
 input,
 select,
 textarea {
-  font-family: sans-serif;
-  /* Chrome's small-control size, fixed rather than relative: controls don't scale with the
-     page's font size there. */
+  /* Chrome's control font (`-webkit-small-control`) is Arial, a named family, so the content
+     language doesn't replace it with a CJK font the way it does the generic families. Its
+     size is fixed rather than relative: controls don't scale with the page's font size. */
+  font-family: Arial;
   font-size: 13.333px;
   appearance: auto;
   letter-spacing: initial;

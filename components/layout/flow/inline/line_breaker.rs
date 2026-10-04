@@ -4,7 +4,7 @@
 
 use std::ops::Range;
 
-use icu_segmenter::{LineBreakOptions, LineSegmenter};
+use icu_segmenter::{LineBreakOptions, LineBreakStrictness, LineBreakWordOption, LineSegmenter};
 
 pub(crate) struct LineBreaker {
     linebreaks: Vec<usize>,
@@ -14,14 +14,22 @@ pub(crate) struct LineBreaker {
 impl LineBreaker {
     pub(crate) fn new(string: &str, options: LineBreakOptions) -> Self {
         let line_segmenter = LineSegmenter::new_auto_with_options(options);
+        // From https://docs.rs/icu_segmenter/1.5.0/icu_segmenter/struct.LineSegmenter.html
+        // > For consistency with the grapheme, word, and sentence segmenters, there is always a
+        // > breakpoint returned at index 0, but this breakpoint is not a meaningful line break
+        // > opportunity.
+        //
+        // Skip this first line break opportunity, as it isn't interesting to us.
+        let mut linebreaks: Vec<usize> = line_segmenter.segment_str(string).skip(1).collect();
+        // `word-break: break-all` and `line-break: anywhere` already break between almost every
+        // pair of characters, so the table below would only take opportunities away.
+        if options.word_option != LineBreakWordOption::BreakAll &&
+            options.strictness != LineBreakStrictness::Anywhere
+        {
+            linebreaks = apply_ascii_pair_breaks(string, linebreaks);
+        }
         Self {
-            // From https://docs.rs/icu_segmenter/1.5.0/icu_segmenter/struct.LineSegmenter.html
-            // > For consistency with the grapheme, word, and sentence segmenters, there is always a
-            // > breakpoint returned at index 0, but this breakpoint is not a meaningful line break
-            // > opportunity.
-            //
-            // Skip this first line break opportunity, as it isn't interesting to us.
-            linebreaks: line_segmenter.segment_str(string).skip(1).collect(),
+            linebreaks,
             current_offset: 0,
         }
     }
@@ -51,6 +59,61 @@ impl LineBreaker {
         }
         linebreaks_range.end = ending_linebreak_index;
         linebreaks_range
+    }
+}
+
+/// Replaces the UAX #14 decision between two adjacent printable ASCII characters with the one
+/// from Blink's `kAsciiLineBreakTable` (third_party/blink/renderer/platform/text/
+/// text_break_iterator.cc), which every Chromium-based browser uses instead of UAX #14 for such
+/// pairs. The visible difference is in URLs and paths: UAX #14 allows a break after every `/`,
+/// while Chrome keeps `https://example.com/very/long/path` together and only breaks after `-`
+/// and `?`, and before an opening bracket that follows closing punctuation.
+fn apply_ascii_pair_breaks(string: &str, icu_linebreaks: Vec<usize>) -> Vec<usize> {
+    let mut linebreaks = Vec::with_capacity(icu_linebreaks.len());
+    let mut icu_linebreaks = icu_linebreaks.into_iter().peekable();
+    let mut before_previous = None;
+    let mut previous = None;
+    for (index, character) in string.char_indices() {
+        let icu_allows_break = icu_linebreaks.next_if_eq(&index).is_some();
+        let allows_break = match previous {
+            Some(previous)
+                if is_in_ascii_pair_table(previous) && is_in_ascii_pair_table(character) =>
+            {
+                ascii_pair_allows_break(before_previous, previous, character)
+            },
+            _ => icu_allows_break,
+        };
+        if allows_break {
+            linebreaks.push(index);
+        }
+        before_previous = previous;
+        previous = Some(character);
+    }
+    // The opportunity at the end of the text.
+    linebreaks.extend(icu_linebreaks);
+    linebreaks
+}
+
+fn is_in_ascii_pair_table(character: char) -> bool {
+    ('!'..='\u{7f}').contains(&character)
+}
+
+fn ascii_pair_allows_break(before_previous: Option<char>, previous: char, next: char) -> bool {
+    match previous {
+        // A `-` before a digit may be a minus sign, so only break where it reads as a hyphen,
+        // like in `ABCD-1234` or `1234-5678`.
+        '-' if next.is_ascii_digit() => before_previous.is_some_and(|c| c.is_ascii_alphanumeric()),
+        '-' => !matches!(
+            next,
+            '!' | '$' | ')' | ',' | '.' | '/' | ':' | ';' | '?' | ']' | '}'
+        ),
+        '?' => !matches!(
+            next,
+            '!' | '"' | '\'' | ')' | ',' | '.' | '/' | ':' | ';' | '?' | ']' | '}'
+        ),
+        '!' | '"' | '#' | '%' | '&' | ')' | '*' | '+' | ',' | '.' | ':' | ';' | '=' | '>' |
+        '\\' | ']' | '|' | '}' | '~' => matches!(next, '(' | '<' | '[' | '{'),
+        _ => false,
     }
 }
 
