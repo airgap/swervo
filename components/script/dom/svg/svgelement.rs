@@ -50,7 +50,7 @@ pub(crate) struct SVGElement {
 }
 
 impl SVGElement {
-    fn new_inherited(
+    pub(crate) fn new_inherited(
         tag_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
