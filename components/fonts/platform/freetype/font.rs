@@ -9,7 +9,7 @@ use app_units::Au;
 use euclid::default::{Point2D, Rect, Size2D};
 use fonts_traits::{FontIdentifier, FontTemplateDescriptor, LocalFontIdentifier};
 use freetype_sys::{
-    FT_F26Dot6, FT_Get_Char_Index, FT_Get_Kerning, FT_GlyphSlot, FT_KERNING_DEFAULT,
+    FT_F26Dot6, FT_Get_Char_Index, FT_Get_Kerning, FT_GlyphSlot, FT_KERNING_UNFITTED,
     FT_LOAD_DEFAULT, FT_LOAD_NO_HINTING, FT_Load_Glyph, FT_PIXEL_MODE_GRAY, FT_RENDER_MODE_NORMAL,
     FT_Render_Glyph, FT_Size_Metrics, FT_SizeRec, FT_UInt, FT_ULong, FT_Vector,
 };
@@ -182,7 +182,9 @@ impl PlatformFontMethods for PlatformFont {
                 face.as_ptr(),
                 first_glyph,
                 second_glyph,
-                FT_KERNING_DEFAULT,
+                // Grid-fitted kerning would round each pair to whole pixels, while glyph
+                // advances are fractional (see `glyph_h_advance`).
+                FT_KERNING_UNFITTED,
                 &mut delta,
             );
         }
@@ -205,12 +207,23 @@ impl PlatformFontMethods for PlatformFont {
             return None;
         }
 
+        let hinted_advance = unsafe { (*slot).metrics.horiAdvance };
         if self.synthetic_bold {
             mozilla_glyphslot_embolden_less(slot);
         }
+        let synthetic_bold_advance = unsafe { (*slot).metrics.horiAdvance } - hinted_advance;
 
-        let advance = unsafe { (*slot).metrics.horiAdvance };
-        Some(fixed_26_dot_6_to_float(advance) * self.unscalable_font_metrics_scale())
+        // Lay out with the unhinted advance, which hinting would round to whole pixels: Chrome
+        // on Linux positions glyphs at fractional offsets with the linear advances, and the
+        // rounding error otherwise accumulates over a line and wraps text at different words.
+        // Bitmap fonts have no outline to scale, so their hinted advance is the real one.
+        let advance = if face.scalable() {
+            (unsafe { (*slot).linearHoriAdvance }) as f64 / 65536.0 +
+                fixed_26_dot_6_to_float(synthetic_bold_advance)
+        } else {
+            fixed_26_dot_6_to_float(hinted_advance + synthetic_bold_advance)
+        };
+        Some(advance * self.unscalable_font_metrics_scale())
     }
 
     fn rasterize_glyph(&self, glyph: GlyphId) -> Option<GlyphRaster> {
@@ -474,6 +487,10 @@ impl PlatformFontMethods for PlatformFont {
         // color characters, but not passing this flag simply *prevents* WebRender from
         // loading bitmaps. There's no harm to always passing it.
         let mut flags = FontInstanceFlags::EMBEDDED_BITMAPS;
+
+        // Glyph advances are fractional (see `glyph_h_advance`), so glyphs have to be
+        // rasterized at their subpixel offsets instead of being snapped to whole pixels.
+        flags |= FontInstanceFlags::SUBPIXEL_POSITION;
 
         // TODO: Add support for synthetic italics.
         // <https://github.com/servo/servo/issues/39637>
