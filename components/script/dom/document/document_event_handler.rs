@@ -14,7 +14,7 @@ use embedder_traits::{
     Cursor, EditingActionEvent, EmbedderMsg, ImeEvent, InputEvent, InputEventId, InputEventOutcome,
     InputEventResult, KeyboardEvent as EmbedderKeyboardEvent, MouseButton, MouseButtonAction,
     MouseButtonEvent, MouseLeftViewportEvent, TouchEvent as EmbedderTouchEvent, TouchEventType,
-    TouchId, TouchPointerType, UntrustedNodeAddress, WheelEvent as EmbedderWheelEvent,
+    TouchId, TouchPointerType, UntrustedNodeAddress, WheelEvent as EmbedderWheelEvent, WheelMode,
 };
 #[cfg(feature = "gamepad")]
 use embedder_traits::{
@@ -1838,18 +1838,19 @@ impl DocumentEventHandler {
             hit_test_result.point_in_frame
         );
 
-        let event_type = "wheel".into();
+        let event_type: Atom = "wheel".into();
+        // Listeners for the legacy `mousewheel` type receive trusted wheel events too (see
+        // `invoke` in event.rs), so they can cancel them as well.
+        let legacy_event_type: Atom = "mousewheel".into();
+        let has_non_passive_listener = |target: &EventTarget| {
+            target.has_non_passive_listener(&event_type) ||
+                target.has_non_passive_listener(&legacy_event_type)
+        };
 
         let cancelable = EventCancelable::from(
-            self.window
-                .upcast::<EventTarget>()
-                .has_non_passive_listener(&event_type) ||
+            has_non_passive_listener(self.window.upcast::<EventTarget>()) ||
                 node.inclusive_ancestors(ShadowIncluding::Yes)
-                    .any(|target| {
-                        target
-                            .upcast::<EventTarget>()
-                            .has_non_passive_listener(&event_type)
-                    }),
+                    .any(|target| has_non_passive_listener(target.upcast::<EventTarget>())),
         );
         // https://w3c.github.io/uievents/#event-wheelevents
         let dom_event = WheelEvent::new(
@@ -1878,6 +1879,17 @@ impl DocumentEventHandler {
             Finite::wrap(-event.delta.y),
             Finite::wrap(-event.delta.z),
             event.delta.mode as u32,
+        );
+        // Blink reports 120 per wheel tick in `wheelDelta`, positive when scrolling up or left
+        // like the embedder's deltas. Embedders deliver a tick as one line, or as 120 pixels,
+        // which is how far Chrome on Linux scrolls per tick.
+        let wheel_delta_per_unit = match event.delta.mode {
+            WheelMode::DeltaPixel => 1.0,
+            WheelMode::DeltaLine | WheelMode::DeltaPage => 120.0,
+        };
+        dom_event.set_wheel_delta(
+            (event.delta.x * wheel_delta_per_unit) as i32,
+            (event.delta.y * wheel_delta_per_unit) as i32,
         );
 
         let dom_event = dom_event.upcast::<Event>();
