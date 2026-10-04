@@ -438,6 +438,7 @@ impl InlineFormattingContextBuilder {
                 kind,
                 character_start: new_character_range.start,
                 dom_offsets,
+                is_editable: info.node.is_editable(),
             });
         }
 
@@ -597,6 +598,7 @@ impl InlineFormattingContextBuilder {
             kind: TextOriginKind::EmptyEditingHost,
             character_start: self.current_character_offset,
             dom_offsets: vec![0],
+            is_editable: true,
         });
     }
 

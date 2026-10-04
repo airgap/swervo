@@ -283,6 +283,8 @@ pub(crate) struct LaidOutCaretStop {
     pub(crate) offset: u32,
     /// The horizontal position of the caret in the viewport.
     pub(crate) x: Au,
+    /// Whether a selection made with the mouse can end here, as `user-select` decides.
+    pub(crate) selectable: bool,
 }
 
 /// The caret positions of a line box, left to right, and its vertical extent in the viewport.
@@ -3509,14 +3511,19 @@ impl Window {
                         (node, stop.offset)
                     };
                     // Positions at the same place, such as the end of one text node and the start
-                    // of the next, or inside a cluster of zero-width glyphs, are one stop.
-                    if stops.last().is_some_and(|last| last.x == stop.x) {
+                    // of the next, or inside a cluster of zero-width glyphs, are one stop, which
+                    // is selectable if the text on either side is.
+                    if let Some(last) = stops.last_mut() &&
+                        last.x == stop.x
+                    {
+                        last.selectable |= stop.selectable;
                         continue;
                     }
                     stops.push(LaidOutCaretStop {
                         node,
                         offset,
                         x: stop.x,
+                        selectable: stop.selectable,
                     });
                 }
                 (!stops.is_empty()).then_some(LaidOutCaretLine {

@@ -1776,6 +1776,8 @@ pub fn process_caret_stops_query(
             .as_ref()
             .expect("Only collected fragments with editable text");
 
+        let selectable =
+            text_origins.is_selectable(&offsets.character_range, &text_fragment.base.style());
         let mut stops = Vec::new();
         let mut push_stop = |character: usize, x: Au| {
             if let Some((node, offset)) = text_origins.dom_position(character) {
@@ -1783,6 +1785,7 @@ pub fn process_caret_stops_query(
                     node: node.into(),
                     offset,
                     x,
+                    selectable,
                 });
             }
         };

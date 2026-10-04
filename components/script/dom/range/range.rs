@@ -68,6 +68,68 @@ pub(crate) struct ContainedChildren {
 }
 
 impl Range {
+    /// <https://dom.spec.whatwg.org/#dom-range-stringifier>, leaving out the data of the
+    /// `Text` nodes that `include` rejects.
+    pub(crate) fn stringify(&self, no_gc: &NoGC, include: impl Fn(&Node) -> bool) -> DOMString {
+        let start_node = self.start_container();
+        let end_node = self.end_container();
+
+        // Step 1. Let string be the empty string.
+        let mut s = DOMString::new();
+
+        if let Some(text_node) = start_node.downcast::<Text>() &&
+            include(&start_node)
+        {
+            let char_data = text_node.upcast::<CharacterData>();
+
+            // Step 2. If this’s start node is this’s end node and it is a Text node,
+            // then return the substring of that Text node’s data beginning at
+            // this’s start offset and ending at this’s end offset.
+            if start_node == end_node {
+                return char_data
+                    .SubstringData(self.start_offset(), self.end_offset() - self.start_offset())
+                    .unwrap();
+            }
+
+            // Step 3. If this’s start node is a Text node, then append the substring of
+            // that node’s data from this’s start offset until the end to string.
+            s.push_str(
+                &char_data
+                    .SubstringData(
+                        self.start_offset(),
+                        char_data.Length() - self.start_offset(),
+                    )
+                    .unwrap()
+                    .str(),
+            );
+        }
+
+        // Step 4. Append the concatenation of the data of all Text nodes that are contained in this,
+        // in tree order, to string.
+        let ancestor = self.CommonAncestorContainer();
+        let iter = start_node
+            .following_nodes_unrooted(no_gc, &ancestor, ShadowIncluding::No)
+            .filter_map(UnrootedDom::downcast::<Text>);
+
+        for child in iter {
+            if self.contains(child.upcast()) && include(child.upcast()) {
+                s.push_str(&child.upcast::<CharacterData>().Data().str());
+            }
+        }
+
+        // Step 5. If this’s end node is a Text node, then append the substring of
+        // that node’s data from its start until this’s end offset to string.
+        if let Some(text_node) = end_node.downcast::<Text>() &&
+            include(&end_node)
+        {
+            let char_data = text_node.upcast::<CharacterData>();
+            s.push_str(&char_data.SubstringData(0, self.end_offset()).unwrap().str());
+        }
+
+        // Step 6. Return string.
+        s
+    }
+
     fn new_inherited(
         start_container: &Node,
         start_offset: u32,
@@ -1143,59 +1205,7 @@ impl RangeMethods<crate::DomTypeHolder> for Range {
 
     /// <https://dom.spec.whatwg.org/#dom-range-stringifier>
     fn Stringifier(&self, no_gc: &NoGC) -> DOMString {
-        let start_node = self.start_container();
-        let end_node = self.end_container();
-
-        // Step 1. Let string be the empty string.
-        let mut s = DOMString::new();
-
-        if let Some(text_node) = start_node.downcast::<Text>() {
-            let char_data = text_node.upcast::<CharacterData>();
-
-            // Step 2. If this’s start node is this’s end node and it is a Text node,
-            // then return the substring of that Text node’s data beginning at
-            // this’s start offset and ending at this’s end offset.
-            if start_node == end_node {
-                return char_data
-                    .SubstringData(self.start_offset(), self.end_offset() - self.start_offset())
-                    .unwrap();
-            }
-
-            // Step 3. If this’s start node is a Text node, then append the substring of
-            // that node’s data from this’s start offset until the end to string.
-            s.push_str(
-                &char_data
-                    .SubstringData(
-                        self.start_offset(),
-                        char_data.Length() - self.start_offset(),
-                    )
-                    .unwrap()
-                    .str(),
-            );
-        }
-
-        // Step 4. Append the concatenation of the data of all Text nodes that are contained in this,
-        // in tree order, to string.
-        let ancestor = self.CommonAncestorContainer();
-        let iter = start_node
-            .following_nodes_unrooted(no_gc, &ancestor, ShadowIncluding::No)
-            .filter_map(UnrootedDom::downcast::<Text>);
-
-        for child in iter {
-            if self.contains(child.upcast()) {
-                s.push_str(&child.upcast::<CharacterData>().Data().str());
-            }
-        }
-
-        // Step 5. If this’s end node is a Text node, then append the substring of
-        // that node’s data from its start until this’s end offset to string.
-        if let Some(text_node) = end_node.downcast::<Text>() {
-            let char_data = text_node.upcast::<CharacterData>();
-            s.push_str(&char_data.SubstringData(0, self.end_offset()).unwrap().str());
-        }
-
-        // Step 6. Return string.
-        s
+        self.stringify(no_gc, |_| true)
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-range-createcontextualfragment>

@@ -9,9 +9,10 @@ use app_units::Au;
 use dom_struct::dom_struct;
 use euclid::Point2D;
 use js::context::{JSContext, NoGC};
-use layout_api::RestyleReason;
+use layout_api::{QueryMsg, RestyleReason};
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 use style::Zero;
+use style::values::computed::UserSelect;
 use style_traits::CSSPixel;
 
 use crate::dom::abstractrange::bp_position;
@@ -247,6 +248,37 @@ impl Selection {
         extend: bool,
     ) {
         let extend = extend && self.range.get().is_some();
+        let window = self.document.window();
+        // As in Blink, `user-select: all` content is selected as a whole: a press in it selects
+        // all of it and dragging from there leaves that selection alone.
+        if extend &&
+            self.anchor_node()
+                .is_some_and(|anchor| user_select_all_root(&anchor).is_some())
+        {
+            return;
+        }
+        if !extend && let Some(root) = user_select_all_root(hit_node) {
+            let lines = selectable_lines(window.caret_stops_query(root.upcast()));
+            let result = match (lines.first(), lines.last()) {
+                (Some(first), Some(last)) => {
+                    let (start, start_offset) = first_position_in(root.upcast(), &first.stops[0]);
+                    let end = &last.stops[last.stops.len() - 1];
+                    self.SetBaseAndExtent(cx, &start, start_offset, &end.node, end.offset)
+                },
+                // Without text, such as for an image, the element itself is selected.
+                _ => {
+                    let parent = root
+                        .upcast::<Node>()
+                        .GetParentNode()
+                        .expect("Laid out elements have a parent");
+                    let index = root.upcast::<Node>().index();
+                    self.SetBaseAndExtent(cx, &parent, index, &parent, index + 1)
+                },
+            };
+            result.expect("Laid out caret positions are valid boundary points");
+            return;
+        }
+
         // Like in other browsers, a selection stays in the editing host it starts in, and one
         // that starts outside editing hosts does not enter them.
         let editing_host = if extend {
@@ -254,10 +286,9 @@ impl Selection {
         } else {
             hit_node.editing_host_of()
         };
-        let window = self.document.window();
         let lines = match &editing_host {
-            Some(editing_host) => window.caret_stops_query(editing_host),
-            None => caret_stops_around(window, hit_node),
+            Some(editing_host) => selectable_lines(window.caret_stops_query(editing_host)),
+            None => caret_stops_around(window, hit_node, true),
         };
         let Some((_, mut stop)) = closest_caret_stop(&lines, point) else {
             return;
@@ -280,6 +311,28 @@ impl Selection {
                     self.position_outside_editing_hosts(&stop.node, stop.offset, extend)
                 } else {
                     (stop.node.clone(), stop.offset)
+                };
+                // A selection extended into `user-select: all` content takes in all of it.
+                let (node, offset) = match user_select_all_root(&node) {
+                    Some(root) if extend => {
+                        let lines = selectable_lines(window.caret_stops_query(root.upcast()));
+                        let forward = self.anchor_node().is_some_and(|anchor| {
+                            bp_position(&anchor, self.anchor_offset(), &node, offset) ==
+                                Some(Ordering::Less)
+                        });
+                        if forward {
+                            match lines.last().and_then(|line| line.stops.last()) {
+                                Some(stop) => (stop.node.clone(), stop.offset),
+                                None => (node, offset),
+                            }
+                        } else {
+                            match lines.first().and_then(|line| line.stops.first()) {
+                                Some(stop) => first_position_in(root.upcast(), stop),
+                                None => (node, offset),
+                            }
+                        }
+                    },
+                    _ => (node, offset),
                 };
                 if extend {
                     self.Extend(cx, &node, offset)
@@ -522,11 +575,19 @@ fn character_before(stop: &LaidOutCaretStop) -> Option<char> {
         .ok()
 }
 
-/// The caret positions, by line, of the nearest block around `node` that has laid out text.
-pub(crate) fn caret_stops_around(window: &Window, node: &Node) -> Vec<LaidOutCaretLine> {
+/// The caret positions, by line, of the nearest block around `node` that has laid out text, or
+/// with `selectable_only`, laid out text that can be selected.
+pub(crate) fn caret_stops_around(
+    window: &Window,
+    node: &Node,
+    selectable_only: bool,
+) -> Vec<LaidOutCaretLine> {
     let mut block = node.block_node_of();
     while let Some(current) = block.filter(|block| block.is::<Element>()) {
-        let lines = window.caret_stops_query(&current);
+        let mut lines = window.caret_stops_query(&current);
+        if selectable_only {
+            lines = selectable_lines(lines);
+        }
         if !lines.is_empty() {
             return lines;
         }
@@ -535,6 +596,96 @@ pub(crate) fn caret_stops_around(window: &Window, node: &Node) -> Vec<LaidOutCar
             .and_then(|parent| parent.block_node_of());
     }
     Vec::new()
+}
+
+/// The lines with only their caret positions where a selection can end, leaving out lines
+/// without any.
+fn selectable_lines(lines: Vec<LaidOutCaretLine>) -> Vec<LaidOutCaretLine> {
+    lines
+        .into_iter()
+        .filter_map(|mut line| {
+            line.stops.retain(|stop| stop.selectable);
+            (!line.stops.is_empty()).then_some(line)
+        })
+        .collect()
+}
+
+/// The `user-select` of an element, or of the parent element of another node, which inherits
+/// it. `None` for nodes that are not styled.
+fn user_select(node: &Node) -> Option<UserSelect> {
+    let element = match node.downcast::<Element>() {
+        Some(element) => DomRoot::from_ref(element),
+        None => node.GetParentElement()?,
+    };
+    Some(element.style()?.clone_user_select())
+}
+
+/// Whether pressing the primary button over `node` can start a selection: as in Blink, not in
+/// `user-select: none` content unless it is editable, where `text` and `all` override the
+/// value of an ancestor. <https://drafts.csswg.org/css-ui-4/#content-selection>
+pub(crate) fn can_start_selection(node: &Node) -> bool {
+    for ancestor in node.inclusive_ancestors(ShadowIncluding::Yes) {
+        if ancestor.is_editable_or_editing_host() {
+            return true;
+        }
+        if !ancestor.is::<Element>() {
+            continue;
+        }
+        match user_select(&ancestor) {
+            Some(UserSelect::None) => return false,
+            Some(UserSelect::Text | UserSelect::All) => return true,
+            Some(UserSelect::Auto) | None => {},
+        }
+    }
+    true
+}
+
+/// The outermost of the elements with `user-select: all` that `node` is in without other
+/// `user-select` values between them, which is selected as a whole.
+fn user_select_all_root(node: &Node) -> Option<DomRoot<Element>> {
+    if node.is_editable_or_editing_host() {
+        return None;
+    }
+    let mut root = None;
+    for ancestor in node.inclusive_ancestors(ShadowIncluding::Yes) {
+        let Some(element) = ancestor.downcast::<Element>() else {
+            continue;
+        };
+        if user_select(&ancestor) != Some(UserSelect::All) {
+            break;
+        }
+        root = Some(DomRoot::from_ref(element));
+    }
+    root
+}
+
+/// The position of the first caret position `stop` of the text of `root` in `root`. Laid out
+/// positions where two nodes meet are at the end of the first, which for the first position of
+/// `root` is before it; the start of the first text in `root` that is not only white space is
+/// the same place.
+fn first_position_in(root: &Node, stop: &LaidOutCaretStop) -> (DomRoot<Node>, u32) {
+    if root.is_inclusive_ancestor_of(&stop.node) {
+        return (stop.node.clone(), stop.offset);
+    }
+    root.traverse_preorder(ShadowIncluding::No)
+        .find(|node| {
+            node.downcast::<Text>().is_some_and(|text| {
+                !text
+                    .data()
+                    .chars()
+                    .all(|character| character.is_ascii_whitespace())
+            })
+        })
+        .map_or((stop.node.clone(), stop.offset), |text| (text, 0))
+}
+
+/// Whether text in `text` can be part of what a selection stringifies to: as in Blink, text
+/// with `user-select: none` cannot, unless it is editable. Styles must be up to date.
+pub(crate) fn is_selectable_text(text: &Node) -> bool {
+    text.is_editable_or_editing_host() ||
+        text.GetParentElement()
+            .and_then(|parent| parent.style_from_last_restyle())
+            .is_none_or(|style| style.clone_user_select() != UserSelect::None)
 }
 
 /// The caret position closest to `point` (in the viewport) and its line: on the closest line,
@@ -1279,7 +1430,9 @@ impl SelectionMethods<crate::DomTypeHolder> for Selection {
         // into account `display: none`. The case for textarea and input elements is
         // completely unhandled here.
         if let Some(range) = self.range.get() {
-            range.Stringifier(no_gc)
+            // As in Blink, text that cannot be selected is left out.
+            self.document.window().layout_reflow(QueryMsg::StyleQuery);
+            range.stringify(no_gc, is_selectable_text)
         } else {
             DOMString::from("")
         }

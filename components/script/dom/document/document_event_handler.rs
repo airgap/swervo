@@ -76,7 +76,7 @@ use crate::dom::keyboardevent::KeyboardEvent;
 use crate::dom::node::{self, Node, NodeTraits};
 use crate::dom::pointerevent::{PointerEvent, PointerId};
 use crate::dom::scrolling_box::{ScrollAxisState, ScrollRequirement, ScrollingBoxAxis};
-use crate::dom::selection::{CaretMovement, PointerSelection};
+use crate::dom::selection::{CaretMovement, PointerSelection, can_start_selection};
 use crate::dom::types::{
     ClipboardEvent, CompositionEvent, DataTransfer, Element, Event, EventTarget, GlobalScope,
     HTMLAnchorElement, HTMLButtonElement, HTMLElement, HTMLInputElement,
@@ -1242,9 +1242,10 @@ impl DocumentEventHandler {
     }
 
     /// Changes the selection for a press of the primary button like other browsers: text controls
-    /// keep their own selection, buttons and draggable elements are pressed or dragged rather than
-    /// selected from, and anywhere else the press selects, by characters, words or paragraphs
-    /// depending on the click count, and starts selecting with the mouse.
+    /// keep their own selection, buttons, draggable elements and `user-select: none` content are
+    /// pressed or dragged rather than selected from, and anywhere else the press selects, by
+    /// characters, words or paragraphs depending on the click count, and starts selecting with
+    /// the mouse.
     fn select_for_primary_button_press(
         &self,
         cx: &mut JSContext,
@@ -1275,6 +1276,9 @@ impl DocumentEventHandler {
             {
                 return;
             }
+        }
+        if !can_start_selection(hit_node) {
+            return;
         }
 
         let granularity = match click_count {

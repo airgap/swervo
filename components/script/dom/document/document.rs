@@ -5388,7 +5388,7 @@ impl Document {
         // Step 5. Otherwise, return a caret position where the caret range is collapsed at the
         // insertion point of the text insertion point indicator, here the closest caret position
         // in laid out text.
-        let lines = caret_stops_around(&self.window, node);
+        let lines = caret_stops_around(&self.window, node, false);
         let Some((line, stop)) = closest_caret_stop(&lines, point) else {
             return Some((DomRoot::from_ref(node), 0, None));
         };

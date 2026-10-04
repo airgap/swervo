@@ -108,7 +108,7 @@ use style::context::{QuirksMode, SharedStyleContext};
 use style::dom::OpaqueNode;
 use style::properties::ComputedValues;
 use style::selector_parser::PseudoElement;
-use style::values::computed::{Overflow, OverflowWrap};
+use style::values::computed::{Overflow, OverflowWrap, UserSelect};
 use style::values::specified::box_::{Display as StyloDisplay, DisplayInside};
 use style::values::specified::text::TextOverflowSide;
 use style::properties::style_structs::InheritedText;
@@ -224,6 +224,8 @@ pub(crate) struct TextOrigin {
     /// offsets need not be contiguous, and `text-transform` can produce several characters
     /// from one, which then share its offset.
     pub dom_offsets: Vec<u32>,
+    /// Whether the node is editable, which makes its text selectable whatever `user-select`.
+    pub is_editable: bool,
 }
 
 #[derive(Clone, Copy, Debug, MallocSizeOf, PartialEq)]
@@ -309,6 +311,23 @@ impl TextOrigins {
             self.character_offset(node, utf16_range.start as u32)?..
                 self.character_offset(node, utf16_range.end as u32)?,
         )
+    }
+
+    /// Whether the characters in `character_range`, all with the parent style `style`, can be
+    /// selected. As in Blink, `user-select: none` text cannot be, unless it is editable.
+    /// <https://drafts.csswg.org/css-ui-4/#content-selection>
+    pub(crate) fn is_selectable(
+        &self,
+        character_range: &std::ops::Range<usize>,
+        style: &ComputedValues,
+    ) -> bool {
+        style.clone_user_select() != UserSelect::None ||
+            self.sources_in(character_range)
+                .filter(|source| {
+                    source.character_end() > character_range.start &&
+                        source.character_start < character_range.end
+                })
+                .any(|source| source.is_editable)
     }
 
     /// The sources of the characters in the given range, including those touching its ends.

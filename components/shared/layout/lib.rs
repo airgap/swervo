@@ -181,6 +181,8 @@ pub struct CaretStop {
     pub offset: u32,
     /// The horizontal position of the caret in the viewport.
     pub x: Au,
+    /// Whether the text around this position can be selected, as `user-select` decides.
+    pub selectable: bool,
 }
 
 /// The caret positions of one line box, in visual order.

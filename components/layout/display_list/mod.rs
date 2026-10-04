@@ -1542,7 +1542,9 @@ impl Fragment {
             return Some((caret..caret, true));
         }
 
-        if builder.selected_text.is_empty() {
+        if builder.selected_text.is_empty() ||
+            !text_origins.is_selectable(character_range, &fragment.base.style())
+        {
             return None;
         }
         let mut selected: Option<std::ops::Range<usize>> = None;
