@@ -1050,10 +1050,13 @@ impl ImageCache for ImageCacheImpl {
             return Some(result.clone());
         }
 
+        let mut svg_id_image_id_map = self.svg_id_image_id_map.lock();
         if let Some(svg_id) = svg_id &&
-            let Some(old_mapped_image_id) =
-                self.svg_id_image_id_map.lock().insert(svg_id, image_id) &&
-            old_mapped_image_id != image_id
+            let Some(old_mapped_image_id) = svg_id_image_id_map.insert(svg_id, image_id) &&
+            old_mapped_image_id != image_id &&
+            !svg_id_image_id_map
+                .values()
+                .any(|mapped_image_id| *mapped_image_id == old_mapped_image_id)
         {
             store.vector_images.remove(&old_mapped_image_id);
             store
@@ -1063,6 +1066,7 @@ impl ImageCache for ImageCacheImpl {
                 .svg_rasterization_task_store
                 .remove_all_for_id(old_mapped_image_id);
         }
+        drop(svg_id_image_id_map);
 
         if store
             .svg_rasterization_task_store
@@ -1200,7 +1204,16 @@ impl ImageCache for ImageCacheImpl {
 
     fn evict_rasterized_image(&self, svg_id: &str) {
         let mut store = self.store.lock();
-        if let Some(mapped_image_id) = self.svg_id_image_id_map.lock().remove(svg_id) {
+        let mut svg_id_image_id_map = self.svg_id_image_id_map.lock();
+        if let Some(mapped_image_id) = svg_id_image_id_map.remove(svg_id) {
+            // `<svg>` elements whose serializations are identical (the same icon in the same
+            // colours) share one image; it stays while another of them still paints it.
+            if svg_id_image_id_map
+                .values()
+                .any(|other_image_id| *other_image_id == mapped_image_id)
+            {
+                return;
+            }
             store.pending_loads.remove(&mapped_image_id);
             store.vector_images.remove(&mapped_image_id);
             let images_to_remove = store
