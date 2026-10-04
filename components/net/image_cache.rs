@@ -18,7 +18,7 @@ use mime::Mime;
 use net_traits::image_cache::{
     Image, ImageCache, ImageCacheFactory, ImageCacheResponseCallback, ImageCacheResponseMessage,
     ImageCacheResult, ImageLoadListener, ImageOrMetadataAvailable, ImageResponse, PendingImageId,
-    RasterizationCompleteResponse, VectorImage,
+    RasterizationCompleteResponse, VectorImage, VectorImageSource,
 };
 use net_traits::request::CorsSettings;
 use net_traits::{FetchMetadata, FetchResponseMsg, FilteredMetadata, NetworkError};
@@ -67,7 +67,7 @@ const MAX_SVG_PIXMAP_DIMENSION: u32 = 5000;
 fn parse_svg_document_in_memory(
     bytes: &[u8],
     fontdb: Arc<fontdb::Database>,
-) -> Result<usvg::Tree, &'static str> {
+) -> Result<(usvg::Tree, VectorImageSource), &'static str> {
     let image_string_href_resolver = Box::new(move |_: &str, _: &usvg::Options| {
         // Do not try to load `href` in <image> as local file path.
         None
@@ -82,11 +82,43 @@ fn parse_svg_document_in_memory(
         ..usvg::Options::default()
     };
 
-    usvg::Tree::from_data(bytes, &opt)
+    // The steps of `usvg::Tree::from_data`, unrolled to also keep the text and read the root
+    // element's attributes off the parsed document.
+    let decompressed;
+    let data = if bytes.starts_with(&[0x1f, 0x8b]) {
+        decompressed = usvg::decompress_svgz(bytes).map_err(|error| {
+            warn!("Error when decompressing SVG data: {error}");
+            "Not a valid SVG document"
+        })?;
+        &decompressed[..]
+    } else {
+        bytes
+    };
+    let text = std::str::from_utf8(data).map_err(|_| "Not a valid SVG document")?;
+    let xml_opt = usvg::roxmltree::ParsingOptions {
+        allow_dtd: true,
+        ..Default::default()
+    };
+    let document = usvg::roxmltree::Document::parse_with_options(text, xml_opt).map_err(|error| {
+        warn!("Error when parsing SVG data: {error}");
+        "Not a valid SVG document"
+    })?;
+    let root = document.root_element();
+    let source = VectorImageSource {
+        text: Arc::new(text.to_owned()),
+        root_preserve_aspect_ratio: root.has_attribute("viewBox").then(|| {
+            root.attribute("preserveAspectRatio")
+                .unwrap_or("xMidYMid meet")
+                .to_owned()
+        }),
+    };
+
+    let tree = usvg::Tree::from_xmltree(&document, &opt)
         .inspect_err(|error| {
             warn!("Error when parsing SVG data: {error}");
         })
-        .map_err(|_| "Not a valid SVG document")
+        .map_err(|_| "Not a valid SVG document")?;
+    Ok((tree, source))
 }
 
 fn decode_bytes_sync(
@@ -107,9 +139,10 @@ fn decode_bytes_sync(
     let image = if is_svg_document {
         parse_svg_document_in_memory(bytes, fontdb)
             .ok()
-            .map(|svg_tree| {
+            .map(|(svg_tree, source)| {
                 DecodedImage::Vector(VectorImageData {
                     svg_tree: Arc::new(svg_tree),
+                    source,
                     cors_status: cors,
                 })
             })
@@ -245,6 +278,7 @@ impl CompletedLoad {
 struct VectorImageData {
     #[conditional_malloc_size_of]
     svg_tree: Arc<usvg::Tree>,
+    source: VectorImageSource,
     cors_status: CorsStatus,
 }
 
@@ -946,6 +980,14 @@ impl ImageCache for ImageCacheImpl {
                 ImageCacheResult::FailedToLoadOrDecode
             },
         }
+    }
+
+    fn vector_image_source(&self, image_id: PendingImageId) -> Option<VectorImageSource> {
+        self.store
+            .lock()
+            .vector_images
+            .get(&image_id)
+            .map(|vector_image| vector_image.source.clone())
     }
 
     fn add_rasterization_complete_listener(

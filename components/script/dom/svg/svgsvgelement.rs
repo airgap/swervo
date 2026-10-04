@@ -11,6 +11,7 @@ use html5ever::{LocalName, Prefix, QualName, local_name, ns};
 use js::context::JSContext;
 use js::rust::HandleObject;
 use layout_api::{SVG_PAINT_PROPERTIES, SVGElementData, parse_view_box, svg_paint_signature};
+use net_traits::image_cache::Image;
 use percent_encoding::percent_decode_str;
 use pixels::EncodedImageType;
 use script_bindings::cell::DomRefCell;
@@ -44,6 +45,7 @@ use crate::dom::node::{
     ChildrenMutation, CloneChildrenFlag, Node, NodeDamage, NodeTraits, UnbindContext,
 };
 use crate::dom::svg::svggraphicselement::SVGGraphicsElement;
+use crate::dom::svg::svgimageelement::SVGImageElement;
 
 #[dom_struct]
 pub(crate) struct SVGSVGElement {
@@ -119,11 +121,10 @@ impl SVGSVGElement {
 
         let mut cloned_nodes =
             self.process_use_elements(cx, &mut referenced_ids, &mut href_rewrites);
-        // Order matters: lowering `<foreignObject>` and `<image href>` first means the
-        // `<image>` elements those passes insert (which carry `mask`/`clip-path`/`filter`
-        // attributes) are seen by the external-reference pass below.
+        // Order matters: lowering `<foreignObject>` first means the `<image>` elements that
+        // pass inserts (which carry `mask`/`clip-path`/`filter` attributes) are seen by the
+        // external-reference pass below.
         cloned_nodes.extend(self.process_foreign_objects(cx));
-        cloned_nodes.extend(self.process_image_elements(cx));
         cloned_nodes.extend(self.process_external_references(cx, &mut referenced_ids));
 
         let rewrite_attributes = |element: &Element, attributes: &mut Vec<(QualName, AttrValue)>| {
@@ -146,7 +147,11 @@ impl SVGSVGElement {
             return;
         };
 
-        let xml_source: String = xml_source.into();
+        // Tagged with this element's id so that identical subtrees in different `<svg>`s don't
+        // share an image-cache entry: re-serializing one evicts its entry and rasterizations
+        // (see `evict_cached_images`), which left every other `<svg>` with the same markup
+        // painting nothing until something happened to damage it.
+        let xml_source = format!("<!--{}-->{}", self.uuid, String::from(xml_source));
         let base64_encoded_source = base64::engine::general_purpose::STANDARD.encode(xml_source);
         let data_url = format!("data:image/svg+xml;base64,{}", base64_encoded_source);
         match ServoUrl::parse(&data_url) {
@@ -346,6 +351,41 @@ impl SVGSVGElement {
                         referenced_ids.push(id);
                     }
                 }
+                // Paint servers named by stylesheet rules or inline `style`, which the attribute
+                // scan can't see; the serialization carries them as computed `url(#id)`s.
+                if let Some(style) = element.style_from_last_restyle() {
+                    let inherited_svg = style.get_inherited_svg();
+                    referenced_ids.extend(
+                        [inherited_svg.clone_fill(), inherited_svg.clone_stroke()]
+                            .iter()
+                            .filter_map(paint_server_id),
+                    );
+                }
+                // A gradient or pattern takes its unspecified attributes and its stops or
+                // content from the one its href names:
+                // <https://svgwg.org/svg2-draft/pservers.html#LinearGradientElementHrefAttribute>
+                if matches!(
+                    *element.local_name(),
+                    local_name!("linearGradient") |
+                        local_name!("radialGradient") |
+                        local_name!("pattern")
+                ) {
+                    let href = element.get_string_attribute(&local_name!("href"));
+                    let effective_href = if href.str().is_empty() {
+                        element
+                            .get_attribute_string_value_with_namespace(
+                                &ns!(xlink),
+                                &local_name!("href"),
+                            )
+                            .unwrap_or_default()
+                    } else {
+                        href.to_string()
+                    };
+                    if let Some(id) = effective_href.strip_prefix('#').filter(|id| !id.is_empty())
+                    {
+                        referenced_ids.push(id.to_owned());
+                    }
+                }
             }
 
             for id in referenced_ids {
@@ -421,102 +461,65 @@ impl SVGSVGElement {
         inserted_nodes
     }
 
-    /// Re-embed each `<image>` element whose href points at a fetched external resource as a
-    /// sibling `<image>` with the decoded raster as a `data:` href. The rasterized document
-    /// cannot fetch (no network, no base URL), so external hrefs render nothing without this;
-    /// `SVGImageElement` fetches its href through the image cache and invalidates this svg's
-    /// cached serialization when pixels arrive. data: hrefs pass through untouched.
-    fn process_image_elements(&self, cx: &mut JSContext) -> Vec<DomRoot<Node>> {
-        use crate::dom::svg::svgimageelement::SVGImageElement;
-
-        let root_node = self.upcast::<Node>();
-        let image_elements: Vec<DomRoot<SVGImageElement>> = root_node
-            .traverse_preorder(ShadowIncluding::No)
-            .filter_map(DomRoot::downcast::<SVGImageElement>)
-            .collect();
-
-        let mut inserted_nodes = Vec::new();
-        for image_element in image_elements {
-            let element = image_element.upcast::<Element>();
-            let href = element.get_string_attribute(&local_name!("href"));
-            let effective_href = if href.str().is_empty() {
-                element
-                    .get_attribute_string_value_with_namespace(&ns!(xlink), &local_name!("href"))
-                    .unwrap_or_default()
-            } else {
-                href.to_string()
-            };
-            // Nothing to do: no href, or one the rasterizer can already consume.
-            if effective_href.is_empty() || effective_href.starts_with("data:") {
-                continue;
-            }
-            let Some(snapshot) = image_element.get_raster_image_data() else {
-                continue;
-            };
-            let Some(data_url) = png_data_url(snapshot) else {
-                continue;
-            };
-
-            let element_node = image_element.upcast::<Node>();
-            let document = element_node.owner_doc();
-            let replacement = Element::create(
-                cx,
-                QualName::new(None, ns!(svg), LocalName::from("image")),
-                None,
-                &document,
-                ElementCreator::ScriptCreated,
-                CustomElementCreationMode::Synchronous,
-                None,
-            );
-            for name in [
-                "x",
-                "y",
-                "width",
-                "height",
-                "mask",
-                "clip-path",
-                "filter",
-                "transform",
-                "opacity",
-                // Case-sensitive SVG name: must go through the namespace-explicit accessor —
-                // the namespace-less getters debug-assert lowercase ASCII.
-                "preserveAspectRatio",
-            ] {
-                let attr_name = LocalName::from(name);
-                let Some(value) =
-                    element.get_attribute_string_value_with_namespace(&ns!(), &attr_name)
-                else {
-                    continue;
-                };
-                replacement.set_attribute_from_parser(
-                    cx,
-                    QualName::new(None, ns!(), attr_name),
-                    DOMString::from(value),
-                    None,
-                );
-            }
-            replacement.set_attribute_from_parser(
-                cx,
-                QualName::new(None, ns!(), LocalName::from("href")),
-                DOMString::from(data_url),
-                None,
-            );
-
-            // Same paint slot; the original's unresolvable href renders nothing there.
-            let Some(parent) = element_node.GetParentNode() else {
-                continue;
-            };
-            let replacement_node = DomRoot::from_ref(replacement.upcast::<Node>());
-            if parent
-                .InsertBefore(cx, &replacement_node, Some(element_node))
-                .is_ok()
-            {
-                inserted_nodes.push(replacement_node);
-            }
+    /// The `href` and `preserveAspectRatio` that `image` is serialized with when its href is an
+    /// external resource that has been fetched: the rasterized document cannot fetch (no
+    /// network, no base URL), so the image is embedded as a `data:` URL instead, a raster as
+    /// PNG and an SVG document as its own source. `SVGImageElement` fetches through the image
+    /// cache and invalidates this svg's cached serialization when the image arrives. `None`
+    /// keeps the element's own attributes: no href, a `data:` href the rasterizer reads itself,
+    /// or an image not loaded (yet).
+    fn embedded_image_attributes(
+        &self,
+        image: &SVGImageElement,
+    ) -> Option<(String, Option<String>)> {
+        let element = image.upcast::<Element>();
+        let href = element.get_string_attribute(&local_name!("href"));
+        let effective_href = if href.str().is_empty() {
+            element
+                .get_attribute_string_value_with_namespace(&ns!(xlink), &local_name!("href"))
+                .unwrap_or_default()
+        } else {
+            href.to_string()
+        };
+        if effective_href.is_empty() || effective_href.starts_with("data:") {
+            return None;
         }
-        inserted_nodes
+        let preserve_aspect_ratio = element.get_attribute_string_value_with_namespace(
+            &ns!(),
+            &local_name!("preserveAspectRatio"),
+        );
+        match image.image_data()? {
+            Image::Raster(raster) => {
+                Some((png_data_url(raster.as_snapshot())?, preserve_aspect_ratio))
+            },
+            // Embedded as SVG rather than pre-rasterized, so that the rasterizer renders the
+            // nested document at the final resolution.
+            Image::Vector(vector) => {
+                let source = self
+                    .owner_window()
+                    .image_cache()
+                    .vector_image_source(vector.id)?;
+                let data_url = format!(
+                    "data:image/svg+xml;base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(source.text.as_bytes())
+                );
+                // Chrome draws an SVG image into the `<image>` viewport as that document's own
+                // viewport, fitting its viewBox with its root's `preserveAspectRatio`, and
+                // stretches a document without a viewBox; the `<image>`'s attribute only counts
+                // when it is `none`, which stretches as well. The rasterizer fits the nested
+                // document's size with the `<image>`'s attribute instead, so that is replaced by
+                // the value giving Chrome's result.
+                let stretched = preserve_aspect_ratio
+                    .as_deref()
+                    .is_some_and(|value| value.split_whitespace().any(|token| token == "none"));
+                let preserve_aspect_ratio = match source.root_preserve_aspect_ratio {
+                    Some(root_value) if !stretched => root_value,
+                    _ => "none".to_owned(),
+                };
+                Some((data_url, Some(preserve_aspect_ratio)))
+            },
+        }
     }
-
 
     /// Phase 2 of native foreignObject rendering (LYK-136): for each foreignObject child
     /// carrying `mask="url(#id)"`, build a standalone SVG document — the referenced mask
@@ -733,6 +736,39 @@ impl SVGSVGElement {
                 QualName::new(None, ns!(), local_name!("href")),
                 AttrValue::String(href.clone()),
             ));
+        }
+
+        // `xlink:href` is serialized without its prefix, so next to a plain `href` it duplicates
+        // that attribute: an XML well-formedness error that leaves the whole svg blank. The
+        // plain attribute takes precedence anyway:
+        // <https://svgwg.org/svg2-draft/linking.html#XLinkRefAttrs>
+        if attributes
+            .iter()
+            .any(|(name, _)| name.ns == ns!() && name.local == local_name!("href"))
+        {
+            attributes
+                .retain(|(name, _)| name.ns != ns!(xlink) || name.local != local_name!("href"));
+        }
+        if let Some(image) = element.downcast::<SVGImageElement>() &&
+            let Some((href, preserve_aspect_ratio)) = self.embedded_image_attributes(image)
+        {
+            attributes.retain(|(name, _)| {
+                let is_href =
+                    name.local == local_name!("href") && matches!(name.ns, ns!() | ns!(xlink));
+                let is_preserve_aspect_ratio =
+                    name.ns == ns!() && name.local == local_name!("preserveAspectRatio");
+                !is_href && !is_preserve_aspect_ratio
+            });
+            attributes.push((
+                QualName::new(None, ns!(), local_name!("href")),
+                AttrValue::String(href),
+            ));
+            if let Some(preserve_aspect_ratio) = preserve_aspect_ratio {
+                attributes.push((
+                    QualName::new(None, ns!(), local_name!("preserveAspectRatio")),
+                    AttrValue::String(preserve_aspect_ratio),
+                ));
+            }
         }
 
         // With a viewBox, layout sizes the root's box and fits the viewBox into it; the
@@ -1083,8 +1119,8 @@ fn rasterizer_paint(paint: &SVGPaint, current_color: &AbsoluteColor) -> String {
         SVGPaintKind::None => "none".to_owned(),
         SVGPaintKind::Color(color) => rasterizer_paint_color(color, current_color),
         // Paint servers live in the page; a reference that resolves to no fragment can't.
-        SVGPaintKind::PaintServer(url) => match url.url().and_then(|url| url.fragment()) {
-            Some(fragment) => format!("url(#{})", percent_decode_str(fragment).decode_utf8_lossy()),
+        SVGPaintKind::PaintServer(_) => match paint_server_id(paint) {
+            Some(id) => format!("url(#{id})"),
             None => "none".to_owned(),
         },
         SVGPaintKind::ContextFill => "context-fill".to_owned(),
@@ -1097,6 +1133,15 @@ fn rasterizer_paint(paint: &SVGPaint, current_color: &AbsoluteColor) -> String {
             format!("{kind} {}", rasterizer_paint_color(color, current_color))
         },
     }
+}
+
+/// The element id a paint-server `paint` references, if any.
+fn paint_server_id(paint: &SVGPaint) -> Option<String> {
+    let SVGPaintKind::PaintServer(url) = &paint.kind else {
+        return None;
+    };
+    let url = url.url()?;
+    Some(percent_decode_str(url.fragment()?).decode_utf8_lossy().into_owned())
 }
 
 /// `value` with each `var(--name[, fallback])` replaced by the custom property's computed value

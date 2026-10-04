@@ -42,6 +42,17 @@ pub struct VectorImage {
     pub cors_status: CorsStatus,
 }
 
+/// What embedding an SVG image in another SVG document needs from it.
+#[derive(Clone, Debug, MallocSizeOf)]
+pub struct VectorImageSource {
+    /// The document text, decompressed if it was served as svgz.
+    #[conditional_malloc_size_of]
+    pub text: Arc<String>,
+    /// The root element's `preserveAspectRatio` (its initial value when absent), or `None` when
+    /// the root has no `viewBox` for it to apply to.
+    pub root_preserve_aspect_ratio: Option<String>,
+}
+
 impl Image {
     pub fn metadata(&self) -> ImageMetadata {
         match self {
@@ -215,6 +226,10 @@ pub trait ImageCache: Sync + Send {
         svg_id: Option<String>,
         for_mask: bool,
     ) -> Option<RasterImage>;
+
+    /// The source of the loaded SVG document `image_id`, for embedding it in another SVG
+    /// document. `None` once the image has been evicted.
+    fn vector_image_source(&self, image_id: VectorImageId) -> Option<VectorImageSource>;
 
     /// Adds a new listener to be notified once the given `image_id` has been rasterized at
     /// the given `size`. The listener will receive a `VectorImageRasterizationComplete`
