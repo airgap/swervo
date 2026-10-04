@@ -1613,23 +1613,26 @@ impl InitialFlexLineLayout<'_> {
         };
 
         // Implement "unsafe" alignment. "safe" alignment is handled by the fallback process above.
+        // Positions here are flex-relative: zero is the main-start edge, which a reversed
+        // direction has already moved to the other side. `start` and `end` follow the
+        // writing mode instead, so they are the ones that flip.
         let main_start_position = match resolved_justify_content {
-            AlignFlags::START => Au::zero(),
-            AlignFlags::FLEX_START => {
+            AlignFlags::START => {
                 if flex_context.config.flex_direction_is_reversed {
                     free_space_in_main_axis
                 } else {
                     Au::zero()
                 }
             },
-            AlignFlags::END => free_space_in_main_axis,
-            AlignFlags::FLEX_END => {
+            AlignFlags::FLEX_START => Au::zero(),
+            AlignFlags::END => {
                 if flex_context.config.flex_direction_is_reversed {
                     Au::zero()
                 } else {
                     free_space_in_main_axis
                 }
             },
+            AlignFlags::FLEX_END => free_space_in_main_axis,
             AlignFlags::CENTER => free_space_in_main_axis / 2,
             AlignFlags::STRETCH => Au::zero(),
             AlignFlags::SPACE_BETWEEN => Au::zero(),
