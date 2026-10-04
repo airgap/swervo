@@ -4373,6 +4373,20 @@ impl ScriptThread {
         };
 
         let global_scope = window.as_global_scope();
+        // The constellation can route an evaluation to a pipeline whose document is no longer
+        // fully active (a navigation is replacing it) or is sandboxed without allow-scripts;
+        // evaluation asserts that script may run, so report it as not ready instead.
+        if !global_scope.can_run_script() {
+            let _ = self.senders.pipeline_to_constellation_sender.send((
+                webview_id,
+                pipeline_id,
+                ScriptToConstellationMessage::FinishJavaScriptEvaluation(
+                    evaluation_id,
+                    Err(JavaScriptEvaluationError::WebViewNotReady),
+                ),
+            ));
+            return;
+        }
         let mut realm = enter_auto_realm(cx, global_scope);
         let cx = &mut realm.current_realm();
 
