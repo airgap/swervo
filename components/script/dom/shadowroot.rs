@@ -208,34 +208,37 @@ impl ShadowRoot {
         owner_node: &Element,
         sheet: Arc<Stylesheet>,
     ) {
-        let stylesheets = &mut self.author_styles.borrow_mut().stylesheets;
+        {
+            let stylesheets = &mut self.author_styles.borrow_mut().stylesheets;
 
-        // FIXME(stevennovaryo): This is almost identical with the one in Document::add_stylesheet.
-        let insertion_point = stylesheets
-            .iter()
-            .find(|sheet_in_shadow| {
-                match &sheet_in_shadow.owner {
-                    StylesheetSource::Element(other_node) => {
-                        owner_node.upcast::<Node>().is_before(other_node.upcast())
-                    },
-                    // Non-constructed stylesheet should be ordered before the
-                    // constructed ones.
-                    StylesheetSource::Constructed(_) => true,
-                }
-            })
-            .cloned();
+            // FIXME(stevennovaryo): This is almost identical with the one in Document::add_stylesheet.
+            let insertion_point = stylesheets
+                .iter()
+                .find(|sheet_in_shadow| {
+                    match &sheet_in_shadow.owner {
+                        StylesheetSource::Element(other_node) => {
+                            owner_node.upcast::<Node>().is_before(other_node.upcast())
+                        },
+                        // Non-constructed stylesheet should be ordered before the
+                        // constructed ones.
+                        StylesheetSource::Constructed(_) => true,
+                    }
+                })
+                .cloned();
 
-        if self.document.has_browsing_context() {
-            self.document.load_web_fonts_from_stylesheet(cx, &sheet);
+            if self.document.has_browsing_context() {
+                self.document.load_web_fonts_from_stylesheet(cx, &sheet);
+            }
+
+            DocumentOrShadowRoot::add_stylesheet(
+                StylesheetSource::Element(Dom::from_ref(owner_node)),
+                StylesheetSetRef::Author(stylesheets),
+                sheet,
+                insertion_point,
+                self.document.style_shared_author_lock(),
+            );
         }
-
-        DocumentOrShadowRoot::add_stylesheet(
-            StylesheetSource::Element(Dom::from_ref(owner_node)),
-            StylesheetSetRef::Author(stylesheets),
-            sheet,
-            insertion_point,
-            self.document.style_shared_author_lock(),
-        );
+        self.invalidate_stylesheets();
     }
 
     /// Append a constructed stylesheet to the back of shadow root stylesheet set.
@@ -247,22 +250,25 @@ impl ShadowRoot {
     ) {
         debug_assert!(cssom_stylesheet.is_constructed());
 
-        let stylesheets = &mut self.author_styles.borrow_mut().stylesheets;
-        let sheet = cssom_stylesheet.style_stylesheet().clone();
+        {
+            let stylesheets = &mut self.author_styles.borrow_mut().stylesheets;
+            let sheet = cssom_stylesheet.style_stylesheet().clone();
 
-        let insertion_point = stylesheets.iter().last().cloned();
+            let insertion_point = stylesheets.iter().last().cloned();
 
-        if self.document.has_browsing_context() {
-            self.document.load_web_fonts_from_stylesheet(cx, &sheet);
+            if self.document.has_browsing_context() {
+                self.document.load_web_fonts_from_stylesheet(cx, &sheet);
+            }
+
+            DocumentOrShadowRoot::add_stylesheet(
+                StylesheetSource::Constructed(Dom::from_ref(cssom_stylesheet)),
+                StylesheetSetRef::Author(stylesheets),
+                sheet,
+                insertion_point,
+                self.document.style_shared_author_lock(),
+            );
         }
-
-        DocumentOrShadowRoot::add_stylesheet(
-            StylesheetSource::Constructed(Dom::from_ref(cssom_stylesheet)),
-            StylesheetSetRef::Author(stylesheets),
-            sheet,
-            insertion_point,
-            self.document.style_shared_author_lock(),
-        );
+        self.invalidate_stylesheets();
     }
 
     /// Remove a stylesheet owned by `owner` from the list of shadow root sheets.
@@ -272,9 +278,15 @@ impl ShadowRoot {
             owner,
             s,
             StylesheetSetRef::Author(&mut self.author_styles.borrow_mut().stylesheets),
-        )
+        );
+        self.invalidate_stylesheets();
     }
 
+    /// Layout flushes shadow root stylesheets only after the document is told one of them
+    /// changed, and restyles a shadow tree only when its host is marked, so every change to this
+    /// shadow root's stylesheet set must come through here. Otherwise a sheet added after the
+    /// shadow tree was first styled (a later `<style>`, or `adoptedStyleSheets` set after a
+    /// layout) never applies.
     pub(crate) fn invalidate_stylesheets(&self) {
         self.document.invalidate_shadow_roots_stylesheets();
         self.author_styles.borrow_mut().stylesheets.force_dirty();
