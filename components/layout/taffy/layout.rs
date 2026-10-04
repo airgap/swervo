@@ -313,9 +313,10 @@ impl ComputeInlineContentSizes for TaffyContainer {
     ) -> InlineContentSizesResult {
         let style = &self.style;
 
+        // These are content sizes: the container's own sizing properties are applied by the caller.
         let max_content_inputs = taffy::LayoutInput {
             run_mode: taffy::RunMode::ComputeSize,
-            sizing_mode: taffy::SizingMode::InherentSize,
+            sizing_mode: taffy::SizingMode::ContentSize,
             axis: taffy::RequestedAxis::Horizontal,
             vertical_margins_are_collapsible: taffy::Line::FALSE,
 
@@ -426,9 +427,13 @@ impl TaffyContainer {
             height: containing_block.size.block.to_definite().map(Au::to_f32_px),
         };
 
+        // The caller has already resolved the preferred size into `known_dimensions` and resolves
+        // the final block size from our content block size. Letting Taffy apply the container's
+        // own `height` would make an indefinite block size (as in the intrinsic block size pass
+        // of a column flex item) report the specified height as the content size.
         let layout_input = taffy::LayoutInput {
             run_mode: taffy::RunMode::PerformLayout,
-            sizing_mode: taffy::SizingMode::InherentSize,
+            sizing_mode: taffy::SizingMode::ContentSize,
             axis: taffy::RequestedAxis::Vertical,
             vertical_margins_are_collapsible: taffy::Line::FALSE,
 
