@@ -72,10 +72,110 @@ const PARTIAL_DECODE_INTERVAL: Duration = Duration::from_millis(100);
 // Helper functions.
 // ======================================================================
 
+/// The root `<svg>`'s `viewBox` and `preserveAspectRatio`, which fit the document's content into
+/// whatever viewport it is drawn in: <https://svgwg.org/svg2-draft/coords.html#ComputingAViewportsTransform>
+#[derive(Clone, Copy, Debug, MallocSizeOf)]
+struct RootViewBox {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    /// The fractions of the free space placed before the content horizontally and vertically, or
+    /// `None` for `preserveAspectRatio="none"`, which scales each axis on its own.
+    align: Option<(f32, f32)>,
+    slice: bool,
+}
+
+impl RootViewBox {
+    fn parse(root: usvg::roxmltree::Node) -> Option<Self> {
+        let numbers: Vec<f32> = root
+            .attribute("viewBox")?
+            .split(|c: char| c.is_ascii_whitespace() || c == ',')
+            .filter(|token| !token.is_empty())
+            .map(str::parse)
+            .collect::<Result<_, _>>()
+            .ok()?;
+        let [x, y, width, height] = numbers[..] else {
+            return None;
+        };
+        // A non-positive width or height disables the viewBox.
+        if !(width > 0.0 && height > 0.0) {
+            return None;
+        }
+        // An unparsable `preserveAspectRatio` takes its initial value, `xMidYMid meet`.
+        let (align, slice) = root
+            .attribute("preserveAspectRatio")
+            .and_then(Self::parse_preserve_aspect_ratio)
+            .unwrap_or((Some((0.5, 0.5)), false));
+        Some(Self {
+            x,
+            y,
+            width,
+            height,
+            align,
+            slice,
+        })
+    }
+
+    /// <https://svgwg.org/svg2-draft/coords.html#PreserveAspectRatioAttribute>
+    fn parse_preserve_aspect_ratio(value: &str) -> Option<(Option<(f32, f32)>, bool)> {
+        let mut tokens = value.split_ascii_whitespace().peekable();
+        tokens.next_if_eq(&"defer");
+        let fraction = |name: &str| match name {
+            "Min" => Some(0.0),
+            "Mid" => Some(0.5),
+            "Max" => Some(1.0),
+            _ => None,
+        };
+        let align = match tokens.next()? {
+            "none" => None,
+            align => {
+                let (x, y) = align.strip_prefix('x')?.split_once('Y')?;
+                Some((fraction(x)?, fraction(y)?))
+            },
+        };
+        let slice = match tokens.next() {
+            None | Some("meet") => false,
+            Some("slice") => true,
+            Some(_) => return None,
+        };
+        tokens.next().is_none().then_some((align, slice))
+    }
+
+    /// The transform from viewBox coordinates to a `width` by `height` viewport.
+    fn transform(&self, width: f32, height: f32) -> tiny_skia::Transform {
+        let scale_x = width / self.width;
+        let scale_y = height / self.height;
+        let Some((align_x, align_y)) = self.align else {
+            return tiny_skia::Transform::from_row(
+                scale_x,
+                0.0,
+                0.0,
+                scale_y,
+                -self.x * scale_x,
+                -self.y * scale_y,
+            );
+        };
+        let scale = if self.slice {
+            scale_x.max(scale_y)
+        } else {
+            scale_x.min(scale_y)
+        };
+        tiny_skia::Transform::from_row(
+            scale,
+            0.0,
+            0.0,
+            scale,
+            -self.x * scale + (width - self.width * scale) * align_x,
+            -self.y * scale + (height - self.height * scale) * align_y,
+        )
+    }
+}
+
 fn parse_svg_document_in_memory(
     bytes: &[u8],
     fontdb: Arc<fontdb::Database>,
-) -> Result<(usvg::Tree, VectorImageSource), &'static str> {
+) -> Result<(usvg::Tree, VectorImageSource, Option<RootViewBox>), &'static str> {
     let image_string_href_resolver = Box::new(move |_: &str, _: &usvg::Options| {
         // Do not try to load `href` in <image> as local file path.
         None
@@ -120,13 +220,14 @@ fn parse_svg_document_in_memory(
                 .to_owned()
         }),
     };
+    let root_view_box = RootViewBox::parse(root);
 
     let tree = usvg::Tree::from_xmltree(&document, &opt)
         .inspect_err(|error| {
             warn!("Error when parsing SVG data: {error}");
         })
         .map_err(|_| "Not a valid SVG document")?;
-    Ok((tree, source))
+    Ok((tree, source, root_view_box))
 }
 
 fn decode_bytes_sync(
@@ -147,10 +248,11 @@ fn decode_bytes_sync(
     let image = if is_svg_document {
         parse_svg_document_in_memory(bytes, fontdb)
             .ok()
-            .map(|(svg_tree, source)| {
+            .map(|(svg_tree, source, root_view_box)| {
                 DecodedImage::Vector(VectorImageData {
                     svg_tree: Arc::new(svg_tree),
                     source,
+                    root_view_box,
                     cors_status: cors,
                 })
             })
@@ -287,6 +389,7 @@ struct VectorImageData {
     #[conditional_malloc_size_of]
     svg_tree: Arc<usvg::Tree>,
     source: VectorImageSource,
+    root_view_box: Option<RootViewBox>,
     cors_status: CorsStatus,
 }
 
@@ -1221,10 +1324,29 @@ impl ImageCache for ImageCacheImpl {
             // Scale from the unrounded size: a document whose size is a fraction of a pixel
             // (vercel.com's logo has a 0.3047 viewBox) rounds up to 1px and would render tiny.
             let svg_size = vector_image.svg_tree.size();
-            let transform = tiny_skia::Transform::from_scale(
-                tinyskia_requested_size.width() as f32 / svg_size.width(),
-                tinyskia_requested_size.height() as f32 / svg_size.height(),
+            let (requested_width, requested_height) = (
+                tinyskia_requested_size.width() as f32,
+                tinyskia_requested_size.height() as f32,
             );
+            // The image's box becomes the document's viewport, so like Chrome, a viewBox is fitted
+            // into it with the root's `preserveAspectRatio` (discord.com's 165x24 logo in a 146x40
+            // box is letterboxed, not squashed). usvg already fitted the viewBox into the
+            // document's own size, so that fit is undone before applying the one for the box.
+            // Without a viewBox the document is stretched to the box, as in Chrome.
+            let transform = match vector_image.root_view_box {
+                Some(view_box) => view_box
+                    .transform(requested_width, requested_height)
+                    .pre_concat(
+                        view_box
+                            .transform(svg_size.width(), svg_size.height())
+                            .invert()
+                            .expect("a viewBox fit into a non-empty size is invertible"),
+                    ),
+                None => tiny_skia::Transform::from_scale(
+                    requested_width / svg_size.width(),
+                    requested_height / svg_size.height(),
+                ),
+            };
             let mut pixmap = tiny_skia::Pixmap::new(
                 tinyskia_requested_size.width(),
                 tinyskia_requested_size.height(),
