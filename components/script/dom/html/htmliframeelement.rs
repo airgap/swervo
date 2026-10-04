@@ -272,6 +272,9 @@ impl HTMLIFrameElement {
             inherited_secure_context: load_data.inherited_secure_context,
             history_handling,
             target_snapshot_params,
+            browsing_context_name: self
+                .GetContentWindow()
+                .map_or_else(String::new, |window_proxy| window_proxy.get_name().into()),
         };
 
         let viewport_details = window
@@ -309,6 +312,7 @@ impl HTMLIFrameElement {
                     user_content_manager_id: None,
                     theme: window.theme(),
                     target_snapshot_params,
+                    browsing_context_name: String::new(),
                 };
 
                 self.pipeline_id.set(Some(new_pipeline_id));

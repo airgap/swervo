@@ -379,6 +379,7 @@ impl WindowProxy {
                 sandboxing_flags: sandboxing_flag_set,
                 iframe_element_referrer_policy: ReferrerPolicy::EmptyString,
             },
+            browsing_context_name: String::new(),
         };
 
         with_script_thread(|script_thread| {

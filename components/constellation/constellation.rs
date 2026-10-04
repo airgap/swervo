@@ -1030,6 +1030,7 @@ where
         is_private: bool,
         throttled: bool,
         target_snapshot_params: TargetSnapshotParams,
+        browsing_context_name: String,
     ) {
         if self.shutting_down {
             return;
@@ -1072,6 +1073,7 @@ where
             user_content_manager_id,
             theme,
             target_snapshot_params,
+            browsing_context_name,
         };
         let pipeline = match Pipeline::spawn(new_pipeline_info, event_loop, self, throttled) {
             Ok(pipeline) => pipeline,
@@ -3093,6 +3095,7 @@ where
             is_private,
             throttled,
             TargetSnapshotParams::default(),
+            String::new(),
         );
         self.add_pending_change(SessionHistoryChange {
             webview_id,
@@ -3356,6 +3359,7 @@ where
             is_private,
             throttled,
             TargetSnapshotParams::default(),
+            String::new(),
         );
         self.add_pending_change(SessionHistoryChange {
             webview_id,
@@ -3496,6 +3500,7 @@ where
             is_private,
             mut history_handling,
             target_snapshot_params,
+            browsing_context_name,
             ..
         } = load_info.info;
 
@@ -3576,6 +3581,7 @@ where
             is_private,
             browsing_context_throttled,
             target_snapshot_params,
+            browsing_context_name,
         );
         self.add_pending_change(SessionHistoryChange {
             webview_id,
@@ -3993,6 +3999,7 @@ where
                     is_private,
                     is_throttled,
                     target_snapshot_params,
+                    String::new(),
                 );
                 self.add_pending_change(SessionHistoryChange {
                     webview_id,
@@ -4291,6 +4298,7 @@ where
                     // with the pipeline when it's created, so we can support reloading
                     // a discarded document properly.
                     TargetSnapshotParams::default(),
+                    String::new(),
                 );
                 self.add_pending_change(SessionHistoryChange {
                     webview_id,

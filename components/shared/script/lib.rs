@@ -81,6 +81,10 @@ pub struct NewPipelineInfo {
     pub theme: Theme,
     /// A snapshot of the navigation parameters of the target of this navigation.
     pub target_snapshot_params: TargetSnapshotParams,
+    /// The browsing context name to give the `WindowProxy` if this pipeline is the first in its
+    /// script thread for this browsing context.
+    /// <https://html.spec.whatwg.org/multipage/#browsing-context-names>
+    pub browsing_context_name: String,
 }
 
 /// When a pipeline is closed, should its browsing context be discarded too?

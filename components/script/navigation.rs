@@ -184,6 +184,8 @@ pub(crate) struct InProgressLoad {
     /// The [`TargetSnapshotParams`] to use when creating this document.
     #[no_trace]
     pub(crate) target_snapshot_params: TargetSnapshotParams,
+    /// The name to give this load's `WindowProxy` if the load creates it.
+    pub(crate) browsing_context_name: String,
 }
 
 impl InProgressLoad {
@@ -206,6 +208,7 @@ impl InProgressLoad {
             user_content_manager_id: new_pipeline_info.user_content_manager_id,
             theme: new_pipeline_info.theme,
             target_snapshot_params: new_pipeline_info.target_snapshot_params,
+            browsing_context_name: new_pipeline_info.browsing_context_name,
         }
     }
 

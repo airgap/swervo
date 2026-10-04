@@ -3649,6 +3649,12 @@ impl ScriptThread {
         window.init_document(&document);
 
         // Initialize the browsing context for the window.
+        // A nested browsing context navigated into this script thread from another one has no
+        // WindowProxy here yet, and its name lives in the other thread's WindowProxy.
+        let creates_window_proxy = self
+            .window_proxies
+            .find_window_proxy(incomplete.browsing_context_id)
+            .is_none();
         let window_proxy = self.window_proxies.local_window_proxy(
             cx,
             &self.senders,
@@ -3659,6 +3665,9 @@ impl ScriptThread {
             incomplete.parent_info,
             incomplete.opener,
         );
+        if creates_window_proxy {
+            window_proxy.set_name(DOMString::from(incomplete.browsing_context_name.as_str()));
+        }
         if window_proxy.parent().is_some() {
             // https://html.spec.whatwg.org/multipage/#navigating-across-documents:delaying-load-events-mode-2
             // The user agent must take this nested browsing context
