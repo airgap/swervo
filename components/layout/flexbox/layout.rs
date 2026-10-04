@@ -1097,21 +1097,22 @@ fn do_initial_flex_line_layout<'items>(
         return vec![construct_line((items, outer_hypothetical_main_sizes_sum))];
     }
 
+    // `line_size_so_far` sums only the items' outer hypothetical main sizes: gaps take part in
+    // the line-breaking decision, but `InitialFlexLineLayout::new` subtracts them from the
+    // container size before resolving flexible lengths, so including them here as well would
+    // count them twice and make a line that fits shrink its items.
     let mut lines = Vec::new();
     let mut line_size_so_far = Au::zero();
-    let mut line_so_far_is_empty = true;
     let mut index = 0;
 
     while let Some(item) = items.get(index) {
         let item_size = item.hypothetical_main_size + item.pbm_auto_is_zero.main;
-        let mut line_size_would_be = line_size_so_far + item_size;
-        if !line_so_far_is_empty {
-            line_size_would_be += main_gap;
-        }
-        let item_fits = line_size_would_be <= container_main_size;
-        if item_fits || line_so_far_is_empty {
+        let line_size_would_be = line_size_so_far + item_size;
+        // `index` is the number of items already on this line, which is also the number of
+        // gaps the line would have after adding this item.
+        let item_fits = line_size_would_be + main_gap * (index as i32) <= container_main_size;
+        if item_fits || index == 0 {
             line_size_so_far = line_size_would_be;
-            line_so_far_is_empty = false;
             index += 1;
             continue;
         }
