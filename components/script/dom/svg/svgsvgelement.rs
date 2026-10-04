@@ -64,6 +64,9 @@ pub(crate) struct SVGSVGElement {
     referenced_ids: DomRefCell<Vec<Atom>>,
 }
 
+/// `<use>` elements whose href is rewritten in the serialization, with the new value.
+type HrefRewrites = Vec<(DomRoot<Element>, String)>;
+
 impl SVGSVGElement {
     fn new_inherited(
         local_name: LocalName,
@@ -112,8 +115,10 @@ impl SVGSVGElement {
         self.unregister_referenced_ids();
         document.set_svg_serialization_in_progress(true);
         let mut referenced_ids = HashSet::new();
+        let mut href_rewrites = HrefRewrites::new();
 
-        let mut cloned_nodes = self.process_use_elements(cx, &mut referenced_ids);
+        let mut cloned_nodes =
+            self.process_use_elements(cx, &mut referenced_ids, &mut href_rewrites);
         // Order matters: lowering `<foreignObject>` and `<image href>` first means the
         // `<image>` elements those passes insert (which carry `mask`/`clip-path`/`filter`
         // attributes) are seen by the external-reference pass below.
@@ -122,7 +127,7 @@ impl SVGSVGElement {
         cloned_nodes.extend(self.process_external_references(cx, &mut referenced_ids));
 
         let rewrite_attributes = |element: &Element, attributes: &mut Vec<(QualName, AttrValue)>| {
-            self.rewrite_serialized_attributes(element, attributes)
+            self.rewrite_serialized_attributes(element, attributes, &href_rewrites)
         };
         let serialize_result = self
             .upcast::<Node>()
@@ -161,6 +166,7 @@ impl SVGSVGElement {
         &self,
         cx: &mut JSContext,
         referenced_ids: &mut HashSet<Atom>,
+        href_rewrites: &mut HrefRewrites,
     ) -> Vec<DomRoot<Node>> {
         let mut cloned_nodes = Vec::new();
         let root_node = self.upcast::<Node>();
@@ -168,7 +174,8 @@ impl SVGSVGElement {
         for node in root_node.traverse_preorder(ShadowIncluding::No) {
             if let Some(element) = node.downcast::<Element>() &&
                 element.local_name() == &local_name!("use") &&
-                let Some(cloned) = self.process_single_use_element(cx, element, referenced_ids)
+                let Some(cloned) =
+                    self.process_single_use_element(cx, element, referenced_ids, href_rewrites)
             {
                 cloned_nodes.push(cloned);
             }
@@ -182,6 +189,7 @@ impl SVGSVGElement {
         cx: &mut JSContext,
         use_element: &Element,
         referenced_ids: &mut HashSet<Atom>,
+        href_rewrites: &mut HrefRewrites,
     ) -> Option<DomRoot<Node>> {
         let href = use_element.get_string_attribute(&local_name!("href"));
         let effective_href = if href.str().is_empty() {
@@ -191,7 +199,17 @@ impl SVGSVGElement {
         } else {
             href.to_string()
         };
-        let id_str = effective_href.strip_prefix('#')?;
+        if effective_href.is_empty() {
+            return None;
+        }
+        let Some(id_str) = effective_href.strip_prefix('#') else {
+            return self.process_external_use_element(
+                cx,
+                use_element,
+                &effective_href,
+                href_rewrites,
+            );
+        };
         if id_str.is_empty() {
             return None;
         }
@@ -220,6 +238,42 @@ impl SVGSVGElement {
             CloneChildrenFlag::CloneChildren,
             None,
         );
+        Some(self.append_in_defs(cx, &cloned_node))
+    }
+
+    /// Inline the target of a `<use href="file.svg#id">` from the fetched external document
+    /// under an id unique to this serialization, and point the use's serialized href at it:
+    /// the rasterizer cannot fetch, and the page's own ids may clash with the external one's.
+    /// While the document loads nothing is inlined; its arrival invalidates this svg.
+    fn process_external_use_element(
+        &self,
+        cx: &mut JSContext,
+        use_element: &Element,
+        href: &str,
+        href_rewrites: &mut HrefRewrites,
+    ) -> Option<DomRoot<Node>> {
+        let document = self.owner_document();
+        let mut url = document.encoding_parse_a_url(href).ok()?;
+        let id = percent_decode_str(url.fragment().filter(|fragment| !fragment.is_empty())?)
+            .decode_utf8_lossy()
+            .into_owned();
+        url.set_fragment(None);
+        let external_document = document.external_svg_document(url, self)?;
+        let referenced_element = external_document.GetElementById(cx, DOMString::from(&*id))?;
+        let cloned_node = Node::clone(
+            cx,
+            referenced_element.upcast::<Node>(),
+            Some(&document),
+            CloneChildrenFlag::CloneChildren,
+            None,
+        );
+        let inlined_id = format!("external-use-{}-{id}", href_rewrites.len());
+        cloned_node.downcast::<Element>().unwrap().set_atomic_attribute(
+            cx,
+            &local_name!("id"),
+            DOMString::from(&*inlined_id),
+        );
+        href_rewrites.push((DomRoot::from_ref(use_element), format!("#{inlined_id}")));
         Some(self.append_in_defs(cx, &cloned_node))
     }
 
@@ -668,7 +722,19 @@ impl SVGSVGElement {
         &self,
         element: &Element,
         attributes: &mut Vec<(QualName, AttrValue)>,
+        href_rewrites: &HrefRewrites,
     ) {
+        if let Some((_, href)) = href_rewrites
+            .iter()
+            .find(|(use_element, _)| std::ptr::eq(&**use_element, element))
+        {
+            attributes.retain(|(name, _)| name.local != local_name!("href"));
+            attributes.push((
+                QualName::new(None, ns!(), local_name!("href")),
+                AttrValue::String(href.clone()),
+            ));
+        }
+
         // With a viewBox, layout sizes the root's box and fits the viewBox into it; the
         // rasterizer only needs the viewBox's aspect ratio as the image's natural size. Left in,
         // `width`/`height` made that size wrong whenever CSS overrode one of them: `width="50"`

@@ -196,6 +196,7 @@ use crate::dom::servoparser::ServoParser;
 use crate::dom::shadowroot::ShadowRoot;
 use crate::dom::storageevent::StorageEvent;
 use crate::dom::svg::svgsvgelement::SVGSVGElement;
+use crate::dom::svg::svguseelement::{ExternalSvgDocument, fetch_external_svg_document};
 use crate::dom::text::Text;
 use crate::dom::touchevent::TouchEvent as DomTouchEvent;
 use crate::dom::touchlist::TouchList;
@@ -522,6 +523,10 @@ pub(crate) struct Document {
     /// removes register IDs and mutate svg subtrees, which must not invalidate other svgs
     /// (each re-serialization would then invalidate the others, forever).
     svg_serialization_in_progress: Cell<bool>,
+    /// External documents referenced by `<use href="file.svg#id">`, keyed by URL without
+    /// fragment, fetched once per document.
+    /// <https://svgwg.org/svg2-draft/struct.html#UseElementHrefAttribute>
+    external_svg_documents: DomRefCell<HashMapTracedValues<ServoUrl, ExternalSvgDocument>>,
     #[no_trace]
     interactive_time: DomRefCell<ProgressiveWebMetrics>,
     #[no_trace]
@@ -1242,6 +1247,60 @@ impl Document {
 
     pub(crate) fn set_svg_serialization_in_progress(&self, in_progress: bool) {
         self.svg_serialization_in_progress.set(in_progress);
+    }
+
+    /// The parsed external document at `url` (no fragment) for `<use>`, or `None` while it
+    /// is loading or after it failed. The first request starts the fetch; `requester` is
+    /// invalidated when a pending fetch completes so its next serialization inlines the target.
+    pub(crate) fn external_svg_document(
+        &self,
+        url: ServoUrl,
+        requester: &SVGSVGElement,
+    ) -> Option<DomRoot<Document>> {
+        let mut documents = self.external_svg_documents.borrow_mut();
+        match documents.entry(url.clone()) {
+            Occupied(mut entry) => match entry.get_mut() {
+                ExternalSvgDocument::Loaded(document) => Some(document.as_rooted()),
+                ExternalSvgDocument::Pending(requesters) => {
+                    requesters.insert(Dom::from_ref(requester));
+                    None
+                },
+                ExternalSvgDocument::Failed => None,
+            },
+            Vacant(entry) => {
+                entry.insert(ExternalSvgDocument::Pending(HashSet::from([Dom::from_ref(
+                    requester,
+                )])));
+                drop(documents);
+                fetch_external_svg_document(self, url);
+                None
+            },
+        }
+    }
+
+    /// Record the outcome of an external `<use>` document fetch and invalidate the svgs that
+    /// were waiting for it.
+    pub(crate) fn finish_external_svg_document(
+        &self,
+        url: ServoUrl,
+        document: Option<DomRoot<Document>>,
+    ) {
+        let result = match document {
+            Some(document) => ExternalSvgDocument::Loaded(Dom::from_ref(&*document)),
+            None => ExternalSvgDocument::Failed,
+        };
+        let previous = self
+            .external_svg_documents
+            .borrow_mut()
+            .insert(url, result);
+        let Some(ExternalSvgDocument::Pending(requesters)) = previous else {
+            unreachable!("external svg document finished without a pending fetch");
+        };
+        let requesters: Vec<DomRoot<SVGSVGElement>> =
+            requesters.iter().map(|svg| svg.as_rooted()).collect();
+        for svg in requesters {
+            svg.invalidate_cached_serialized_subtree_and_rasterization_result();
+        }
     }
 
     /// Remove any existing association between the provided name and any elements in this document.
@@ -3866,6 +3925,7 @@ impl Document {
             form_id_listener_map: Default::default(),
             svg_id_reference_listeners: Default::default(),
             svg_serialization_in_progress: Cell::new(false),
+            external_svg_documents: Default::default(),
             interactive_time: DomRefCell::new(interactive_time),
             tti_window: DomRefCell::new(InteractiveWindow::default()),
             canceller,
