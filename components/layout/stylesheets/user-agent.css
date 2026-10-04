@@ -483,3 +483,8 @@ marquee {
   display: block;
 }
 
+
+/* https://svgwg.org/svg2-draft/styling.html#UAStyleSheet */
+svg|svg:not(:root), svg|image, svg|marker, svg|pattern, svg|symbol {
+  overflow: hidden;
+}

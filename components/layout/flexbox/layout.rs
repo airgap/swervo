@@ -9,6 +9,7 @@ use std::sync::Arc;
 use app_units::Au;
 use atomic_refcell::AtomicRef;
 use itertools::izip;
+use layout_api::AxesOverflow;
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelRefIterator, ParallelDrainRange, ParallelIterator,
 };
@@ -2255,7 +2256,17 @@ impl FlexItemBox {
 
         let get_automatic_minimum_size = || {
             // This is an implementation of <https://drafts.csswg.org/css-flexbox/#min-size-auto>.
-            if style.establishes_scroll_container(self.base_fragment_info().flags) {
+            //
+            // The used `overflow` of a replaced element is never scrollable, but Blink zeroes the
+            // automatic minimum of replaced items whose computed `overflow` is, which is what lets
+            // an inline `<svg>` (UA `overflow: hidden`) shrink below its specified size.
+            let is_replaced = self.independent_formatting_context.is_replaced();
+            let is_scroll_container = if is_replaced {
+                AxesOverflow::from(&**style).establishes_scroll_container()
+            } else {
+                style.establishes_scroll_container(self.base_fragment_info().flags)
+            };
+            if is_scroll_container {
                 return Au::zero();
             }
 
@@ -2265,8 +2276,6 @@ impl FlexItemBox {
             let specified_size_suggestion = content_main_sizes
                 .preferred
                 .maybe_resolve_extrinsic(stretch_size.main);
-
-            let is_replaced = self.independent_formatting_context.is_replaced();
 
             // > **content size suggestion**
             // > The content size suggestion is the min-content size in the main axis, clamped, if it has a
