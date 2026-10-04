@@ -4575,6 +4575,13 @@ impl Document {
         );
     }
 
+    /// Start loading the `FontFace`s that layout's font matching selected.
+    pub(crate) fn load_font_faces_requested_by_font_matching(&self, cx: &mut JSContext) {
+        if let Some(font_face_set) = self.fonts.get() {
+            font_face_set.load_faces_requested_by_font_matching(cx);
+        }
+    }
+
     fn switch_font_face_set_to_loading_if_needed(&self, cx: &mut JSContext) {
         if self.window.font_context().web_fonts_still_loading() != 0 &&
             let Some(font_face_set) = self.fonts.get()

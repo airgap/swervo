@@ -2694,7 +2694,9 @@ impl Window {
             rooted_nodes_for_accessibility_integrity_check,
         };
 
-        let Some(reflow_result) = self.layout.borrow_mut().reflow(reflow) else {
+        let reflow_result = self.layout.borrow_mut().reflow(reflow);
+        document.load_font_faces_requested_by_font_matching(cx);
+        let Some(reflow_result) = reflow_result else {
             return Default::default();
         };
 

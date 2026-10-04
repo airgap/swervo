@@ -22,7 +22,7 @@ pub use font::{
 };
 pub use font_context::{
     CspViolationHandler, FontContext, FontContextWebFontMethods, NetworkTimingHandler,
-    WebFontDocumentContext,
+    UnloadedFontFaceId, WebFontDocumentContext,
 };
 pub use font_store::FontTemplates;
 pub use fonts_traits::*;

@@ -87,7 +87,7 @@ impl FontTemplateDescriptor {
     /// The smaller the score, the better the fonts match. 0 indicates an exact match. This must
     /// be commutative (distance(A, B) == distance(B, A)).
     #[inline]
-    fn distance_from(&self, target: &FontDescriptor) -> f32 {
+    pub fn distance_from(&self, target: &FontDescriptor) -> f32 {
         let stretch_distance = target.stretch.match_distance(&self.stretch);
         let style_distance = target.style.match_distance(&self.style);
         let weight_distance = target.weight.match_distance(&self.weight);
@@ -113,6 +113,15 @@ impl FontTemplateDescriptor {
         stretch_distance * STRETCH_FACTOR +
             style_distance * STYLE_FACTOR +
             weight_distance * WEIGHT_FACTOR
+    }
+
+    /// Whether or not this character is in the `unicode-range` of the `@font-face` definition
+    /// this descriptor came from, if any.
+    pub fn char_in_unicode_range(&self, character: char) -> bool {
+        let character = character as u32;
+        self.unicode_range
+            .as_ref()
+            .is_none_or(|ranges| ranges.iter().any(|range| range.contains(&character)))
     }
 
     fn matches(&self, descriptor_to_match: &FontDescriptor) -> bool {
@@ -318,12 +327,7 @@ impl FontTemplateRefMethods for FontTemplateRef {
     }
 
     fn char_in_unicode_range(&self, character: char) -> bool {
-        let character = character as u32;
-        self.borrow()
-            .descriptor
-            .unicode_range
-            .as_ref()
-            .is_none_or(|ranges| ranges.iter().any(|range| range.contains(&character)))
+        self.borrow().descriptor.char_in_unicode_range(character)
     }
 
     fn font_face_rule(&self) -> Option<AtomicRef<'_, FontFaceRuleDescriptors>> {

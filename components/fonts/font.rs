@@ -38,6 +38,7 @@ use style::values::computed::{
 use unicode_script::Script;
 use webrender_api::{FontInstanceFlags, FontInstanceKey, FontVariation};
 
+use crate::font_context::UnloadedFontFace;
 use crate::platform::font::{FontTable, PlatformFont};
 use crate::platform::font_list::fallback_font_families;
 use crate::{
@@ -764,6 +765,7 @@ impl FontGroup {
 
         if let Some(font) = self.find(
             font_context,
+            options.character,
             &char_in_template,
             &font_has_glyph_and_presentation,
         ) {
@@ -814,7 +816,7 @@ impl FontGroup {
         // > Note: it does not matter whether that font actually has a glyph for the space character.
         let space_in_template = |template: FontTemplateRef| template.char_in_unicode_range(' ');
         let font_predicate = |_: &FontRef| true;
-        self.find(font_context, &space_in_template, &font_predicate)
+        self.find(font_context, ' ', &space_in_template, &font_predicate)
             .or_else(|| {
                 self.find_fallback_using_system_font_list(
                     font_context,
@@ -825,26 +827,31 @@ impl FontGroup {
             })
     }
 
-    /// Attempts to find a font which matches the given `template_predicate` and `font_predicate`.
-    /// This method mutates because we may need to load new font data in the process of finding
-    /// a suitable font.
+    /// Attempts to find a font for `codepoint` which matches the given `template_predicate` and
+    /// `font_predicate`. This method mutates because we may need to load new font data in the
+    /// process of finding a suitable font.
     fn find(
         &self,
         font_context: &FontContext,
+        codepoint: char,
         template_predicate: &impl Fn(FontTemplateRef) -> bool,
         font_predicate: &impl Fn(&FontRef) -> bool,
     ) -> Option<FontRef> {
-        self.families
-            .iter()
-            .flat_map(|family| family.templates(font_context, &self.descriptor))
-            .find_map(|template| {
-                template.font_if_matches(
-                    font_context,
-                    &self.descriptor,
-                    template_predicate,
-                    font_predicate,
-                )
-            })
+        self.families.iter().find_map(|family| {
+            // Every family consulted before a usable font is found would have its matching
+            // faces loaded in a browser that loads fonts on demand, so request the unloaded ones.
+            family.request_unloaded_script_faces(font_context, &self.descriptor, codepoint);
+            family
+                .templates(font_context, &self.descriptor)
+                .find_map(|template| {
+                    template.font_if_matches(
+                        font_context,
+                        &self.descriptor,
+                        template_predicate,
+                        font_predicate,
+                    )
+                })
+        })
     }
 
     /// Attempts to find a suitable fallback font which matches the given `template_predicate` and
@@ -943,6 +950,7 @@ impl FontGroupFamilyTemplate {
 struct FontGroupFamily {
     family_descriptor: FontFamilyDescriptor,
     members: OnceLock<Vec<FontGroupFamilyTemplate>>,
+    unloaded_script_faces: OnceLock<Vec<UnloadedFontFace>>,
 }
 
 impl From<FontFamilyDescriptor> for FontGroupFamily {
@@ -950,6 +958,7 @@ impl From<FontFamilyDescriptor> for FontGroupFamily {
         Self {
             family_descriptor,
             members: Default::default(),
+            unloaded_script_faces: Default::default(),
         }
     }
 }
@@ -973,6 +982,30 @@ impl FontGroupFamily {
                     .collect()
             })
             .iter()
+    }
+
+    fn request_unloaded_script_faces(
+        &self,
+        font_context: &FontContext,
+        font_descriptor: &FontDescriptor,
+        codepoint: char,
+    ) {
+        let faces = self.unloaded_script_faces.get_or_init(|| {
+            let loaded: Vec<FontTemplateRef> = self
+                .templates(font_context, font_descriptor)
+                .map(|member| member.template.clone())
+                .collect();
+            font_context.matching_unloaded_script_faces(
+                font_descriptor,
+                &self.family_descriptor,
+                &loaded,
+            )
+        });
+        for face in faces {
+            if face.descriptor.char_in_unicode_range(codepoint) {
+                font_context.request_unloaded_script_face_load(face.id);
+            }
+        }
     }
 }
 
