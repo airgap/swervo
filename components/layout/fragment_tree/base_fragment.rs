@@ -2,10 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::sync::Weak;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use app_units::Au;
-use atomic_refcell::AtomicRef;
+use atomic_refcell::{AtomicRef, AtomicRefCell};
 use bitflags::bitflags;
 use layout_api::{LayoutElement, LayoutNode, PseudoElementChain, combine_id_with_fragment_type};
 use malloc_size_of::malloc_size_of_is_0;
@@ -22,6 +23,7 @@ use web_atoms::local_name;
 use crate::SharedStyle;
 use crate::dom_traversal::NodeAndStyleInfo;
 use crate::geom::{PhysicalPoint, PhysicalRect, PhysicalSize, SyncPhysicalRectAu};
+use crate::layout_box_base::BoxFragments;
 
 #[derive(Clone, Debug, Default, FromPrimitive, MallocSizeOf, PartialEq)]
 #[repr(u8)]
@@ -63,6 +65,10 @@ pub(crate) struct BaseFragment {
 
     /// A [`FragmentStatus`] used to track fragment reuse when collecting reflow statistics.
     pub status: AtomicU8,
+
+    /// The fragments of the box that this fragment was made the fragment of, if any.
+    #[ignore_malloc_size_of = "Owned by the box"]
+    pub owner: AtomicRefCell<Option<Weak<BoxFragments>>>,
 }
 
 impl std::fmt::Debug for BaseFragment {
@@ -91,6 +97,7 @@ impl BaseFragment {
             style,
             rect: SyncPhysicalRectAu::new(rect),
             status: AtomicU8::new(FragmentStatus::New as u8),
+            owner: Default::default(),
         }
     }
 
