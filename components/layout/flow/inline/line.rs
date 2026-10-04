@@ -276,7 +276,20 @@ impl LineItemLayout<'_, '_> {
         iterator(line_items)
     }
 
-    pub(super) fn layout(&mut self, line_items: Vec<LineItem>) -> Vec<Fragment> {
+    pub(super) fn layout(&mut self, mut line_items: Vec<LineItem>) -> Vec<Fragment> {
+        // White space trimmed at the end of the line leaves text runs without glyphs, which
+        // produce no fragments.
+        if let Some(LineItem::TextRun(_, text_run)) =
+            line_items.iter_mut().rev().find(|line_item| match line_item {
+                LineItem::TextRun(_, text_run) => {
+                    !text_run.text.is_empty() || text_run.is_empty_for_text_cursor
+                },
+                _ => line_item.is_in_flow_content(),
+            }) &&
+            let Some(offsets) = text_run.offsets.as_mut()
+        {
+            offsets.ends_line = true;
+        }
         let line_item_iterator = self.reorder_line_items_for_bidi(line_items);
         for item in line_item_iterator.into_iter().by_ref() {
             // When preparing to lay out a new line item, start and end inline boxes, so that the current
@@ -888,6 +901,9 @@ pub(crate) struct TextRunOffsets {
     /// of the line box, which selected text is highlighted over. Set when the line is laid out.
     pub line_block_start: Au,
     pub line_block_size: Au,
+    /// Whether this text is the last content of its line, so that the line break after it,
+    /// which has no glyphs, is painted at its end when selected.
+    pub ends_line: bool,
 }
 
 pub(super) struct TextRunLineItem {

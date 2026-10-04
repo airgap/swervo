@@ -1993,6 +1993,7 @@ impl InlineFormattingContextLayout<'_> {
             character_range: line_start_offset..line_start_offset + 1,
             line_block_start: Au::zero(),
             line_block_size: Au::zero(),
+            ends_line: false,
         };
 
         // If the last content line item is a text item, then the placeholder for the text caret is not necessary.

@@ -168,8 +168,11 @@ pub struct DocumentSelection {
     /// The insertion point of a selection collapsed in the focused editing host: a text node, a
     /// `<br>` or an empty editing host and a UTF-16 offset in it (0 or 1 for a `<br>`).
     pub caret: Option<(OpaqueNode, u32)>,
-    /// The selected UTF-16 range of every text node in a non-collapsed selection.
+    /// The selected UTF-16 range of every text node in a non-collapsed selection, and the range
+    /// 0..1 of every `<br>` in it.
     pub selected_text: Vec<(OpaqueNode, Range<u32>)>,
+    /// The node that a non-collapsed selection ends in.
+    pub end_node: Option<OpaqueNode>,
 }
 
 /// A position where a caret can be placed in text, as laid out.

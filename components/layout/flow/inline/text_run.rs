@@ -262,6 +262,7 @@ impl TextRunSegment {
                     character_range: character_range_start..new_character_range_end,
                     line_block_start: Au::zero(),
                     line_block_size: Au::zero(),
+                    ends_line: false,
                 });
 
             // Break before each unbreakable run in this TextRun, except the first unless the
@@ -285,6 +286,7 @@ impl TextRunSegment {
                         character_range: cluster_character_start..cluster_character_end,
                         line_block_start: Au::zero(),
                         line_block_size: Au::zero(),
+                        ends_line: false,
                     });
                     ifc.process_overflow_wrap_opportunity(cluster.total_advance());
                     ifc.push_glyph_store_to_unbreakable_segment(

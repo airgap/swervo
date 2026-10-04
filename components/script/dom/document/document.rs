@@ -5415,6 +5415,7 @@ impl Document {
             return Some(DocumentSelection {
                 caret: Some((node.to_opaque(), offset)),
                 selected_text: Vec::new(),
+                end_node: None,
             });
         }
 
@@ -5441,9 +5442,17 @@ impl Document {
             if is_end && *current != *end {
                 break;
             }
-            if current.is::<Text>() {
+            // A `<br>` is selected to paint its line break as selected.
+            let length = if current.is::<Text>() {
+                Some(current.len())
+            } else if current.is::<HTMLBRElement>() {
+                Some(1)
+            } else {
+                None
+            };
+            if let Some(length) = length {
                 let selected_start = if current == start { start_offset } else { 0 };
-                let selected_end = if is_end { end_offset } else { current.len() };
+                let selected_end = if is_end { end_offset } else { length };
                 if selected_start < selected_end {
                     selected_text.push((current.to_opaque(), selected_start..selected_end));
                 }
@@ -5458,6 +5467,7 @@ impl Document {
         Some(DocumentSelection {
             caret: None,
             selected_text,
+            end_node: Some(end.to_opaque()),
         })
     }
 
