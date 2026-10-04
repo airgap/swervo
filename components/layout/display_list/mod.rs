@@ -1138,9 +1138,17 @@ impl Fragment {
         // paint`), we just need to make sure these boundaries are big enough to
         // contain the inked portion of the glyphs. We assume that the descent and
         // ascent are big enough and then just expand the advance-based boundaries by
-        // twice the size of the biggest advance in the advance dimention.
+        // twice the size of the biggest advance in the advance dimention. A text stroke reaches
+        // half its width beyond the glyph outlines.
+        let stroke_overflow = match fragment.stroke_font_key {
+            Some(_) => parent_style
+                .get_inherited_text()
+                .clone__webkit_text_stroke_width()
+                .scale_by(0.5),
+            None => Au::zero(),
+        };
         let glyph_bounds = rect
-            .inflate(largest_advance.scale_by(2.0), Au::zero())
+            .inflate(largest_advance.scale_by(2.0) + stroke_overflow, stroke_overflow)
             .to_webrender();
         let common = builder.common_properties(state, glyph_bounds, &parent_style);
 
@@ -1228,6 +1236,23 @@ impl Fragment {
             rgba(fill_color),
             None,
         );
+
+        // <https://compat.spec.whatwg.org/#the-webkit-text-stroke>: the stroke paints over the
+        // fill, as in Chrome.
+        if let Some(stroke_font_key) = fragment.stroke_font_key {
+            let stroke_color = parent_style
+                .get_inherited_text()
+                .clone__webkit_text_stroke_color()
+                .resolve_to_absolute(&color);
+            builder.wr().push_text(
+                &common,
+                glyph_bounds,
+                &glyphs,
+                stroke_font_key,
+                rgba(stroke_color),
+                None,
+            );
+        }
 
         builder.check_if_paintable(glyph_bounds, common.clip_rect, parent_style.clone_opacity());
 

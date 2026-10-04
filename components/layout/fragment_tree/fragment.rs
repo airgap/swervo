@@ -94,6 +94,9 @@ pub(crate) struct TextFragment {
     #[conditional_malloc_size_of]
     pub font_metrics: Arc<FontMetrics>,
     pub font_key: FontInstanceKey,
+    /// The instance of the font that paints `-webkit-text-stroke` over the glyphs, if the stroke
+    /// has a width.
+    pub stroke_font_key: Option<FontInstanceKey>,
     /// The font used to shape `glyphs`. Retained so the display-list builder can rasterize the
     /// glyphs to an alpha coverage mask for `background-clip: text`.
     pub font: FontRef,

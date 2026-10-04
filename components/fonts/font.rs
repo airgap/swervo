@@ -280,7 +280,7 @@ pub struct Font {
 
     shaper: OnceLock<Shaper>,
     cached_shape_data: RwLock<CachedShapeData>,
-    font_instance_key: RwLock<FxHashMap<PainterId, FontInstanceKey>>,
+    font_instance_key: RwLock<FxHashMap<(PainterId, Au), FontInstanceKey>>,
 
     /// If this is a synthesized small caps font, then this font reference is for
     /// the version of the font used to replace lowercase ASCII letters. It's up
@@ -388,11 +388,25 @@ impl Font {
     }
 
     pub fn key(&self, painter_id: PainterId, font_context: &FontContext) -> FontInstanceKey {
+        self.stroked_key(painter_id, font_context, Au::zero())
+    }
+
+    /// The key of an instance of this font whose glyphs are the outlines of a stroke of the given
+    /// width along the glyph outlines, for `-webkit-text-stroke`. A zero width gives the plain
+    /// instance.
+    pub fn stroked_key(
+        &self,
+        painter_id: PainterId,
+        font_context: &FontContext,
+        stroke_width: Au,
+    ) -> FontInstanceKey {
         *self
             .font_instance_key
             .write()
-            .entry(painter_id)
-            .or_insert_with(|| font_context.create_font_instance_key(self, painter_id))
+            .entry((painter_id, stroke_width))
+            .or_insert_with(|| {
+                font_context.create_font_instance_key(self, painter_id, stroke_width)
+            })
     }
 
     /// Return the data for this `Font`. Note that this is currently highly inefficient for system

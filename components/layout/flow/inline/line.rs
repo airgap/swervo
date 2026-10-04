@@ -14,6 +14,7 @@ use malloc_size_of_derive::MallocSizeOf;
 use style::Zero;
 use style::computed_values::position::T as Position;
 use style::computed_values::white_space_collapse::T as WhiteSpaceCollapse;
+use style::properties::ComputedValues;
 use style::values::computed::BaselineShift;
 use style::values::generics::box_::BaselineShiftKeyword;
 use style::values::specified::align::AlignFlags;
@@ -602,6 +603,14 @@ impl LineItemLayout<'_, '_> {
             self.layout.layout_context.painter_id,
             &self.layout.layout_context.font_context,
         );
+        let stroke_font_key =
+            text_stroke_width(&text_item.inline_styles.style.borrow()).map(|width| {
+                text_item.info.font.stroked_key(
+                    self.layout.layout_context.painter_id,
+                    &self.layout.layout_context.font_context,
+                    width,
+                )
+            });
 
         self.current_state.inline_advance += inline_advance;
         self.current_state.fragments.push((
@@ -614,6 +623,7 @@ impl LineItemLayout<'_, '_> {
                 selected_style: text_item.inline_styles.selected.clone(),
                 font_metrics: font_metrics.clone(),
                 font_key,
+                stroke_font_key,
                 font: text_item.info.font.clone(),
                 glyphs: text_item.text,
                 justification_adjustment: self.justification_adjustment,
@@ -1032,6 +1042,21 @@ pub(super) struct FloatLineItem {
 
 /// Sort a mutable slice by the given indices array in place, reording the slice so that final
 /// value of `slice[x]` is `slice[indices[x]]`.
+/// The width of the `-webkit-text-stroke` that text with this style paints, if any.
+/// <https://compat.spec.whatwg.org/#the-webkit-text-stroke-width>
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
+fn text_stroke_width(style: &ComputedValues) -> Option<Au> {
+    let width = style.get_inherited_text().clone__webkit_text_stroke_width();
+    (width > Au::zero()).then_some(width)
+}
+
+/// Only WebRender's FreeType glyph rasterizer strokes glyph outlines, so text elsewhere paints no
+/// stroke rather than painting its glyphs filled in the stroke color.
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "freebsd")))]
+fn text_stroke_width(_style: &ComputedValues) -> Option<Au> {
+    None
+}
+
 fn sort_by_indices_in_place<T>(data: &mut [T], mut indices: Vec<usize>) {
     for idx in 0..data.len() {
         if indices[idx] == idx {
