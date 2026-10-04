@@ -11,7 +11,7 @@ use script_bindings::inheritance::Castable;
 use script_bindings::root::{Dom, DomRoot};
 use stylo_dom::ElementState;
 
-use crate::dom::bindings::root::MutNullableDom;
+use crate::dom::bindings::root::{LayoutDom, MutNullableDom};
 use crate::dom::html::htmldialogelement::ClosedByState;
 use crate::dom::node::Node;
 use crate::dom::types::{Element, HTMLDialogElement, HTMLElement, MouseEvent};
@@ -70,6 +70,14 @@ impl DocumentTopLayer {
             .borrow()
             .iter()
             .any(|item| &**item == element)
+    }
+
+    /// The top layer in the order its elements were added, which is the order layout paints and
+    /// hit tests them in.
+    #[expect(unsafe_code)]
+    pub(crate) fn elements_for_layout(&self) -> &[LayoutDom<'_, Element>] {
+        // # Safety: `Dom<Element>` has the same memory layout as `LayoutDom<'_, Element>`.
+        unsafe { LayoutDom::to_layout_slice(self.top_layer.borrow_for_layout()) }
     }
 
     /// <https://drafts.csswg.org/css-position-4/#add-an-element-to-the-top-layer>

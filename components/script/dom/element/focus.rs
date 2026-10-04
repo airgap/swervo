@@ -17,20 +17,33 @@ use crate::dom::types::{Element, HTMLElement};
 
 impl Element {
     /// <https://html.spec.whatwg.org/multipage/#inert>
-    ///
-    /// Only inertness from <https://html.spec.whatwg.org/multipage/#blocked-by-a-modal-dialog> is
-    /// supported: the `inert` attribute is not implemented.
     pub(crate) fn is_inert(&self) -> bool {
+        let blocking_modal_dialog = self.owner_document().top_layer().blocking_modal_dialog();
+        for ancestor in self.upcast::<Node>().inclusive_ancestors_in_flat_tree() {
+            // From <https://html.spec.whatwg.org/multipage/#the-inert-attribute>:
+            // > The inert attribute is a boolean attribute that indicates, by its presence, that
+            // > the element and all its flat tree descendants which don't otherwise escape
+            // > inertness (such as modal dialogs) are to be made inert by the user agent.
+            if ancestor.is::<HTMLElement>() &&
+                ancestor
+                    .downcast::<Element>()
+                    .is_some_and(|element| element.has_attribute(&local_name!("inert")))
+            {
+                return true;
+            }
+            // > subject can additionally become inert via the inert attribute, but only if
+            // > specified on subject itself (i.e., subject escapes inertness of ancestors).
+            if blocking_modal_dialog
+                .as_deref()
+                .is_some_and(|dialog| &*ancestor == dialog.upcast::<Node>())
+            {
+                return false;
+            }
+        }
         // > While document is blocked by a modal dialog subject, every node that is connected to
         // > document, with the exception of the subject element and its flat tree descendants,
         // > must become inert.
-        let Some(dialog) = self.owner_document().top_layer().blocking_modal_dialog() else {
-            return false;
-        };
-        !self
-            .upcast::<Node>()
-            .inclusive_ancestors_in_flat_tree()
-            .any(|ancestor| &*ancestor == dialog.upcast::<Node>())
+        blocking_modal_dialog.is_some()
     }
 
     /// <https://html.spec.whatwg.org/multipage/#focusable-area>

@@ -111,6 +111,13 @@ dialog:modal, :popover-open {
   -servo-top-layer: top;
 }
 
+/* https://html.spec.whatwg.org/multipage/#inert-subtrees: hit testing skips inert nodes, so
+   clicks reach whatever is beneath them, as in Chrome. A modal dialog escapes the inertness of
+   its ancestors. */
+[inert], [inert] :not(dialog:modal, [inert] dialog:modal *) {
+  pointer-events: none !important;
+}
+
 cite, dfn, em, i, var { font-style: italic; }
 b, strong { font-weight: bolder; }
 code, kbd, samp, tt { font-family: monospace; }

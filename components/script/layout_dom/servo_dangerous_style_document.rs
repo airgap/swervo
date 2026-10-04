@@ -6,12 +6,13 @@
 
 use layout_api::DangerousStyleElement;
 use selectors::matching::QuirksMode;
-use style::dom::{TDocument, TNode};
+use style::dom::{OpaqueNode, TDocument, TElement, TNode};
 use style::shared_lock::{
     SharedRwLock as StyleSharedRwLock, SharedRwLockReadGuard as StyleSharedRwLockReadGuard,
 };
 use style::stylist::Stylist;
 use style::values::AtomIdent;
+use stylo_dom::ElementState;
 
 use crate::dom::bindings::root::LayoutDom;
 use crate::dom::document::Document;
@@ -82,6 +83,37 @@ impl<'dom> ServoDangerousStyleDocument<'dom> {
             .flat_map(|n| n.as_element())
             .next()
             .map(|element| element.layout_element())
+    }
+
+    /// The elements in the document's top layer, in the order they were added to it.
+    /// <https://drafts.csswg.org/css-position-4/#document-top-layer>
+    pub fn top_layer_elements(&self) -> impl Iterator<Item = ServoLayoutElement<'dom>> {
+        self.document
+            .top_layer_elements()
+            .iter()
+            .copied()
+            .map(ServoLayoutElement::from)
+    }
+
+    /// The topmost modal dialog in the top layer, which blocks the document, followed by its flat
+    /// tree ancestors, or nothing when no modal dialog is open.
+    /// <https://html.spec.whatwg.org/multipage/#blocked-by-a-modal-dialog>
+    pub fn blocking_modal_dialog_and_ancestors(&self) -> Vec<OpaqueNode> {
+        let Some(dialog) = self
+            .document
+            .top_layer_elements()
+            .iter()
+            .rev()
+            .find(|element| element.get_state_for_layout().contains(ElementState::MODAL))
+        else {
+            return Vec::new();
+        };
+        std::iter::successors(
+            Some(ServoDangerousStyleElement::from(*dialog)),
+            TElement::traversal_parent,
+        )
+        .map(|element| element.as_node().opaque())
+        .collect()
     }
 
     /// Get the shared style lock for author stylesheets for this [`ServoDangerousStyleDocument`].

@@ -3913,6 +3913,10 @@ impl<'dom> LayoutDom<'dom, Document> {
     pub(crate) fn elements_with_id(self, id: &Atom) -> &[LayoutDom<'dom, Element>] {
         self.unsafe_get().id_map.get_all_for_layout(id)
     }
+
+    pub(crate) fn top_layer_elements(self) -> &'dom [LayoutDom<'dom, Element>] {
+        self.unsafe_get().top_layer.elements_for_layout()
+    }
 }
 
 // https://html.spec.whatwg.org/multipage/#is-a-registrable-domain-suffix-of-or-is-equal-to
