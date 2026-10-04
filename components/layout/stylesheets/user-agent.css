@@ -57,10 +57,25 @@ listing, plaintext, pre, xmp {
 }
 
 dialog:not([open]) { display: none; }
-/* https://html.spec.whatwg.org/multipage/#flow-content-3: closed popovers are hidden. The Popover
- * API isn't implemented yet, so this keeps them out of the page flow (Notion scrolled its page
- * to a closed language menu laid out inline). */
+/* https://html.spec.whatwg.org/multipage/#flow-content-3 */
 [popover]:not(:popover-open):not(dialog[open]) { display: none; }
+dialog:popover-open { display: block; }
+[popover] {
+  position: fixed;
+  inset: 0;
+  width: fit-content;
+  height: fit-content;
+  margin: auto;
+  border: solid;
+  padding: 0.25em;
+  overflow: auto;
+  background-color: white; /* FIXME: should be Canvas */
+  color: black; /* FIXME: should be CanvasText */
+}
+:popover-open::backdrop {
+  pointer-events: none !important;
+  background-color: transparent;
+}
 dialog {
   position: absolute;
   inset-inline-start: 0; inset-inline-end: 0;
@@ -79,9 +94,21 @@ dialog:modal {
   max-width: calc(100% - 6px - 2em);
   max-height: calc(100% - 6px - 2em);
 }
-/* FIXME: support ::backdrop */
 dialog::backdrop {
   background: rgba(0,0,0,0.1);
+}
+
+/* The internal-only -servo-top-layer property puts elements in
+   https://drafts.csswg.org/css-position-4/#top-layer, together with their ::backdrop. */
+dialog:modal, :popover-open {
+  -servo-top-layer: top;
+}
+/* https://drafts.csswg.org/css-position-4/#backdrop */
+::backdrop {
+  display: block;
+  position: fixed;
+  inset: 0;
+  -servo-top-layer: top;
 }
 
 cite, dfn, em, i, var { font-style: italic; }
@@ -399,6 +426,10 @@ textarea { white-space: pre-wrap; }
   /* The internal-only -servo-top-layer property is used
      to implement https://fullscreen.spec.whatwg.org/#top-layer */
   -servo-top-layer: top;
+}
+
+*|*:not(:root):fullscreen::backdrop {
+  background: black;
 }
 
 iframe:fullscreen {

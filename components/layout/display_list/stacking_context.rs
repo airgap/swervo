@@ -126,6 +126,11 @@ pub(crate) struct StackingContextTree {
     /// for things like `overflow`. More clips may be created later during WebRender
     /// display list construction, but they are never added here.
     pub clip_store: StackingContextTreeClipStore,
+
+    /// Hoisted fragments of boxes in the top layer, found at their placeholders and built later
+    /// as children of the root stacking context, above everything else.
+    /// <https://drafts.csswg.org/css-position-4/#painting-order>
+    top_layer_fragments: Vec<Fragment>,
 }
 
 impl StackingContextTree {
@@ -190,6 +195,7 @@ impl StackingContextTree {
             root_stacking_context: StackingContext::root(root_scroll_node_id),
             paint_info,
             clip_store: Default::default(),
+            top_layer_fragments: Vec::new(),
         };
 
         let text_decorations = Default::default();
@@ -206,6 +212,31 @@ impl StackingContextTree {
             );
         }
 
+        // Top layer boxes are stacking contexts on the root stacking context, painted after every
+        // other descendant in top layer order. Building one may find further top layer boxes
+        // nested inside of it, which go after it.
+        let mut index = 0;
+        while let Some(fragment) = stacking_context_tree
+            .top_layer_fragments
+            .get(index)
+            .cloned()
+        {
+            let first_child_index = root_stacking_context.children.len();
+            fragment.build_stacking_context_tree(
+                &mut stacking_context_tree,
+                &containing_block_info,
+                &mut root_stacking_context,
+                StackingContextBuildMode::IncludeHoisted,
+                &text_decorations,
+            );
+            for child in &mut root_stacking_context.children[first_child_index..] {
+                child.z_index = i32::MAX;
+            }
+            index += 1;
+        }
+
+        // The sort is stable, so top layer stacking contexts keep their order after every
+        // other stacking context, including those with the maximum z-index.
         root_stacking_context.sort();
         stacking_context_tree.root_stacking_context = root_stacking_context;
 
@@ -534,6 +565,16 @@ impl Fragment {
                         return;
                     },
                 };
+
+                if fragment_ref
+                    .retrieve_box_fragment()
+                    .is_some_and(|box_fragment| box_fragment.style().in_top_layer())
+                {
+                    stacking_context_tree
+                        .top_layer_fragments
+                        .push(fragment_ref.clone());
+                    return;
+                }
 
                 fragment_ref.build_stacking_context_tree(
                     stacking_context_tree,

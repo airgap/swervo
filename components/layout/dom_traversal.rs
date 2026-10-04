@@ -22,7 +22,9 @@ use crate::flow::inline::SharedInlineStyles;
 use crate::lists::{counter_values, generate_counter_representation, list_item_ordinal};
 use crate::quotes::quotes_for_lang;
 use crate::replaced::ReplacedContents;
-use crate::style_ext::{Display, DisplayGeneratingBox, DisplayInside, DisplayOutside};
+use crate::style_ext::{
+    ComputedValuesExt, Display, DisplayGeneratingBox, DisplayInside, DisplayOutside,
+};
 
 /// A data structure used to pass and store related layout information together to
 /// avoid having to repeat the same arguments in argument lists.
@@ -200,12 +202,40 @@ fn traverse_element<'dom>(
             }
         },
         Display::GeneratingBox(display) => {
+            if info.style.in_top_layer() {
+                traverse_backdrop_pseudo_element(&info, context, handler);
+            }
             let contents = Contents::for_element(element, context);
             let display = display.used_value_for_contents(&contents);
             let box_slot = element.box_slot();
             handler.handle_element(&info, display, contents, box_slot);
         },
     }
+}
+
+/// Every element in the top layer has a `::backdrop` box, which is in the top layer directly
+/// below it. It is built just before the element's box, so it is hoisted and painted first.
+/// <https://drafts.csswg.org/css-position-4/#backdrop>
+fn traverse_backdrop_pseudo_element<'dom>(
+    node_info: &NodeAndStyleInfo<'dom>,
+    context: &LayoutContext,
+    handler: &mut impl TraversalHandler<'dom>,
+) {
+    let Some(backdrop_info) = node_info.with_pseudo_element(context, PseudoElement::Backdrop)
+    else {
+        return;
+    };
+    let Display::GeneratingBox(display) = Display::from(backdrop_info.style.get_box().display)
+    else {
+        return;
+    };
+    let box_slot = backdrop_info.node.box_slot();
+    handler.handle_element(
+        &backdrop_info,
+        display,
+        Contents::for_pseudo_element(Vec::new()),
+        box_slot,
+    );
 }
 
 fn traverse_eager_pseudo_element<'dom>(

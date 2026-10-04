@@ -658,6 +658,14 @@ impl<'dom> NodeExt<'dom> for ServoLayoutNode<'dom> {
             let Some(mut inner_layout_data) = self.inner_layout_data_mut() else {
                 return false;
             };
+            // The ::backdrop box of a top layer element is a sibling built by the parent, which
+            // has to rebuild to drop it.
+            if inner_layout_data
+                .pseudo_layout_data(PseudoElement::Backdrop)
+                .is_some()
+            {
+                return false;
+            }
             inner_layout_data.pseudo_boxes.clear();
             inner_layout_data.self_box.clone()
         };
@@ -668,6 +676,11 @@ impl<'dom> NodeExt<'dom> for ServoLayoutNode<'dom> {
         };
 
         let info = NodeAndStyleInfo::new(*self, self.style(&layout_context.style_context));
+        // Likewise the parent has to build the ::backdrop box of an element entering the top
+        // layer.
+        if info.style.in_top_layer() {
+            return false;
+        }
         let box_style = info.style.get_box();
         let Display::GeneratingBox(display) = box_style.display.into() else {
             return false;

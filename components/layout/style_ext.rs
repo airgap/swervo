@@ -7,6 +7,7 @@ use layout_api::AxesOverflow;
 use malloc_size_of_derive::MallocSizeOf;
 use style::Zero;
 use style::color::AbsoluteColor;
+use style::computed_values::_servo_top_layer::T as ServoTopLayer;
 use style::computed_values::direction::T as Direction;
 use style::computed_values::isolation::T as ComputedIsolation;
 use style::computed_values::mix_blend_mode::T as ComputedMixBlendMode;
@@ -336,6 +337,7 @@ pub(crate) trait ComputedValuesExt {
     fn used_transform_style(&self, fragment_flags: FragmentFlags) -> ComputedTransformStyle;
     fn establishes_block_formatting_context(&self, fragment_flags: FragmentFlags) -> bool;
     fn establishes_stacking_context(&self, fragment_flags: FragmentFlags) -> bool;
+    fn in_top_layer(&self) -> bool;
     fn establishes_scroll_container(&self, fragment_flags: FragmentFlags) -> bool;
     fn establishes_containing_block_for_absolute_descendants(
         &self,
@@ -745,8 +747,20 @@ impl ComputedValuesExt for ComputedValues {
             .establishes_scroll_container()
     }
 
+    /// Whether the element is in the top layer, which the user agent stylesheet marks with the
+    /// internal `-servo-top-layer` property.
+    fn in_top_layer(&self) -> bool {
+        self.get_box().clone__servo_top_layer() == ServoTopLayer::Top
+    }
+
     /// Returns true if this fragment establishes a new stacking context and false otherwise.
     fn establishes_stacking_context(&self, fragment_flags: FragmentFlags) -> bool {
+        // From <https://drafts.csswg.org/css-position-4/#top-styling>:
+        // > An element in the top layer ... always forms a stacking context.
+        if self.in_top_layer() {
+            return true;
+        }
+
         // From <https://www.w3.org/TR/css-will-change/#valdef-will-change-custom-ident>:
         // > If any non-initial value of a property would create a stacking context on the element,
         // > specifying that property in will-change must create a stacking context on the element.
