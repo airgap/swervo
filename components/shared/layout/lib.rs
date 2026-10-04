@@ -190,10 +190,14 @@ pub const SVG_PAINT_PROPERTIES: [LonghandId; 16] = [
 
 /// A fingerprint of the paint properties an `<svg>` element's serialization was built from.
 /// The serialization is cached across restyles, so layout compares this to detect paint changes
-/// (a hover colour, a theme switch) that must re-serialize the subtree.
+/// (a hover colour, a theme switch) that must re-serialize the subtree. `width` and `height`
+/// are included because a root without a `viewBox` serializes its CSS size as the viewport.
 pub fn svg_paint_signature(style: &ComputedValues) -> String {
     let mut signature = String::new();
-    for property in SVG_PAINT_PROPERTIES {
+    for property in SVG_PAINT_PROPERTIES
+        .into_iter()
+        .chain([LonghandId::Width, LonghandId::Height])
+    {
         style
             .computed_or_resolved_value(property, None, &mut signature)
             .expect("Writing CSS to a String cannot fail");

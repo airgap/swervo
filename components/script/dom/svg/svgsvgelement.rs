@@ -21,7 +21,7 @@ use style::color::AbsoluteColor;
 use style::parser::{Parse, ParserContext};
 use style::properties::{ComputedValues, LonghandId, PropertyDeclarationId};
 use style::stylesheets::Origin;
-use style::values::computed::{Color as ComputedColor, SVGPaint};
+use style::values::computed::{Color as ComputedColor, SVGPaint, Size as StyleSize};
 use style::values::generics::svg::{SVGPaintFallback, SVGPaintKind};
 use style::values::specified::{Color as SpecifiedColor, LengthPercentage};
 use style_traits::ParsingMode;
@@ -749,6 +749,30 @@ impl SVGSVGElement {
                 name.ns != ns!() ||
                     (name.local != local_name!("width") && name.local != local_name!("height"))
             });
+        } else if std::ptr::eq(element, self.upcast::<Element>()) &&
+            let Some(style) = element.style_from_last_restyle()
+        {
+            // Without a viewBox the rasterizer resolves percentages in the content (a `<use>`'s
+            // default `100%` size, GitLab's CSS-sized sprite icons) against its 100x100
+            // fallback viewport; browsers resolve them against the CSS box. An absolute CSS
+            // size therefore becomes the serialized viewport size.
+            let position = style.get_position();
+            for (name, size) in [
+                (local_name!("width"), &position.width),
+                (local_name!("height"), &position.height),
+            ] {
+                let StyleSize::LengthPercentage(length_percentage) = size else {
+                    continue;
+                };
+                let Some(length) = length_percentage.0.to_length() else {
+                    continue;
+                };
+                attributes.retain(|(attribute, _)| attribute.ns != ns!() || attribute.local != name);
+                attributes.push((
+                    QualName::new(None, ns!(), name),
+                    AttrValue::String(length.px().to_string()),
+                ));
+            }
         }
 
         let Some(declarations) = self.paint_declarations(element) else {
