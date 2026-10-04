@@ -1502,6 +1502,10 @@ impl<'dom> LayoutDom<'dom, Element> {
                     Some("hidden") | Some("range") | Some("color") | Some("checkbox") |
                     Some("radio") | Some("file") | Some("submit") | Some("image") |
                     Some("reset") | Some("button") => None,
+                    // <https://html.spec.whatwg.org/multipage/#attr-input-size> does not apply to
+                    // these; the UA sheet sizes them like Chrome does.
+                    Some("date") | Some("time") | Some("datetime-local") | Some("month") |
+                    Some("week") => None,
                     // Others
                     _ => match input_element.size_for_layout() {
                         0 => None,

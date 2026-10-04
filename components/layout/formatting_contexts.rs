@@ -526,16 +526,29 @@ impl IndependentFormattingContext {
                 let mut result = multicol_result.unwrap_or_else(|| {
                     bfc.layout(layout_context, positioning_context, containing_block_for_children)
                 });
-                align_block_container_content(self.style(), lazy_block_size, &mut result);
                 // A `<textarea>`'s `rows` attribute gives its intrinsic block size whatever its
-                // text, which scrolls instead (Chrome's `TextAreaIntrinsicBlockSize`).
-                if let GenericLengthPercentageOrAuto::LengthPercentage(height) = self
+                // text, which scrolls instead (Chrome's `TextAreaIntrinsicBlockSize`). The UA sheet
+                // also sizes date and time fields this way.
+                let text_control_block_size = match self
                     .style()
                     .get_position()
-                    .clone__servo_text_control_height() &&
-                    self.style().writing_mode.is_horizontal()
+                    .clone__servo_text_control_height()
                 {
-                    result.content_block_size = height.0.to_used_value(Au(0));
+                    GenericLengthPercentageOrAuto::LengthPercentage(height)
+                        if self.style().writing_mode.is_horizontal() =>
+                    {
+                        Some(height.0.to_used_value(Au(0)))
+                    },
+                    _ => None,
+                };
+                align_block_container_content(
+                    self.style(),
+                    lazy_block_size,
+                    text_control_block_size,
+                    &mut result,
+                );
+                if let Some(block_size) = text_control_block_size {
+                    result.content_block_size = block_size;
                 }
                 result
             },
@@ -729,13 +742,15 @@ fn block_container_content_alignment(style: &ComputedValues) -> Option<AlignFlag
 fn align_block_container_content(
     style: &ComputedValues,
     lazy_block_size: &LazySize,
+    intrinsic_block_size: Option<Au>,
     result: &mut IndependentFormattingContextLayoutResult,
 ) {
     let Some(alignment) = block_container_content_alignment(style) else {
         return;
     };
     let content_block_size = result.content_block_size;
-    let free_space = lazy_block_size.resolve(|| content_block_size) - content_block_size;
+    let free_space = lazy_block_size.resolve(|| intrinsic_block_size.unwrap_or(content_block_size)) -
+        content_block_size;
     if free_space <= Au(0) {
         return;
     }

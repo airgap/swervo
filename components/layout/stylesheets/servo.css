@@ -43,6 +43,39 @@ input {
     padding: 1px 2px;
 }
 
+/* Chrome sets date and time fields in monospace with only a 1px start padding, and sizes them
+   from their editable fields and picker icon rather than from the `size` attribute. These sizes
+   are what that comes to at any font size, measured in Chrome. Chrome pads the line of fields by
+   1px above and below inside the control, and the time field is taller for its clock icon. */
+input:is([type=date i], [type=time i], [type=datetime-local i], [type=month i], [type=week i]) {
+  font-family: monospace;
+  padding-block: 1px;
+  padding-inline: 1px 0;
+}
+
+input[type=date i] {
+  -servo-text-control-width: calc(8.2em + 11px);
+}
+
+input[type=time i] {
+  -servo-text-control-width: calc(5.85em + 21px);
+  padding-block: 0;
+  -servo-text-control-height: calc(1.05em + 6px);
+  align-content: center;
+}
+
+input[type=datetime-local i] {
+  -servo-text-control-width: calc(14.25em + 16px);
+}
+
+input[type=month i] {
+  -servo-text-control-width: calc(10.65em + 8px);
+}
+
+input[type=week i] {
+  -servo-text-control-width: calc(10.05em + 8px);
+}
+
 /* Matches https://searchfox.org/mozilla-central/rev/a1f4cb9fc03d81be41ca2ba81294592df784364d/layout/style/res/forms.css#120-132 */
 button,
 input,
