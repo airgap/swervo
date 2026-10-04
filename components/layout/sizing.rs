@@ -843,6 +843,17 @@ struct LazySizeData<'a> {
     is_table: bool,
 }
 
+/// See [`LazySize::kind`].
+#[derive(Clone, Copy, Debug, MallocSizeOf, PartialEq)]
+pub(crate) enum LazySizeKind {
+    /// Created from an [`Au`]: the size does not depend on the contents.
+    Fixed(Au),
+    /// [`LazySize::intrinsic`]: the size is that of the contents.
+    Intrinsic,
+    /// [`LazySize::new`]: the size of the contents, adjusted by sizing properties.
+    Constrained,
+}
+
 /// Represents a size that can't be fully resolved until the intrinsic size
 /// is known. This is useful in the block axis, since the intrinsic size
 /// depends on layout, but the other inputs are known beforehand.
@@ -884,6 +895,16 @@ impl<'a> LazySize<'a> {
         Self {
             result: OnceCell::new(),
             data: None,
+        }
+    }
+
+    /// How this [`LazySize`] determines the size, for keying layout caches. Must be read
+    /// before [`Self::resolve`], which also fills in the result of an intrinsic [`LazySize`].
+    pub(crate) fn kind(&self) -> LazySizeKind {
+        match (&self.data, self.result.get()) {
+            (Some(_), _) => LazySizeKind::Constrained,
+            (None, Some(size)) => LazySizeKind::Fixed(*size),
+            (None, None) => LazySizeKind::Intrinsic,
         }
     }
 

@@ -556,11 +556,13 @@ impl IndependentFormattingContext {
         preferred_aspect_ratio: Option<AspectRatio>,
         lazy_block_size: &LazySize,
     ) -> (IndependentFormattingContextLayoutResult, bool) {
+        let lazy_block_size_kind = lazy_block_size.kind();
         if let Some(cached_layout_result) = self
             .base
             .cached_independent_formatting_context_layout_if_applicable(
                 positioning_context,
                 containing_block_for_children,
+                lazy_block_size_kind,
             )
         {
             return (cached_layout_result, true);
@@ -582,6 +584,7 @@ impl IndependentFormattingContext {
         );
         self.base.cache_independent_formatting_context_layout(
             containing_block_for_children,
+            lazy_block_size_kind,
             &child_positioning_context,
             &result,
         );

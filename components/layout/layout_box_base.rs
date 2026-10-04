@@ -31,7 +31,7 @@ use crate::fragment_tree::{
 use crate::geom::LogicalSides1D;
 use crate::positioned::{PositioningContext, relative_adjustement};
 use crate::sizing::{
-    ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, SizeConstraint,
+    ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, LazySizeKind, SizeConstraint,
 };
 use crate::traversal::ElementDamageSet;
 use crate::{ConstraintSpace, ContainingBlock, ContainingBlockSize};
@@ -54,6 +54,14 @@ pub(crate) struct LayoutBoxBase {
     /// independent formatting context results or a cached block layout for use within
     /// a block flow.
     cached_layout_result: AtomicRefCell<Option<LayoutResultAndInputs>>,
+
+    /// The cached independent formatting context layout whose block size was left to its
+    /// contents (see [`LazySizeKind`]). Flex layout lays an item out
+    /// once to measure it and once more at its final size; keeping the measurement apart
+    /// from [`Self::cached_layout_result`] stops the two from evicting each other, which made
+    /// nested flex containers take time exponential in their depth.
+    cached_measure_result:
+        AtomicRefCell<Option<Box<IndependentFormattingContextLayoutResultAndInputs>>>,
 
     /// Whether or not the cached layout result for this [`LayoutBoxBase`] is dirty.
     /// This flag is used to preserve the cache when it can be used to do a faster
@@ -79,6 +87,7 @@ impl LayoutBoxBase {
             cached_inline_content_size: AtomicRefCell::default(),
             outer_inline_content_sizes_depend_on_content: AtomicBool::new(true),
             cached_layout_result: AtomicRefCell::default(),
+            cached_measure_result: AtomicRefCell::default(),
             cached_layout_result_dirty: AtomicBool::default(),
             subtree_size: AtomicUsize::default(),
             fragments: AtomicRefCell::default(),
@@ -219,28 +228,45 @@ impl LayoutBoxBase {
         &self,
         positioning_context: &mut PositioningContext,
         containing_block_for_children: &ContainingBlock<'_>,
+        lazy_block_size: LazySizeKind,
     ) -> Option<IndependentFormattingContextLayoutResult> {
         if self.cached_layout_result_dirty.load(Ordering::Relaxed) {
             return None;
         }
 
-        let cache = self.cached_layout_result.borrow();
-        let Some(LayoutResultAndInputs::IndependentFormattingContext(cache)) = &*cache else {
-            return None;
+        let applies = |cache: &IndependentFormattingContextLayoutResultAndInputs| {
+            cache.containing_block_for_children_size.inline ==
+                containing_block_for_children.size.inline &&
+                (cache.containing_block_for_children_size.block ==
+                    containing_block_for_children.size.block ||
+                    !cache.result.depends_on_block_constraints)
         };
 
-        let cache = &**cache;
-        if cache.containing_block_for_children_size.inline !=
-            containing_block_for_children.size.inline
-        {
-            return None;
-        }
-        if cache.containing_block_for_children_size.block !=
-            containing_block_for_children.size.block &&
-            cache.result.depends_on_block_constraints
-        {
-            return None;
-        }
+        let layout_cache = self.cached_layout_result.borrow();
+        let measure_cache = self.cached_measure_result.borrow();
+        let measure = measure_cache.as_deref().filter(|cache| applies(cache));
+        let cache = match lazy_block_size {
+            LazySizeKind::Fixed(block_size) => {
+                let layout = match &*layout_cache {
+                    Some(LayoutResultAndInputs::IndependentFormattingContext(cache))
+                        if cache.lazy_block_size == lazy_block_size && applies(cache) =>
+                    {
+                        Some(&**cache)
+                    },
+                    _ => None,
+                };
+                // Being told to use the block size that the contents asked for anyway gives
+                // the same layout as measuring, which is what a flex container does with
+                // its items while it is itself being measured.
+                layout.or(measure.filter(|cache| {
+                    cache.lazy_block_size == LazySizeKind::Intrinsic &&
+                        cache.result.content_block_size == block_size
+                }))
+            },
+            LazySizeKind::Intrinsic | LazySizeKind::Constrained => {
+                measure.filter(|cache| cache.lazy_block_size == lazy_block_size)
+            },
+        }?;
 
         positioning_context.append(cache.positioning_context.clone());
         Some(cache.result.clone())
@@ -249,19 +275,35 @@ impl LayoutBoxBase {
     pub(crate) fn cache_independent_formatting_context_layout(
         &self,
         containing_block_for_children: &ContainingBlock<'_>,
+        lazy_block_size: LazySizeKind,
         child_positioning_context: &PositioningContext,
         result: &IndependentFormattingContextLayoutResult,
     ) {
-        self.cached_layout_result_dirty
-            .store(false, Ordering::Relaxed);
-        *self.cached_layout_result.borrow_mut() =
-            Some(LayoutResultAndInputs::IndependentFormattingContext(
-                Box::new(IndependentFormattingContextLayoutResultAndInputs {
-                    result: result.clone(),
-                    positioning_context: child_positioning_context.clone(),
-                    containing_block_for_children_size: containing_block_for_children.size.clone(),
-                }),
-            ));
+        let was_dirty = self
+            .cached_layout_result_dirty
+            .swap(false, Ordering::Relaxed);
+        let entry = Box::new(IndependentFormattingContextLayoutResultAndInputs {
+            result: result.clone(),
+            positioning_context: child_positioning_context.clone(),
+            containing_block_for_children_size: containing_block_for_children.size.clone(),
+            lazy_block_size,
+        });
+        // Clearing the dirty flag revalidates both slots, so the one not written here must go.
+        match lazy_block_size {
+            LazySizeKind::Fixed(_) => {
+                if was_dirty {
+                    *self.cached_measure_result.borrow_mut() = None;
+                }
+                *self.cached_layout_result.borrow_mut() =
+                    Some(LayoutResultAndInputs::IndependentFormattingContext(entry));
+            },
+            LazySizeKind::Intrinsic | LazySizeKind::Constrained => {
+                if was_dirty {
+                    *self.cached_layout_result.borrow_mut() = None;
+                }
+                *self.cached_measure_result.borrow_mut() = Some(entry);
+            },
+        }
     }
 
     pub(crate) fn cached_same_formatting_context_block_if_applicable(
@@ -323,8 +365,12 @@ impl LayoutBoxBase {
             }
         }
 
-        self.cached_layout_result_dirty
-            .store(false, Ordering::Relaxed);
+        if self
+            .cached_layout_result_dirty
+            .swap(false, Ordering::Relaxed)
+        {
+            *self.cached_measure_result.borrow_mut() = None;
+        }
         *self.cached_layout_result.borrow_mut() =
             Some(LayoutResultAndInputs::SameFormattingContextBlock(Box::new(
                 SameFormattingContextBlockLayoutResultAndInputs {
@@ -412,6 +458,12 @@ pub(crate) struct IndependentFormattingContextLayoutResultAndInputs {
     /// The [`ContainingBlockSize`] to use for this box's contents, but not
     /// for the box itself.
     pub containing_block_for_children_size: ContainingBlockSize,
+
+    /// How the block size of this layout was determined. The result depends on it even when
+    /// the containing block size is indefinite in the block axis, as for a column flex item
+    /// whose main size is not definite: that layout reports the used main size as its content
+    /// block size, which must not be reused when the intrinsic block size is requested.
+    pub lazy_block_size: LazySizeKind,
 
     /// A [`PositioningContext`] holding absolutely-positioned descendants
     /// collected during the layout of this box.
