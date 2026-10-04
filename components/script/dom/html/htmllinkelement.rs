@@ -498,6 +498,16 @@ impl HTMLLinkElement {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#create-link-options-from-element>
+    /// Links are fetched only with a non-empty `href` (or an `imagesrcset`, which isn't supported
+    /// yet), as the appropriate times to fetch and process them require; creating link options
+    /// asserts it. Next.js emits `<link rel=preload as=image>` without an href, which crashed the
+    /// content process.
+    fn has_link_source(&self) -> bool {
+        self.upcast::<Element>()
+            .get_attribute_string_value(&local_name!("href"))
+            .is_some_and(|href| !href.is_empty())
+    }
+
     fn processing_options(&self) -> LinkProcessingOptions {
         let element = self.upcast::<Element>();
 
@@ -552,6 +562,9 @@ impl HTMLLinkElement {
     /// This method does not implement Step 7 (fetching the request) and instead returns the [RequestBuilder],
     /// as the fetch context that should be used depends on the link type.
     fn default_fetch_and_process_the_linked_resource(&self) -> Option<RequestBuilder> {
+        if !self.has_link_source() {
+            return None;
+        }
         // Step 1. Let options be the result of creating link options from el.
         let options = self.processing_options();
 
@@ -892,6 +905,9 @@ impl HTMLLinkElement {
     /// <https://html.spec.whatwg.org/multipage/#link-type-preload:fetch-and-process-the-linked-resource-2>
     /// and type matching destination steps of <https://html.spec.whatwg.org/multipage/#preload>
     fn handle_preload_url(&self) {
+        if !self.has_link_source() {
+            return;
+        }
         // Step 1. Update the source set for el.
         // TODO
         // Step 2. Let options be the result of creating link options from el.

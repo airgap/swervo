@@ -7,6 +7,8 @@ use js::context::JSContext;
 use net_traits::ResourceFetchTiming;
 use script_bindings::reflector::reflect_dom_object_with_cx;
 use servo_base::cross_process_instant::CrossProcessInstant;
+
+use crate::dom::bindings::num::Finite;
 use servo_url::ServoUrl;
 use time::Duration;
 
@@ -224,6 +226,13 @@ impl PerformanceResourceTimingMethods<crate::DomTypeHolder> for PerformanceResou
     /// <https://w3c.github.io/resource-timing/#dom-performanceresourcetiming-fetchstart>
     fn FetchStart(&self) -> DOMHighResTimeStamp {
         self.to_dom_high_res_time_stamp(self.fetch_start)
+    }
+
+    /// <https://w3c.github.io/resource-timing/#dom-performanceresourcetiming-workerstart>: 0 when
+    /// no service worker handled the fetch, which servo's fetches never go through. Google Docs
+    /// computes timings from it and threw on the undefined value.
+    fn WorkerStart(&self) -> DOMHighResTimeStamp {
+        Finite::wrap(0.)
     }
 
     /// <https://w3c.github.io/resource-timing/#dom-performanceresourcetiming-connectstart>
