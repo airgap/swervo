@@ -55,6 +55,9 @@ pub enum EmbedderToConstellationMessage {
     ChangeViewportDetails(WebViewId, ViewportDetails, WindowSizeType),
     /// Inform the constellation of a theme change.
     ThemeChange(WebViewId, Theme),
+    /// Inform the constellation that the screen or the window holding a `WebView` changed
+    /// (moved, resized, or switched screens), so script must re-query the screen geometry.
+    ScreenGeometryChanged(WebViewId),
     /// Requests that the constellation instruct script/layout to try to layout again and tick
     /// animations.
     TickAnimation(Vec<WebViewId>),

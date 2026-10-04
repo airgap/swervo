@@ -55,6 +55,7 @@ mod from_embedder {
                 Self::TraverseHistory(..) => target!("TraverseHistory"),
                 Self::ChangeViewportDetails(..) => target!("ChangeViewportDetails"),
                 Self::ThemeChange(..) => target!("ThemeChange"),
+                Self::ScreenGeometryChanged(..) => target!("ScreenGeometryChanged"),
                 Self::TickAnimation(..) => target!("TickAnimation"),
                 Self::WebDriverCommand(..) => target!("WebDriverCommand"),
                 Self::Reload(..) => target!("Reload"),

@@ -25,7 +25,7 @@ use dom_struct::dom_struct;
 use embedder_traits::user_contents::UserScript;
 use embedder_traits::{
     AlertResponse, ConfirmResponse, EmbedderMsg, JavaScriptEvaluationError, PromptResponse,
-    ScriptToEmbedderChan, SimpleDialogRequest, Theme, UntrustedNodeAddress, ViewportDetails,
+    ScreenMetrics, ScriptToEmbedderChan, SimpleDialogRequest, Theme, UntrustedNodeAddress, ViewportDetails,
     WebDriverJSResult, WebDriverLoadStatus,
 };
 use euclid::{Point2D, Rect, Scale, Size2D, Vector2D};
@@ -344,6 +344,17 @@ pub(crate) struct Window {
     /// The [`ViewportDetails`] of this [`Window`]'s frame.
     #[no_trace]
     viewport_details: Cell<ViewportDetails>,
+
+    /// What the embedder last reported for `screen.*`, kept until the constellation says the
+    /// screen or window changed. Asking the embedder is a synchronous round trip through the
+    /// embedder's event loop, and pages read these properties in loops.
+    #[no_trace]
+    screen_metrics: Cell<Option<ScreenMetrics>>,
+
+    /// What the embedder last reported as the window rect (`screenX`, `outerWidth`...), cached
+    /// like [`Self::screen_metrics`].
+    #[no_trace]
+    client_window_rect: Cell<Option<DeviceIndependentIntRect>>,
 
     /// A handle for communicating messages to the bluetooth thread.
     #[no_trace]
@@ -2551,11 +2562,35 @@ impl Window {
     }
 
     fn client_window(&self) -> DeviceIndependentIntRect {
+        if let Some(rect) = self.client_window_rect.get() {
+            return rect;
+        }
         let (sender, receiver) = generic_channel::channel().expect("Failed to create IPC channel!");
 
         self.send_to_embedder(EmbedderMsg::GetWindowRect(self.webview_id(), sender));
 
-        receiver.recv().unwrap_or_default()
+        let rect = receiver.recv().unwrap_or_default();
+        self.client_window_rect.set(Some(rect));
+        rect
+    }
+
+    /// Retrieves [`ScreenMetrics`] from the embedder, or the cached copy.
+    pub(crate) fn screen_metrics(&self) -> ScreenMetrics {
+        if let Some(metrics) = self.screen_metrics.get() {
+            return metrics;
+        }
+        let (sender, receiver) = generic_channel::channel().expect("Failed to create IPC channel!");
+
+        self.send_to_embedder(EmbedderMsg::GetScreenMetrics(self.webview_id(), sender));
+
+        let metrics = receiver.recv().unwrap_or_default();
+        self.screen_metrics.set(Some(metrics));
+        metrics
+    }
+
+    pub(crate) fn invalidate_screen_geometry(&self) {
+        self.screen_metrics.set(None);
+        self.client_window_rect.set(None);
     }
 
     /// Prepares to tick animations and then does a reflow which also advances the
@@ -3832,6 +3867,8 @@ impl Window {
             bluetooth_extra_permission_data: BluetoothExtraPermissionData::new(),
             unhandled_resize_event: Default::default(),
             viewport_details: Cell::new(viewport_details),
+            screen_metrics: Default::default(),
+            client_window_rect: Default::default(),
             layout_blocker: Cell::new(LayoutBlocker::WaitingForParse),
             current_state: Cell::new(WindowState::Alive),
             devtools_marker_sender: Default::default(),

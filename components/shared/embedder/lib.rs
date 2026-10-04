@@ -355,7 +355,7 @@ impl ViewportDetails {
 
 /// Unlike [`ScreenGeometry`], the data is in device-independent pixels
 /// to be used by DOM APIs
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Copy, Default, Deserialize, MallocSizeOf, Serialize)]
 pub struct ScreenMetrics {
     pub screen_size: DeviceIndependentIntSize,
     pub available_size: DeviceIndependentIntSize,

@@ -162,6 +162,9 @@ pub enum ScriptThreadMessage {
     Resize(PipelineId, ViewportDetails, WindowSizeType),
     /// Theme changed.
     ThemeChange(PipelineId, Theme),
+    /// The screen or the window holding this pipeline's `WebView` changed; drop the cached
+    /// screen metrics and window rect.
+    ScreenGeometryChanged(PipelineId),
     /// Notifies script that window has been resized but to not take immediate action.
     ResizeInactive(PipelineId, ViewportDetails),
     /// Window switched from fullscreen mode.

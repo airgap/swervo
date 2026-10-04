@@ -1458,6 +1458,9 @@ where
             EmbedderToConstellationMessage::ThemeChange(webview_id, theme) => {
                 self.handle_theme_change(webview_id, theme);
             },
+            EmbedderToConstellationMessage::ScreenGeometryChanged(webview_id) => {
+                self.handle_screen_geometry_change(webview_id);
+            },
             EmbedderToConstellationMessage::TickAnimation(webview_ids) => {
                 self.handle_tick_animation(webview_ids)
             },
@@ -5322,6 +5325,9 @@ where
 
         let browsing_context_id = BrowsingContextId::from(webview_id);
         self.resize_browsing_context(new_viewport_details, size_type, browsing_context_id);
+        // A resized WebView usually means a resized window, which changes outerWidth/outerHeight
+        // in every document of the WebView, including its iframes.
+        self.handle_screen_geometry_change(webview_id);
     }
 
     /// Called when the window exits from fullscreen mode
@@ -5566,6 +5572,25 @@ where
             {
                 warn!(
                     "{}: Failed to send theme change event to pipeline ({error:?}).",
+                    pipeline.id,
+                );
+            }
+        }
+    }
+
+    /// Tell every pipeline of a `WebView` to drop its cached screen metrics and window rect.
+    #[servo_tracing::instrument(skip_all)]
+    fn handle_screen_geometry_change(&mut self, webview_id: WebViewId) {
+        for pipeline in self.pipelines.values() {
+            if pipeline.webview_id != webview_id {
+                continue;
+            }
+            if let Err(error) = pipeline
+                .event_loop
+                .send(ScriptThreadMessage::ScreenGeometryChanged(pipeline.id))
+            {
+                warn!(
+                    "{}: Failed to send screen geometry change to pipeline ({error:?}).",
                     pipeline.id,
                 );
             }

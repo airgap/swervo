@@ -1813,6 +1813,12 @@ impl ScriptThread {
             ScriptThreadMessage::ThemeChange(_, theme) => {
                 self.handle_theme_change_msg(theme);
             },
+            ScriptThreadMessage::ScreenGeometryChanged(pipeline_id) => {
+                // A pipeline still loading has no Window yet, and its Window starts uncached.
+                if let Some(window) = self.documents.borrow().find_window(pipeline_id) {
+                    window.invalidate_screen_geometry();
+                }
+            },
             ScriptThreadMessage::GetDocumentOrigin(pipeline_id, result_sender) => {
                 self.handle_get_document_origin(pipeline_id, result_sender);
             },
