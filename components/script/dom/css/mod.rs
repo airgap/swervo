@@ -19,6 +19,7 @@ pub(crate) mod cssnesteddeclarations;
 pub(crate) mod csspropertyrule;
 pub(crate) mod cssrule;
 pub(crate) mod cssrulelist;
+pub(crate) mod cssstartingstylerule;
 pub(crate) mod cssstyledeclaration;
 pub(crate) mod cssstylerule;
 pub(crate) mod cssstylesheet;
