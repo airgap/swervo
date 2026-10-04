@@ -145,12 +145,18 @@ impl HTMLElement {
         let element = self.as_element();
 
         // Step 1.
-        let element_not_rendered = !node.is_connected() || !element.has_css_layout_box();
+        if !node.is_connected() {
+            return node.GetTextContent().unwrap();
+        }
+        // One reflow serves both the rendered check and the text query.
+        window.layout_reflow(QueryMsg::ElementInnerOuterTextQuery);
+        let element_not_rendered = element
+            .style_from_last_restyle()
+            .is_none_or(|style| style.get_box().clone_display().is_none());
         if element_not_rendered {
             return node.GetTextContent().unwrap();
         }
 
-        window.layout_reflow(QueryMsg::ElementInnerOuterTextQuery);
         let text = window
             .layout()
             .query_element_inner_outer_text(node.to_trusted_node_address());

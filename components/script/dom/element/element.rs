@@ -1086,8 +1086,8 @@ impl Element {
 
     /// The element's style from the last restyle, without the reflow [`Self::style`] forces.
     /// For code that already runs right after layout (inline-SVG serialization), where a
-    /// re-entrant reflow is both unnecessary and unsafe. `None` for unstyled elements, e.g.
-    /// descendants of a `display: none` element.
+    /// re-entrant reflow is both unnecessary and unsafe, or that just forced one (`innerText`).
+    /// `None` for unstyled elements, e.g. descendants of a `display: none` element.
     pub(crate) fn style_from_last_restyle(&self) -> Option<ServoArc<ComputedValues>> {
         self.style_data
             .borrow()
