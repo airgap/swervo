@@ -333,8 +333,20 @@ impl<'a> TableLayout<'a> {
                     if row_index > 0 {
                         CellOrTrackMeasure::zero()
                     } else {
+                        // Blink adds the padding and border of a `content-box` cell to the
+                        // width that its percentage resolves to.
+                        let content_sizes = match percentage_size.inline {
+                            Some(_)
+                                if cell.context.base.style.get_position().box_sizing ==
+                                    BoxSizing::ContentBox =>
+                            {
+                                padding_border_sums.inline
+                            },
+                            Some(_) => Au::zero(),
+                            None => preferred_size.inline,
+                        };
                         CellOrTrackMeasure {
-                            content_sizes: preferred_size.inline.into(),
+                            content_sizes: content_sizes.into(),
                             percentage: percentage_size.inline,
                         }
                     }
@@ -514,8 +526,11 @@ impl<'a> TableLayout<'a> {
         // >     1, of its corresponding table-column (if any), and of its corresponding table-column-group (if
         // >     any)
         //
-        // TODO: Take into account `table-column` and `table-column-group` lengths.
-        // TODO: Take into account changes to this computation for fixed table layout.
+        if self.is_in_fixed_mode {
+            self.compute_column_measures_in_fixed_mode(writing_mode);
+            return;
+        }
+
         let mut colspan_cell_constraints = Vec::new();
         for column_index in 0..self.table.size.width {
             let column = &mut self.columns[column_index];
@@ -573,6 +588,67 @@ impl<'a> TableLayout<'a> {
                     percentage.0.min(1. - total_intrinsic_percentage_width);
                 total_intrinsic_percentage_width += final_intrinsic_percentage_width;
                 *percentage = Percentage(final_intrinsic_percentage_width);
+            }
+        }
+    }
+
+    /// Compute the column measures of a table in fixed mode like Blink, which refines
+    /// <https://drafts.csswg.org/css-tables/#in-fixed-mode>: the width of a table-column takes
+    /// precedence over the widths of the cells in the first row, and a cell spanning several
+    /// columns gives each of them an equal share of its width. A column ends up with either a
+    /// percentage, a fixed width (it is then constrained), or neither (it is then `auto`).
+    fn compute_column_measures_in_fixed_mode(&mut self, writing_mode: WritingMode) {
+        let has_length_inline_size = |style: &ComputedValues| {
+            style
+                .box_size(writing_mode)
+                .inline
+                .to_numeric()
+                .is_some_and(|size| size.to_length().is_some())
+        };
+        let mut sized_by_table_column = vec![false; self.table.size.width];
+        for (column_index, sized_by_table_column) in sized_by_table_column.iter_mut().enumerate()
+        {
+            let column_measure =
+                self.table
+                    .get_column_measure_for_column_at_index(writing_mode, column_index, true);
+            let has_length = self
+                .table
+                .columns
+                .get(column_index)
+                .is_some_and(|column| has_length_inline_size(&column.borrow().base.style));
+            let column = &mut self.columns[column_index];
+            column.content_sizes = column_measure.content_sizes.max_content.into();
+            column.percentage = column_measure.percentage;
+            column.constrained = has_length;
+            *sized_by_table_column = has_length || column.percentage.is_some();
+        }
+
+        let border_spacing = self.table.border_spacing().inline;
+        for column_index in 0..self.table.size.width {
+            let Some(TableSlot::Cell(cell)) = self.table.slots.first().map(|row| &row[column_index])
+            else {
+                continue;
+            };
+            let cell = cell.borrow();
+            let span = cell.colspan;
+            let is_constrained = has_length_inline_size(&cell.context.base.style);
+            let cell_measure = &self.cell_measures[0][column_index].inline;
+            let share = ((cell_measure.content_sizes.max_content -
+                border_spacing.scale_by((span - 1) as f32))
+            .max(Au::zero()))
+            .scale_by(1. / span as f32);
+            let percentage = cell_measure
+                .percentage
+                .map(|percentage| Percentage(percentage.0 / span as f32));
+            let range = column_index..(column_index + span).min(self.table.size.width);
+            for spanned_column_index in range {
+                if sized_by_table_column[spanned_column_index] {
+                    continue;
+                }
+                let column = &mut self.columns[spanned_column_index];
+                column.content_sizes = share.into();
+                column.percentage = percentage;
+                column.constrained = is_constrained;
             }
         }
     }
@@ -948,6 +1024,95 @@ impl<'a> TableLayout<'a> {
             &max_content_sizing_guesses,
             max_content_sizing_sum,
         )
+    }
+
+    /// Distribute the assignable width to the columns of a table in fixed mode, like Blink
+    /// (`DistributeInlineSizeToComputedInlineSizeFixed`). Percentage and fixed columns get their
+    /// widths, and `auto` columns share what is left. Without `auto` columns, the space left
+    /// goes to the fixed columns in proportion to their widths, or else to the percentage
+    /// columns in proportion to their percentages. When there isn't enough space, fixed columns
+    /// keep their widths and percentage columns share what is left in proportion to their
+    /// percentages.
+    fn distribute_width_to_columns_in_fixed_mode(&self) -> Vec<Au> {
+        let assignable_width = self.assignable_width;
+        let mut widths: Vec<Au> = self
+            .columns
+            .iter()
+            .map(|column| match column.percentage {
+                Some(percentage) => {
+                    assignable_width.scale_by(percentage.0) + column.content_sizes.max_content
+                },
+                None if column.constrained => column.content_sizes.max_content,
+                None => Au::zero(),
+            })
+            .collect();
+
+        let column_indices = |filter: fn(&ColumnLayout) -> bool| -> Vec<usize> {
+            (0..self.columns.len())
+                .filter(|index| filter(&self.columns[*index]))
+                .collect()
+        };
+        let percentage_columns = column_indices(|column| column.percentage.is_some());
+        let fixed_columns =
+            column_indices(|column| column.percentage.is_none() && column.constrained);
+        let auto_columns =
+            column_indices(|column| column.percentage.is_none() && !column.constrained);
+        let sum = |indices: &[usize], widths: &[Au]| -> Au {
+            indices.iter().map(|index| widths[*index]).sum()
+        };
+        let fixed_sum = sum(&fixed_columns, &widths);
+        let percentage_sum = sum(&percentage_columns, &widths);
+        let percentage_weights: Vec<f32> = self
+            .columns
+            .iter()
+            .filter_map(|column| column.percentage.map(|percentage| percentage.0))
+            .collect();
+
+        // Adds `amount` to the widths of the columns at `indices` in proportion to `weights`,
+        // or equally if the weights add up to zero, making the increments add up to `amount`.
+        let distribute =
+            |widths: &mut [Au], amount: Au, indices: &[usize], weights: &[f32]| {
+                let total_weight: f32 = weights.iter().sum();
+                let mut accumulated_weight = 0.;
+                let mut distributed = Au::zero();
+                for (position, index) in indices.iter().enumerate() {
+                    accumulated_weight += if total_weight > 0. {
+                        weights[position] / total_weight
+                    } else {
+                        1. / indices.len() as f32
+                    };
+                    let target = if position + 1 == indices.len() {
+                        amount
+                    } else {
+                        amount.scale_by(accumulated_weight)
+                    };
+                    widths[*index] += target - distributed;
+                    distributed = target;
+                }
+            };
+
+        let used_sum = fixed_sum + percentage_sum;
+        if used_sum < assignable_width {
+            let extra = assignable_width - used_sum;
+            if !auto_columns.is_empty() {
+                distribute(&mut widths, extra, &auto_columns, &[]);
+            } else if !fixed_columns.is_empty() {
+                let weights: Vec<f32> = fixed_columns
+                    .iter()
+                    .map(|index| widths[*index].to_f32_px())
+                    .collect();
+                distribute(&mut widths, extra, &fixed_columns, &weights);
+            } else {
+                distribute(&mut widths, extra, &percentage_columns, &percentage_weights);
+            }
+        } else if !percentage_columns.is_empty() {
+            for index in &percentage_columns {
+                widths[*index] = Au::zero();
+            }
+            let remaining = (assignable_width - fixed_sum).max(Au::zero());
+            distribute(&mut widths, remaining, &percentage_columns, &percentage_weights);
+        }
+        widths
     }
 
     /// This is an implementation of *Distributing excess width to columns* from
@@ -1838,8 +2003,11 @@ impl<'a> TableLayout<'a> {
         containing_block_for_logical_conversion: &ContainingBlock,
         containing_block_for_children: &ContainingBlock,
     ) -> BoxFragment {
-        self.distributed_column_widths =
-            Self::distribute_width_to_columns(self.assignable_width, &self.columns);
+        self.distributed_column_widths = if self.is_in_fixed_mode {
+            self.distribute_width_to_columns_in_fixed_mode()
+        } else {
+            Self::distribute_width_to_columns(self.assignable_width, &self.columns)
+        };
         self.layout_cells_in_row(layout_context, containing_block_for_children);
         let table_writing_mode = containing_block_for_children.style.writing_mode;
         let first_layout_row_heights = self.do_first_row_layout(table_writing_mode);
@@ -2772,13 +2940,28 @@ impl Table {
         }
         .borrow();
 
+        // Like Blink, a table-column-group gives its width to those of its table-columns that
+        // have an `auto` one, except in fixed mode.
+        let column_group = column
+            .group_index
+            .map(|group_index| self.column_groups[group_index].borrow());
+        let style = match &column_group {
+            Some(column_group)
+                if !is_in_fixed_mode &&
+                    matches!(column.base.style.box_size(writing_mode).inline, Size::Initial) =>
+            {
+                &column_group.base.style
+            },
+            _ => &column.base.style,
+        };
+
         let CellOrColumnOuterSizes {
             preferred: preferred_size,
             min: min_size,
             max: max_size,
             percentage: percentage_size,
         } = CellOrColumnOuterSizes::new(
-            &column.base.style,
+            style,
             writing_mode,
             &Default::default(),
             is_in_fixed_mode,
