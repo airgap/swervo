@@ -221,7 +221,8 @@ pub(crate) struct TextOrigin {
     pub character_start: usize,
     /// For every character produced, the UTF-16 offset in the node where it starts, then the
     /// offset just past the last one. White space collapsing drops DOM characters, so the
-    /// offsets need not be contiguous.
+    /// offsets need not be contiguous, and `text-transform` can produce several characters
+    /// from one, which then share its offset.
     pub dom_offsets: Vec<u32>,
 }
 
@@ -295,6 +296,19 @@ impl TextOrigins {
             .last()
             .unwrap_or(first);
         Some(source.character_offset(offset))
+    }
+
+    /// The characters laid out for a range of UTF-16 offsets in the data of the text node
+    /// `node`, if any of its text is in this inline formatting context.
+    pub(crate) fn character_range(
+        &self,
+        node: OpaqueNode,
+        utf16_range: &std::ops::Range<usize>,
+    ) -> Option<std::ops::Range<usize>> {
+        Some(
+            self.character_offset(node, utf16_range.start as u32)?..
+                self.character_offset(node, utf16_range.end as u32)?,
+        )
     }
 
     /// The sources of the characters in the given range, including those touching its ends.

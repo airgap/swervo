@@ -28,7 +28,7 @@ use style::computed_values::position::T as Position;
 use style::computed_values::visibility::T as Visibility;
 use style::computed_values::white_space_collapse::T as WhiteSpaceCollapseValue;
 use style::context::{QuirksMode, SharedStyleContext, StyleContext, ThreadLocalStyleContext};
-use style::dom::NodeInfo;
+use style::dom::{NodeInfo, OpaqueNode};
 use style::properties::style_structs::Font;
 use style::properties::{
     ComputedValues, Importance, LonghandId, PropertyDeclarationBlock, PropertyDeclarationId,
@@ -51,11 +51,7 @@ use style_traits::{CSSPixel, ParsingMode, ToCss};
 use crate::cell::RefOrAtomicRef;
 use crate::display_list::{StackingContextTree, au_rect_to_length_rect};
 use crate::dom::{NodeExt, WeakLayoutBox};
-use crate::flow::inline::construct::{
-    InlineFormattingContextBuilder, TextTransformation, WhitespaceCollapse, capitalize_string,
-    rendered_characters,
-};
-use crate::flow::inline::text_run::TextRunNodeSegment;
+use crate::flow::inline::construct::{TextTransformation, WhitespaceCollapse, capitalize_string};
 use crate::fragment_tree::{
     BoxFragment, ContainingBlockCalculation, Fragment, FragmentFlags, FragmentTree,
     SpecificLayoutInfo, Tag, TextFragment,
@@ -181,14 +177,6 @@ pub(crate) fn process_text_range_rects_request(
         return Vec::new();
     };
     let text_run = text_run.borrow();
-    let opaque_node = node.opaque();
-    let Some(segment) = text_run
-        .node_segments
-        .iter()
-        .find(|segment| segment.node == opaque_node)
-    else {
-        return Vec::new();
-    };
     let Some(parent_box) = text_run.parent_box.as_ref().and_then(WeakLayoutBox::upgrade) else {
         return Vec::new();
     };
@@ -196,14 +184,8 @@ pub(crate) fn process_text_range_rects_request(
         return Vec::new();
     };
 
-    let character_range = character_range_for_utf16_range(
-        &node.text_content(),
-        segment,
-        &text_run.inline_styles.style.borrow(),
-        utf16_range,
-    );
-
     let mut rects = Vec::new();
+    let mut is_collapsed = false;
     for fragment in &parent_fragments {
         let Some(content_rect) = fragment.cumulative_box_area_rect(
             BoxAreaType::Content,
@@ -218,14 +200,16 @@ pub(crate) fn process_text_range_rects_request(
             fragment,
             content_rect.origin.to_vector(),
             text_run.base_fragment_info.tag,
-            &character_range,
+            node.opaque(),
+            &utf16_range,
+            &mut is_collapsed,
             &mut rects,
         );
     }
 
     // A collapsed range sits at the end of one line and the start of the next when it is at a
     // soft wrap opportunity; it only has one position.
-    if character_range.is_empty() {
+    if is_collapsed {
         rects.truncate(1);
     }
 
@@ -251,14 +235,17 @@ pub(crate) fn process_text_range_rects_request(
         .collect()
 }
 
-/// Collect the rectangles for `character_range` of the text fragments with `tag` that are
-/// children of `fragment`, looking through anonymous fragments such as line boxes.
-/// `children_offset` is the origin of the coordinate space of `fragment`'s children.
+/// Collect the rectangles for `utf16_range` of the data of the text node `node` in the text
+/// fragments with `tag` that are children of `fragment`, looking through anonymous fragments such
+/// as line boxes. `children_offset` is the origin of the coordinate space of `fragment`'s
+/// children. `is_collapsed` is set when the range covers no laid out characters.
 fn collect_text_range_rects(
     fragment: &Fragment,
     children_offset: Vector2D<Au, CSSPixel>,
     tag: Option<Tag>,
-    character_range: &Range<usize>,
+    node: OpaqueNode,
+    utf16_range: &Range<usize>,
+    is_collapsed: &mut bool,
     rects: &mut CSSPixelRectVec,
 ) {
     let Some(children) = fragment.children() else {
@@ -267,8 +254,17 @@ fn collect_text_range_rects(
     for child in children.iter() {
         match child {
             Fragment::Text(text_fragment) if text_fragment.base.tag == tag => {
+                let Some(character_range) = text_fragment
+                    .offsets
+                    .as_ref()
+                    .and_then(|offsets| offsets.text_origins.as_ref())
+                    .and_then(|text_origins| text_origins.character_range(node, utf16_range))
+                else {
+                    continue;
+                };
+                *is_collapsed = character_range.is_empty();
                 let Some(rect) = text_fragment
-                    .rect_for_character_range(character_range)
+                    .rect_for_character_range(&character_range)
                     .map(|rect| rect.translate(children_offset))
                 else {
                     continue;
@@ -293,81 +289,15 @@ fn collect_text_range_rects(
                     child,
                     children_offset + child_origin.to_vector(),
                     tag,
-                    character_range,
+                    node,
+                    utf16_range,
+                    is_collapsed,
                     rects,
                 );
             },
             _ => {},
         }
     }
-}
-
-/// Map a range of UTF-16 offsets in a text node's data to the characters of the inline
-/// formatting context rendered from them. White space collapsing removes characters and
-/// `text-transform` may expand them, so this replays that transformation on the node's text
-/// and aligns its output with the source characters.
-fn character_range_for_utf16_range(
-    text: &str,
-    segment: &TextRunNodeSegment,
-    style: &ComputedValues,
-    utf16_range: Range<usize>,
-) -> Range<usize> {
-    let source = &text[segment.text_offset..];
-    let rendered: Vec<char> = rendered_characters(
-        source,
-        style,
-        segment.trim_beginning_white_space,
-        segment.starts_on_word_boundary,
-    )
-    .collect();
-
-    // How many rendered characters, at the start of `rest`, came from `character`.
-    let rendered_count = |character: char, rest: &[char]| -> usize {
-        let Some(&next) = rest.first() else {
-            return 0;
-        };
-        if next == character {
-            return 1;
-        }
-        if InlineFormattingContextBuilder::is_document_white_space(character) {
-            // Collapsible white space is either rendered as a single space or removed.
-            return usize::from(next == ' ');
-        }
-        let starts_with = |expansion: &mut dyn Iterator<Item = char>| {
-            let mut count = 0;
-            for expected in expansion {
-                if rest.get(count) != Some(&expected) {
-                    return None;
-                }
-                count += 1;
-            }
-            Some(count)
-        };
-        starts_with(&mut character.to_uppercase())
-            .or_else(|| starts_with(&mut character.to_lowercase()))
-            .unwrap_or(1)
-    };
-
-    let mut utf16_offset = text[..segment.text_offset].encode_utf16().count();
-    let mut rendered_index = 0;
-    let mut start = None;
-    let mut end = None;
-    for character in source.chars() {
-        if start.is_none() && utf16_offset >= utf16_range.start {
-            start = Some(rendered_index);
-        }
-        if utf16_offset >= utf16_range.end {
-            end = Some(rendered_index);
-            break;
-        }
-        utf16_offset += character.len_utf16();
-        rendered_index += rendered_count(character, &rendered[rendered_index..]);
-    }
-    let start = start.unwrap_or(rendered_index);
-    let end = end.unwrap_or(rendered_index);
-
-    let base = segment.character_range.start;
-    (base + start).min(segment.character_range.end)..(base + end).min(segment.character_range.end)
 }
 
 pub fn process_client_rect_request(node: ServoLayoutNode<'_>) -> Rect<i32, CSSPixel> {

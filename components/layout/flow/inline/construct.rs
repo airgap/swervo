@@ -20,7 +20,7 @@ use unicode_bidi::Level;
 use unicode_categories::UnicodeCategories;
 use web_atoms::local_name;
 
-use super::text_run::{TextRun, TextRunNodeSegment};
+use super::text_run::TextRun;
 use super::{
     InlineBox, InlineBoxIdentifier, InlineBoxes, InlineFormattingContext, InlineItem,
     SharedInlineStyles, TextOrigin, TextOriginKind, TextOrigins,
@@ -320,14 +320,14 @@ impl InlineFormattingContextBuilder {
         layout_context: &LayoutContext,
     ) -> bool {
         if self.has_processed_first_letter || !container_info.pseudo_element_chain().is_empty() {
-            self.push_text(text, 0, info);
+            self.push_text(text, info);
             return false;
         }
 
         let Some(first_letter_info) =
             container_info.with_pseudo_element(layout_context, PseudoElement::FirstLetter)
         else {
-            self.push_text(text, 0, info);
+            self.push_text(text, info);
             return false;
         };
 
@@ -338,7 +338,7 @@ impl InlineFormattingContextBuilder {
 
         // Push any leading white space first.
         if first_letter_range.start != 0 {
-            self.push_text(Cow::Borrowed(&text[0..first_letter_range.start]), 0, info);
+            self.push_text(Cow::Borrowed(&text[0..first_letter_range.start]), info);
         }
 
         // Push the first-letter text into an anonymous box with the `::first-letter` style.
@@ -361,33 +361,17 @@ impl InlineFormattingContextBuilder {
             node,
             pushed_length + first_letter_text.encode_utf16().count() as u32,
         ));
-        self.push_text(
-            first_letter_text,
-            first_letter_range.start,
-            &first_letter_info,
-        );
+        self.push_text(first_letter_text, &first_letter_info);
         self.end_inline_box();
         self.has_processed_first_letter = true;
 
         // Now push the non-first-letter text.
-        self.push_text(
-            Cow::Borrowed(&text[first_letter_range.end..]),
-            first_letter_range.end,
-            info,
-        );
+        self.push_text(Cow::Borrowed(&text[first_letter_range.end..]), info);
 
         true
     }
 
-    /// Push the text of a node. `text_offset` is the byte offset of `text` within the text
-    /// of `info`'s node, which is non-zero when `::first-letter` took the start of it.
-    pub(crate) fn push_text<'dom>(
-        &mut self,
-        text: Cow<'dom, str>,
-        text_offset: usize,
-        info: &NodeAndStyleInfo<'dom>,
-    ) {
-        let origin = self.origin_of_text(&text, info, info.style.clone_white_space_collapse());
+    pub(crate) fn push_text<'dom>(&mut self, text: Cow<'dom, str>, info: &NodeAndStyleInfo<'dom>) {
         let trim_beginning_white_space = self.last_inline_box_ended_with_collapsible_white_space;
         let starts_on_word_boundary = self.on_word_boundary;
         let char_iterator = rendered_characters(
@@ -445,15 +429,10 @@ impl InlineFormattingContextBuilder {
             self.current_character_offset..self.current_character_offset + character_count;
         self.current_character_offset = new_character_range.end;
 
-        self.text_segments.push(new_text);
-
-        if let Some((node, mut dom_offsets, kind)) = origin {
-            // Text transforms can change the number of characters (ß becomes SS), which loses
-            // the exact correspondence; keep one offset per laid out character regardless.
-            let end = dom_offsets.pop().expect("Always has an end offset");
-            let last = dom_offsets.last().copied().unwrap_or(end);
-            dom_offsets.resize(character_count, last);
-            dom_offsets.push(end);
+        if let Some((node, dom_offsets, kind)) =
+            self.origin_of_text(&text, &new_text, info, trim_beginning_white_space)
+        {
+            debug_assert_eq!(dom_offsets.len(), character_count + 1);
             self.text_origins.sources.push(TextOrigin {
                 node,
                 kind,
@@ -462,14 +441,9 @@ impl InlineFormattingContextBuilder {
             });
         }
 
+        self.text_segments.push(new_text);
+
         let current_inline_styles = self.shared_inline_styles();
-        let node_segment = info.node.is_text_node().then(|| TextRunNodeSegment {
-            node: info.node.opaque(),
-            text_offset,
-            character_range: new_character_range.clone(),
-            trim_beginning_white_space,
-            starts_on_word_boundary,
-        });
 
         if let Some(InlineItem::TextRun(text_run)) = self.inline_items.last() &&
             text_run
@@ -484,7 +458,6 @@ impl InlineFormattingContextBuilder {
                 let mut text_run = text_run.borrow_mut();
                 text_run.text_range.end = new_range.end;
                 text_run.character_range.end = new_character_range.end;
-                text_run.node_segments.extend(node_segment);
 
                 // If this text node does not have a `TextRun` in the box slot, this means that
                 // it is either new or dirty, which means that the entire `TextRun` just extended
@@ -505,7 +478,6 @@ impl InlineFormattingContextBuilder {
             current_inline_styles,
             new_range,
             new_character_range,
-            node_segment,
             box_slot
                 .as_ref()
                 .and_then(|box_slot| box_slot.take_layout_box_as_text_run()),
@@ -519,13 +491,14 @@ impl InlineFormattingContextBuilder {
     }
 
     /// For text of a DOM text node, or the line feed generated for a `<br>`, returns the node,
-    /// the UTF-16 offset in it of each character left after white space collapsing followed by
-    /// the offset just past the last one, and which kind of node it is.
+    /// the UTF-16 offset in it of each of the `rendered` characters laid out for `text` followed
+    /// by the offset just past the last one, and which kind of node it is.
     fn origin_of_text(
         &mut self,
         text: &str,
+        rendered: &str,
         info: &NodeAndStyleInfo,
-        white_space_collapse: WhiteSpaceCollapse,
+        trim_beginning_white_space: bool,
     ) -> Option<(OpaqueNode, Vec<u32>, TextOriginKind)> {
         let node = info.node.opaque();
         if !info.node.is_text_node() {
@@ -538,7 +511,7 @@ impl InlineFormattingContextBuilder {
             }
             self.note_editability(info);
             // Before the `<br>` is offset 0 in it, after it is offset 1.
-            let mut dom_offsets = vec![0; text.chars().count()];
+            let mut dom_offsets = vec![0; rendered.chars().count()];
             dom_offsets.push(1);
             return Some((node, dom_offsets, TextOriginKind::LineBreak));
         }
@@ -553,28 +526,55 @@ impl InlineFormattingContextBuilder {
 
         let collapsed: Vec<char> = WhitespaceCollapse::new(
             text.chars(),
-            white_space_collapse,
-            self.last_inline_box_ended_with_collapsible_white_space,
+            info.style.clone_white_space_collapse(),
+            trim_beginning_white_space,
         )
         .collect();
         // Collapsing only drops characters and turns white space into spaces, so each remaining
         // character is the first DOM character from where the previous one was taken that it
         // can have come from.
-        let mut dom_offsets = Vec::with_capacity(collapsed.len() + 1);
+        let mut collapsed_offsets = Vec::with_capacity(collapsed.len());
         let mut end = piece_start;
         let mut offset = piece_start;
         for character in text.chars() {
-            if let Some(&wanted) = collapsed.get(dom_offsets.len()) &&
+            if let Some(&wanted) = collapsed.get(collapsed_offsets.len()) &&
                 (wanted == character ||
                     (wanted == ' ' && Self::is_document_white_space(character)))
             {
-                dom_offsets.push(offset);
+                collapsed_offsets.push(offset);
                 end = offset + character.len_utf16() as u32;
             }
             offset += character.len_utf16() as u32;
         }
-        if dom_offsets.is_empty() {
+        if collapsed_offsets.is_empty() {
             return None;
+        }
+
+        // `text-transform` can turn one character into several (ß into SS), which all get the
+        // offset of the one they came from. Other transformations replace characters one by one.
+        let rendered: Vec<char> = rendered.chars().collect();
+        let mut dom_offsets = Vec::with_capacity(rendered.len() + 1);
+        for (&character, &offset) in collapsed.iter().zip(&collapsed_offsets) {
+            let rest = &rendered[dom_offsets.len()..];
+            let produced = |expansion: &mut dyn Iterator<Item = char>| {
+                let mut count = 0;
+                for expected in expansion {
+                    if rest.get(count) != Some(&expected) {
+                        return None;
+                    }
+                    count += 1;
+                }
+                Some(count)
+            };
+            let count = if rest.first() == Some(&character) {
+                1
+            } else {
+                produced(&mut character.to_uppercase())
+                    .or_else(|| produced(&mut character.to_lowercase()))
+                    .unwrap_or(1)
+            };
+            let count = count.min(rest.len());
+            dom_offsets.extend(std::iter::repeat_n(offset, count));
         }
         dom_offsets.push(end);
         Some((node, dom_offsets, TextOriginKind::Text))
@@ -638,7 +638,7 @@ fn preserve_segment_break() -> bool {
 /// The characters that layout shapes and renders for `text`, after white space collapsing,
 /// `text-transform` and `-webkit-text-security`. `trim_beginning_white_space` and
 /// `on_word_boundary` describe the inline formatting context just before `text`.
-pub(crate) fn rendered_characters<'text>(
+fn rendered_characters<'text>(
     text: &'text str,
     style: &ComputedValues,
     trim_beginning_white_space: bool,

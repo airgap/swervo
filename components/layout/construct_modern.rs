@@ -81,7 +81,7 @@ impl<'dom> ModernContainerJob<'dom> {
                     }
                     last_style_from_display_contents = flex_text_run.style_from_display_contents;
                     inline_formatting_context_builder
-                        .push_text(flex_text_run.text, 0, &flex_text_run.info);
+                        .push_text(flex_text_run.text, &flex_text_run.info);
                 }
 
                 let inline_formatting_context = inline_formatting_context_builder
