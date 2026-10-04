@@ -2676,8 +2676,11 @@ impl Node {
             }),
         );
 
-        parent_document.remove_script_and_layout_blocker(cx);
+        // The post-connection steps can run script in any realm (an inserted iframe fires `load`
+        // synchronously, possibly at a listener from the node's old document), so the document
+        // that holds them must be the last one released.
         from_document.remove_script_and_layout_blocker(cx);
+        parent_document.remove_script_and_layout_blocker(cx);
     }
 
     /// <https://dom.spec.whatwg.org/#concept-node-replace-all>
