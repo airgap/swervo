@@ -896,25 +896,36 @@ pub fn process_offset_parent_query(
     scroll_tree: &ScrollTree,
     node: ServoLayoutNode<'_>,
 ) -> Option<OffsetParentResponse> {
-    // Only consider the first fragment of the node found as per a
+    // The position comes from the first fragment of the node as per a
     // possible interpretation of the specification: "[...] return the
     // y-coordinate of the top border edge of the first CSS layout box
     // associated with the element [...]"
     //
-    // FIXME: Browsers implement this all differently (e.g., [1]) -
-    // Firefox does returns the union of all layout elements of some
-    // sort. Chrome returns the first fragment for a block element (the
-    // same as ours) or the union of all associated fragments in the
-    // first containing block fragment for an inline element. We could
-    // implement Chrome's behavior, but our fragment tree currently
-    // provides insufficient information.
+    // Browsers implement the size differently (e.g., [1]). Like Chrome, an
+    // inline box split across lines takes its `offsetWidth` and `offsetHeight`
+    // from the union of all its fragments, keeping the origin of the first
+    // one; any other box uses its first fragment.
     //
     // [1]: https://github.com/w3c/csswg-drafts/issues/4541
     // > 1. If the element is the HTML body element or does not have any associated CSS
     //      layout box return zero and terminate this algorithm.
-    let fragment = node.fragments_for_pseudo(None).first().cloned()?;
+    let fragments = node.fragments_for_pseudo(None);
+    let fragment = fragments.first().cloned()?;
     let mut border_box =
         fragment.cumulative_box_area_rect(BoxAreaType::Border, layout_thread.into())?;
+    if fragment
+        .retrieve_box_fragment()
+        .is_some_and(|box_fragment| box_fragment.with_style().is_inline_box())
+    {
+        border_box.size = fragments
+            .iter()
+            .skip(1)
+            .filter_map(|fragment| {
+                fragment.cumulative_box_area_rect(BoxAreaType::Border, layout_thread.into())
+            })
+            .fold(border_box, |unioned_rect, rect| rect.union(&unioned_rect))
+            .size;
+    }
     let cumulative_sticky_offsets = fragment
         .retrieve_box_fragment()
         .and_then(|box_fragment| box_fragment.spatial_tree_node())

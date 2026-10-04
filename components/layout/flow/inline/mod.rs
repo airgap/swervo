@@ -2020,10 +2020,78 @@ impl InlineFormattingContextLayout<'_> {
         if self.text_wrap_mode == TextWrapMode::Nowrap {
             return;
         }
-        if !self.unbreakable_segment_fits_on_line() {
-            self.process_line_break(false /* forced_line_break */);
+
+        // Inline boxes that open right before the soft wrap opportunity belong to the line
+        // after it, along with their inline-start padding, border and margin, like in Chrome
+        // and Firefox. Otherwise `foo <a>bar</a>` breaking before "bar" leaves an empty
+        // fragment of the `<a>` at the end of the first line, which then becomes the box that
+        // `offsetTop` and `getClientRects()` report first.
+        let trailing_inline_box_starts = self
+            .current_line_segment
+            .line_items
+            .iter()
+            .rev()
+            .take_while(|item| matches!(item, LineItem::InlineStartBoxPaddingBorderMargin(_)))
+            .count();
+        let split_index = self.current_line_segment.line_items.len() - trailing_inline_box_starts;
+        let inline_box_starts = self.current_line_segment.line_items.split_off(split_index);
+        let inline_box_starts_size = inline_box_starts
+            .iter()
+            .map(|item| {
+                let (padding, border, margin) = self.inline_pbm_of_line_item(item);
+                padding + border + margin
+            })
+            .sum();
+        self.current_line_segment.inline_size -= inline_box_starts_size;
+        self.current_line_segment.has_inline_pbm = self
+            .current_line_segment
+            .line_items
+            .iter()
+            .any(|item| self.line_item_has_inline_pbm(item));
+
+        if !self.current_line_segment.line_items.is_empty() {
+            if !self.unbreakable_segment_fits_on_line() {
+                self.process_line_break(false /* forced_line_break */);
+            }
+            self.commit_current_segment_to_line();
         }
-        self.commit_current_segment_to_line();
+
+        for item in inline_box_starts {
+            self.current_line_segment.has_inline_pbm |= self.line_item_has_inline_pbm(&item);
+            self.current_line_segment.line_items.push(item);
+        }
+        self.current_line_segment.inline_size += inline_box_starts_size;
+    }
+
+    /// The inline-axis padding, border and margin that an inline box start or end line item
+    /// adds to its line.
+    fn inline_pbm_of_line_item(&self, item: &LineItem) -> (Au, Au, Au) {
+        let (identifier, is_start) = match item {
+            LineItem::InlineStartBoxPaddingBorderMargin(identifier) => (identifier, true),
+            LineItem::InlineEndBoxPaddingBorderMargin(identifier) => (identifier, false),
+            _ => return (Au::zero(), Au::zero(), Au::zero()),
+        };
+        let pbm = &self.inline_box_states[identifier.index_in_inline_boxes as usize].pbm;
+        if is_start {
+            (
+                pbm.padding.inline_start,
+                pbm.border.inline_start,
+                pbm.margin.inline_start.auto_is(Au::zero),
+            )
+        } else {
+            (
+                pbm.padding.inline_end,
+                pbm.border.inline_end,
+                pbm.margin.inline_end.auto_is(Au::zero),
+            )
+        }
+    }
+
+    /// Mirrors how [`Self::start_inline_box()`] and [`Self::finish_inline_box()`] set
+    /// `has_inline_pbm`: a negative margin counts even if the sum is zero.
+    fn line_item_has_inline_pbm(&self, item: &LineItem) -> bool {
+        let (padding, border, margin) = self.inline_pbm_of_line_item(item);
+        !padding.is_zero() || !border.is_zero() || !margin.is_zero()
     }
 
     /// Commit the current unbrekable segment to the current line. In addition, this will
