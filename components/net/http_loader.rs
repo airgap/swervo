@@ -695,8 +695,6 @@ async fn obtain_response(
                 permit
             };
 
-            // TODO(#21271) response_start: immediately after receiving first byte of response
-
             let msg = if let Some(request_id) = request_id {
                 if let Some(pipeline_id) = pipeline_id {
                     if let Some(browsing_context_id) = browsing_context_id {
@@ -2264,6 +2262,9 @@ async fn http_network_fetch(
             (res, msg)
         },
     };
+    context
+        .timing
+        .set_attribute(ResourceAttribute::ResponseStart);
 
     if log_enabled!(log::Level::Info) {
         debug!("{:?} response for {}", res.version(), url);

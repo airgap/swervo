@@ -1492,6 +1492,12 @@ impl FetchResponseListener for ParserContext {
             about_base_url: document.about_base_url(),
             resource_header: vec![],
         };
+        // Pages read `performance.timing` and measure from navigation marks while the document
+        // is still arriving, so the fetch timing up to the response headers is recorded now.
+        // `process_response_eof` replaces it with the final timing, which includes responseEnd.
+        if let Some(timing) = metadata.as_ref().and_then(|metadata| metadata.timing.clone()) {
+            document.set_resource_fetch_timing(timing);
+        }
         self.submit_resource_timing(cx);
 
         // Part of https://html.spec.whatwg.org/multipage/#loading-a-document

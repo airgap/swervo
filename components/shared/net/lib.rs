@@ -361,10 +361,20 @@ impl FetchTaskTarget for IpcSender<FetchResponseMsg> {
     }
 
     fn process_response(&mut self, request: &Request, response: &Response) {
-        let _ = self.send(FetchResponseMsg::ProcessResponse(
-            request.id,
-            response.metadata(),
-        ));
+        let mut metadata = response.metadata();
+        // A document exposes its navigation timing while it is still streaming in, long
+        // before `ProcessResponseEOF` carries the final timing.
+        if request.is_navigation_request() &&
+            let Ok(
+                FetchMetadata::Unfiltered(metadata) |
+                FetchMetadata::Filtered {
+                    unsafe_: metadata, ..
+                },
+            ) = &mut metadata
+        {
+            metadata.timing = Some(response.get_resource_timing().inner().clone());
+        }
+        let _ = self.send(FetchResponseMsg::ProcessResponse(request.id, metadata));
     }
 
     fn process_response_chunk(&mut self, request: &Request, chunk: Vec<u8>) {
