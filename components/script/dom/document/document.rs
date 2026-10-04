@@ -195,6 +195,7 @@ use crate::dom::selection::Selection;
 use crate::dom::servoparser::ServoParser;
 use crate::dom::shadowroot::ShadowRoot;
 use crate::dom::storageevent::StorageEvent;
+use crate::dom::svg::svgsvgelement::SVGSVGElement;
 use crate::dom::text::Text;
 use crate::dom::touchevent::TouchEvent as DomTouchEvent;
 use crate::dom::touchlist::TouchList;
@@ -511,6 +512,16 @@ pub(crate) struct Document {
     /// It is safe to use FxBuildHasher here as Atoms are in the string_cache
     form_id_listener_map:
         DomRefCell<HashMapTracedValues<Atom, HashSet<Dom<Element>>, FxBuildHasher>>,
+    /// Map from ID to the inline `<svg>` roots whose cached serialization looked that ID up
+    /// (successfully or not) to inline a `<use href>` or `url(#id)` target living outside
+    /// their own subtree. Those serializations are stale as soon as an element with the ID
+    /// enters or leaves the document, or the target's subtree mutates.
+    svg_id_reference_listeners:
+        DomRefCell<HashMapTracedValues<Atom, HashSet<Dom<SVGSVGElement>>, FxBuildHasher>>,
+    /// Set while an svg subtree is being serialized: the temporary clones it inserts and
+    /// removes register IDs and mutate svg subtrees, which must not invalidate other svgs
+    /// (each re-serialization would then invalidate the others, forever).
+    svg_serialization_in_progress: Cell<bool>,
     #[no_trace]
     interactive_time: DomRefCell<ProgressiveWebMetrics>,
     #[no_trace]
@@ -1179,12 +1190,58 @@ impl Document {
     pub(crate) fn unregister_element_id(&self, cx: &mut JSContext, id: &Atom) {
         self.id_map.remove(id);
         self.reset_form_owner_for_listeners(cx, id);
+        self.invalidate_svgs_referencing_id(id);
     }
 
     /// Associate an element present in this document with the provided id.
     pub(crate) fn register_element_id(&self, cx: &mut JSContext, element: &Element, id: &Atom) {
         self.id_map.add(id, element);
         self.reset_form_owner_for_listeners(cx, id);
+        self.invalidate_svgs_referencing_id(id);
+    }
+
+    pub(crate) fn register_svg_id_reference_listener(&self, id: Atom, svg: &SVGSVGElement) {
+        self.svg_id_reference_listeners
+            .borrow_mut()
+            .entry(id)
+            .or_default()
+            .insert(Dom::from_ref(svg));
+    }
+
+    pub(crate) fn unregister_svg_id_reference_listener(&self, id: &Atom, svg: &SVGSVGElement) {
+        let mut map = self.svg_id_reference_listeners.borrow_mut();
+        if let Some(listeners) = map.get_mut(id) {
+            listeners.remove(&Dom::from_ref(svg));
+            if listeners.is_empty() {
+                map.remove(id);
+            }
+        }
+    }
+
+    pub(crate) fn has_svg_id_reference_listeners(&self) -> bool {
+        !self.svg_id_reference_listeners.borrow().is_empty()
+    }
+
+    /// Invalidate the serialization of every svg that resolved `id` from outside its subtree.
+    pub(crate) fn invalidate_svgs_referencing_id(&self, id: &Atom) {
+        if self.svg_serialization_in_progress.get() {
+            return;
+        }
+        let listeners: Vec<DomRoot<SVGSVGElement>> = match self
+            .svg_id_reference_listeners
+            .borrow()
+            .get(id)
+        {
+            Some(listeners) => listeners.iter().map(|svg| svg.as_rooted()).collect(),
+            None => return,
+        };
+        for svg in listeners {
+            svg.invalidate_cached_serialized_subtree_and_rasterization_result();
+        }
+    }
+
+    pub(crate) fn set_svg_serialization_in_progress(&self, in_progress: bool) {
+        self.svg_serialization_in_progress.set(in_progress);
     }
 
     /// Remove any existing association between the provided name and any elements in this document.
@@ -3807,6 +3864,8 @@ impl Document {
             spurious_animation_frames: Cell::new(0),
             fullscreen_element: MutNullableDom::new(None),
             form_id_listener_map: Default::default(),
+            svg_id_reference_listeners: Default::default(),
+            svg_serialization_in_progress: Cell::new(false),
             interactive_time: DomRefCell::new(interactive_time),
             tti_window: DomRefCell::new(InteractiveWindow::default()),
             canceller,

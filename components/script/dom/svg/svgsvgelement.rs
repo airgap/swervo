@@ -57,6 +57,11 @@ pub(crate) struct SVGSVGElement {
     /// The `svg_paint_signature` of this element's style that the cached serialization was
     /// built with; layout re-requests serialization when the current style no longer matches.
     cached_paint_signature: DomRefCell<Option<String>>,
+    /// The IDs the cached serialization looked up in the document to inline targets defined
+    /// outside this subtree, found or not; registered with the document so that the
+    /// serialization is invalidated when any of them appears, disappears or changes.
+    #[no_trace]
+    referenced_ids: DomRefCell<Vec<Atom>>,
 }
 
 impl SVGSVGElement {
@@ -70,6 +75,7 @@ impl SVGSVGElement {
             uuid: Uuid::new_v4().to_string(),
             cached_serialized_data_url: Default::default(),
             cached_paint_signature: Default::default(),
+            referenced_ids: Default::default(),
         }
     }
 
@@ -102,13 +108,18 @@ impl SVGSVGElement {
             .style_from_last_restyle()
             .map(|style| svg_paint_signature(&style));
 
-        let mut cloned_nodes = self.process_use_elements(cx);
+        let document = self.owner_document();
+        self.unregister_referenced_ids();
+        document.set_svg_serialization_in_progress(true);
+        let mut referenced_ids = HashSet::new();
+
+        let mut cloned_nodes = self.process_use_elements(cx, &mut referenced_ids);
         // Order matters: lowering `<foreignObject>` and `<image href>` first means the
         // `<image>` elements those passes insert (which carry `mask`/`clip-path`/`filter`
         // attributes) are seen by the external-reference pass below.
         cloned_nodes.extend(self.process_foreign_objects(cx));
         cloned_nodes.extend(self.process_image_elements(cx));
-        cloned_nodes.extend(self.process_external_references(cx));
+        cloned_nodes.extend(self.process_external_references(cx, &mut referenced_ids));
 
         let rewrite_attributes = |element: &Element, attributes: &mut Vec<(QualName, AttrValue)>| {
             self.rewrite_serialized_attributes(element, attributes)
@@ -118,6 +129,11 @@ impl SVGSVGElement {
             .xml_serialize_with_attribute_rewrite(TraversalScope::IncludeNode, &rewrite_attributes);
 
         self.cleanup_cloned_nodes(cx, &cloned_nodes);
+        document.set_svg_serialization_in_progress(false);
+        for id in &referenced_ids {
+            document.register_svg_id_reference_listener(id.clone(), self);
+        }
+        *self.referenced_ids.borrow_mut() = referenced_ids.into_iter().collect();
         *self.cached_paint_signature.borrow_mut() = paint_signature;
 
         let Ok(xml_source) = serialize_result else {
@@ -134,14 +150,25 @@ impl SVGSVGElement {
         };
     }
 
-    fn process_use_elements(&self, cx: &mut JSContext) -> Vec<DomRoot<Node>> {
+    fn unregister_referenced_ids(&self) {
+        let document = self.owner_document();
+        for id in self.referenced_ids.take() {
+            document.unregister_svg_id_reference_listener(&id, self);
+        }
+    }
+
+    fn process_use_elements(
+        &self,
+        cx: &mut JSContext,
+        referenced_ids: &mut HashSet<Atom>,
+    ) -> Vec<DomRoot<Node>> {
         let mut cloned_nodes = Vec::new();
         let root_node = self.upcast::<Node>();
 
         for node in root_node.traverse_preorder(ShadowIncluding::No) {
             if let Some(element) = node.downcast::<Element>() &&
                 element.local_name() == &local_name!("use") &&
-                let Some(cloned) = self.process_single_use_element(cx, element)
+                let Some(cloned) = self.process_single_use_element(cx, element, referenced_ids)
             {
                 cloned_nodes.push(cloned);
             }
@@ -154,6 +181,7 @@ impl SVGSVGElement {
         &self,
         cx: &mut JSContext,
         use_element: &Element,
+        referenced_ids: &mut HashSet<Atom>,
     ) -> Option<DomRoot<Node>> {
         let href = use_element.get_string_attribute(&local_name!("href"));
         let effective_href = if href.str().is_empty() {
@@ -167,6 +195,7 @@ impl SVGSVGElement {
         if id_str.is_empty() {
             return None;
         }
+        referenced_ids.insert(Atom::from(id_str));
         let id = DOMString::from(id_str);
         let document = self.upcast::<Node>().owner_doc();
         let referenced_element = document.GetElementById(cx, id)?;
@@ -191,7 +220,14 @@ impl SVGSVGElement {
             CloneChildrenFlag::CloneChildren,
             None,
         );
-        // Park the clone inside a <defs> wrapper so it is resolvable by id but never paints.
+        Some(self.append_in_defs(cx, &cloned_node))
+    }
+
+    /// Append `node` to this svg inside a `<defs>` wrapper, so that it is resolvable by id but
+    /// never paints, and return the wrapper.
+    fn append_in_defs(&self, cx: &mut JSContext, node: &Node) -> DomRoot<Node> {
+        let document = self.owner_document();
+        let root_node = self.upcast::<Node>();
         let defs = Element::create(
             cx,
             QualName::new(None, ns!(svg), LocalName::from("defs")),
@@ -202,10 +238,9 @@ impl SVGSVGElement {
             None,
         );
         let defs_node = DomRoot::from_ref(defs.upcast::<Node>());
-        let _ = defs_node.AppendChild(cx, &cloned_node);
+        let _ = defs_node.AppendChild(cx, node);
         let _ = root_node.AppendChild(cx, &defs_node);
-
-        Some(defs_node)
+        defs_node
     }
 
     /// Inline elements referenced from this subtree via `url(#id)` in `mask`, `clip-path`,
@@ -215,7 +250,11 @@ impl SVGSVGElement {
     /// can't resolve those ids and drops the reference entirely (an unmasked rect renders as a
     /// square where the page expects a circle). Referenced elements are cloned in, recursively
     /// (a cloned mask may itself reference a gradient), and removed after serialization.
-    fn process_external_references(&self, cx: &mut JSContext) -> Vec<DomRoot<Node>> {
+    fn process_external_references(
+        &self,
+        cx: &mut JSContext,
+        resolved_ids: &mut HashSet<Atom>,
+    ) -> Vec<DomRoot<Node>> {
         let reference_attributes: Vec<LocalName> = [
             "mask",
             "clip-path",
@@ -259,6 +298,7 @@ impl SVGSVGElement {
                 if !processed_ids.insert(id.clone()) {
                     continue;
                 }
+                resolved_ids.insert(Atom::from(&*id));
                 let Some(referenced_element) = document.GetElementById(cx, DOMString::from(id))
                 else {
                     continue;
@@ -1121,6 +1161,8 @@ impl VirtualMethods for SVGSVGElement {
         if let Some(s) = self.super_type() {
             s.unbind_from_tree(cx, context);
         }
+
+        self.unregister_referenced_ids();
 
         self.invalidate_cached_serialized_subtree_and_rasterization_result();
     }
