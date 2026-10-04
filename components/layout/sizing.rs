@@ -122,6 +122,7 @@ pub(crate) fn outer_inline(
     get_inline_content_size: impl FnOnce(&ConstraintSpace) -> InlineContentSizesResult,
     get_tentative_block_content_size: impl FnOnce(Option<AspectRatio>) -> Option<ContentSizes>,
 ) -> InlineContentSizesResult {
+    let containing_block = &containing_block.for_child_sizing(is_replaced);
     let ContentBoxSizesAndPBM {
         content_box_sizes,
         pbm,
@@ -180,11 +181,14 @@ pub(crate) fn outer_inline(
             // This assumes that there is no preferred aspect ratio, or that there is no
             // block size constraint to be transferred so the ratio is irrelevant.
             // We only get into here for anonymous blocks, for which the assumption holds.
-            ConstraintSpace::new(
-                containing_block.size.block.into(),
-                containing_block.style,
-                None,
-            )
+            ConstraintSpace {
+                replaced_percentage_block_size: containing_block.replaced_percentage_block_size,
+                ..ConstraintSpace::new(
+                    containing_block.size.block.into(),
+                    containing_block.style,
+                    None,
+                )
+            }
         };
         get_inline_content_size(&constraint_space)
     });

@@ -1829,7 +1829,7 @@ impl FlexItem<'_> {
             size: ContainingBlockSize {
                 inline: inline_size,
                 block: block_size,
-                replaced_percentage_block_size: None,
+                table_cell: None,
             },
             style: item_style,
         };
@@ -2522,7 +2522,7 @@ impl FlexItemBox {
             size: ContainingBlockSize {
                 inline: inline_size,
                 block: tentative_block_size,
-                replaced_percentage_block_size: None,
+                table_cell: None,
             },
             style,
         };

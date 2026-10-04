@@ -282,7 +282,7 @@ impl BlockLevelBox {
             size: ContainingBlockSize {
                 inline: inline_size,
                 block: tentative_block_size,
-                replaced_percentage_block_size: None,
+                table_cell: None,
             },
             style,
         };
@@ -343,7 +343,7 @@ impl OutsideMarker {
             size: ContainingBlockSize {
                 inline: content_sizes.sizes.max_content,
                 block: SizeConstraint::default(),
-                replaced_percentage_block_size: None,
+                table_cell: None,
             },
             style,
         };
@@ -1146,7 +1146,7 @@ impl IndependentFormattingContext {
             depends_on_block_constraints,
             ..
         } = self.layout_style().content_box_sizes_and_padding_border_margin(
-            &containing_block.for_child_sizing(self.is_replaced()),
+            &containing_block.for_in_flow_block_level_child_sizing(self),
         );
 
         let (margin_block_start, margin_block_end) =
@@ -1311,7 +1311,7 @@ impl IndependentFormattingContext {
                         // for replaced elements, whose layout doesn't use the block size of the
                         // containing block for children.
                         block: containing_block_block_size(&cache, aspect_ratio_block_size),
-                        replaced_percentage_block_size: None,
+                        table_cell: None,
                     },
                     style,
                 },
@@ -1390,7 +1390,7 @@ impl IndependentFormattingContext {
                         size: ContainingBlockSize {
                             inline: proposed_inline_size,
                             block: containing_block_block_size(&cache, aspect_ratio_block_size),
-                            replaced_percentage_block_size: None,
+                            table_cell: None,
                         },
                         style,
                     },
@@ -1558,9 +1558,7 @@ fn solve_containing_block_padding_and_border_for_in_flow_box<'a>(
             size: ContainingBlockSize {
                 inline: containing_block.size.inline,
                 block: containing_block.size.block,
-                replaced_percentage_block_size: containing_block
-                    .size
-                    .replaced_percentage_block_size,
+                table_cell: containing_block.size.table_cell,
             },
             style,
         };
@@ -1588,9 +1586,10 @@ fn solve_containing_block_padding_and_border_for_in_flow_box<'a>(
         pbm,
         depends_on_block_constraints,
         ..
-    } = layout_style.content_box_sizes_and_padding_border_margin(
-        &containing_block.for_child_sizing(is_replaced),
-    );
+    } = layout_style.content_box_sizes_and_padding_border_margin(&match context {
+        Some(context) => containing_block.for_in_flow_block_level_child_sizing(context),
+        None => containing_block.for_child_sizing(false),
+    });
 
     let pbm_sums = pbm.sums_auto_is_zero(ignore_block_margins_for_stretch);
     let available_inline_size = Au::zero().max(containing_block.size.inline - pbm_sums.inline);
@@ -1681,7 +1680,7 @@ fn solve_containing_block_padding_and_border_for_in_flow_box<'a>(
         size: ContainingBlockSize {
             inline: inline_size,
             block: tentative_block_size,
-            replaced_percentage_block_size: None,
+            table_cell: None,
         },
         style,
     };
@@ -2256,7 +2255,7 @@ impl IndependentFormattingContext {
                 inline: inline_size,
                 block: aspect_ratio_block_size
                     .map_or(tentative_block_size, SizeConstraint::Definite),
-                replaced_percentage_block_size: None,
+                table_cell: None,
             },
             style,
         };

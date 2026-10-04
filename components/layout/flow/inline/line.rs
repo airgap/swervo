@@ -465,7 +465,7 @@ impl LineItemLayout<'_, '_> {
             size: ContainingBlockSize {
                 inline: content_rect.size.inline,
                 block: Default::default(),
-                replaced_percentage_block_size: None,
+                table_cell: None,
             },
             style: containing_block.style,
         };

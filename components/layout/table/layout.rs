@@ -53,7 +53,8 @@ use crate::style_ext::{
 };
 use crate::table::WeakTableLevelBox;
 use crate::{
-    ConstraintSpace, ContainingBlock, ContainingBlockSize, IndefiniteContainingBlock, WritingMode,
+    ConstraintSpace, ContainingBlock, ContainingBlockSize, IndefiniteContainingBlock,
+    TableCellChildConstraints, WritingMode,
 };
 
 #[derive(PartialEq)]
@@ -338,11 +339,19 @@ impl<'a> TableLayout<'a> {
                         }
                     }
                 } else {
-                    let constraint_space = ConstraintSpace::new(
-                        SizeConstraint::default(),
-                        &cell.context.base.style,
-                        cell.context.preferred_aspect_ratio(&padding_border_sums),
-                    );
+                    let constraint_space = ConstraintSpace {
+                        replaced_percentage_block_size: self
+                            .table_cell_child_constraints(
+                                &cell.context.base.style,
+                                padding_border_sums.block,
+                            )
+                            .replaced_percentage_block_size,
+                        ..ConstraintSpace::new(
+                            SizeConstraint::default(),
+                            &cell.context.base.style,
+                            cell.context.preferred_aspect_ratio(&padding_border_sums),
+                        )
+                    };
                     let inline_content_sizes = cell
                         .context
                         .inline_content_sizes(layout_context, &constraint_space)
@@ -727,6 +736,7 @@ impl<'a> TableLayout<'a> {
         let containing_block = IndefiniteContainingBlock {
             size: LogicalVec2::default(),
             style: &self.table.style,
+            replaced_percentage_block_size: None,
         };
         self.table
             .captions
@@ -1115,16 +1125,7 @@ impl<'a> TableLayout<'a> {
             border_spacing_spanned;
         total_cell_width = total_cell_width.max(Au::zero());
 
-        // Blink resolves percentage block sizes of a cell's replaced children against the cell's
-        // fixed block size, also while the rows are measured, so that an image with
-        // `height: 100%` doesn't make the row as tall as its natural height.
         let style = &cell.context.base.style;
-        let fixed_content_block_size = cell_fixed_block_size(style, writing_mode).map(|size| {
-            match style.get_position().box_sizing {
-                BoxSizing::ContentBox => size,
-                BoxSizing::BorderBox => (size - padding_border_sums.block).max(Au::zero()),
-            }
-        });
         let block = final_block_size.map_or_else(SizeConstraint::default, |block_size| {
             SizeConstraint::Definite((block_size - padding_border_sums.block).max(Au::zero()))
         });
@@ -1134,7 +1135,9 @@ impl<'a> TableLayout<'a> {
             size: ContainingBlockSize {
                 inline: total_cell_width,
                 block,
-                replaced_percentage_block_size: fixed_content_block_size,
+                table_cell: Some(
+                    self.table_cell_child_constraints(style, padding_border_sums.block),
+                ),
             },
             style,
         };
@@ -1155,6 +1158,38 @@ impl<'a> TableLayout<'a> {
             border,
             positioning_context,
         }
+    }
+
+    /// How the cell with the given style constrains the block sizes of its children.
+    fn table_cell_child_constraints(
+        &self,
+        cell_style: &ComputedValues,
+        padding_border_block_sum: Au,
+    ) -> TableCellChildConstraints {
+        // Blink resolves percentage block sizes of a cell's replaced children against the cell's
+        // fixed block size, also while the rows are measured and while the columns are sized, so
+        // that an image with `height: 100%` neither makes the row as tall as its natural height
+        // nor the column as wide as its natural width.
+        let writing_mode = self.table.style.writing_mode;
+        let replaced_percentage_block_size =
+            cell_fixed_block_size(cell_style, writing_mode).map(|size| {
+                match cell_style.get_position().box_sizing {
+                    BoxSizing::ContentBox => size,
+                    BoxSizing::BorderBox => (size - padding_border_block_sum).max(Au::zero()),
+                }
+            });
+        TableCellChildConstraints {
+            replaced_percentage_block_size,
+            is_restricted: self.is_restricted_cell(cell_style),
+        }
+    }
+
+    /// Whether the cell with the given style has a fixed block size or the table a non-`auto`
+    /// one, which Blink calls a restricted block size table cell.
+    fn is_restricted_cell(&self, cell_style: &ComputedValues) -> bool {
+        let writing_mode = self.table.style.writing_mode;
+        !matches!(self.table.style.box_size(writing_mode).block, Size::Initial) ||
+            cell_fixed_block_size(cell_style, writing_mode).is_some()
     }
 
     /// This is an implementation of *Row layout (first pass)* from
@@ -1573,7 +1608,7 @@ impl<'a> TableLayout<'a> {
             size: ContainingBlockSize {
                 inline: self.table_width + self.pbm.padding_border_sums.inline,
                 block: SizeConstraint::default(),
-                replaced_percentage_block_size: None,
+                table_cell: None,
             },
             style: &self.table.style,
         };
@@ -1644,7 +1679,7 @@ impl<'a> TableLayout<'a> {
             size: ContainingBlockSize {
                 inline: self.table_width,
                 block: containing_block_for_table.size.block,
-                replaced_percentage_block_size: None,
+                table_cell: None,
             },
             style: containing_block_for_children.style,
         };
@@ -1972,9 +2007,6 @@ impl<'a> TableLayout<'a> {
         dimensions: &TableAndTrackDimensions,
     ) {
         let table = self.table;
-        let writing_mode = containing_block_for_table.style.writing_mode;
-        let table_block_size_is_specified =
-            !matches!(table.style.box_size(writing_mode).block, Size::Initial);
         for row_index in 0..table.size.height {
             let mut relaid_out_row = false;
             for column_index in 0..table.size.width {
@@ -1988,9 +2020,7 @@ impl<'a> TableLayout<'a> {
                     unreachable!("Only cells are laid out");
                 };
                 let cell = cell.borrow();
-                if !table_block_size_is_specified &&
-                    cell_fixed_block_size(&cell.context.base.style, writing_mode).is_none()
-                {
+                if !self.is_restricted_cell(&cell.context.base.style) {
                     continue;
                 }
                 let coordinate = TableSlotCoordinates::new(column_index, row_index);
@@ -2404,7 +2434,7 @@ impl<'a> RowFragmentLayout<'a> {
             size: ContainingBlockSize {
                 inline: rect.size.inline,
                 block: SizeConstraint::Definite(rect.size.block),
-                replaced_percentage_block_size: None,
+                table_cell: None,
             },
             style: table_style,
         };
@@ -2450,7 +2480,7 @@ impl<'a> RowFragmentLayout<'a> {
             size: ContainingBlockSize {
                 inline: inline_size,
                 block: block_size,
-                replaced_percentage_block_size: None,
+                table_cell: None,
             },
             style: containing_block_for_logical_conversion.style,
         };

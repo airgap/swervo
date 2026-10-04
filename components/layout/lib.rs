@@ -44,6 +44,7 @@ use servo_arc::Arc as ServoArc;
 use style::logical_geometry::WritingMode;
 use style::properties::ComputedValues;
 
+use crate::formatting_contexts::IndependentFormattingContext;
 use crate::geom::LogicalVec2;
 use crate::sizing::SizeConstraint;
 use crate::style_ext::AspectRatio;
@@ -64,6 +65,8 @@ pub(crate) struct ConstraintSpace<'a> {
     pub block_size: SizeConstraint,
     pub style: &'a ComputedValues,
     pub preferred_aspect_ratio: Option<AspectRatio>,
+    /// See [`IndefiniteContainingBlock::replaced_percentage_block_size`].
+    pub replaced_percentage_block_size: Option<Au>,
 }
 
 impl<'a> ConstraintSpace<'a> {
@@ -76,6 +79,7 @@ impl<'a> ConstraintSpace<'a> {
             block_size,
             style,
             preferred_aspect_ratio,
+            replaced_percentage_block_size: None,
         }
     }
 }
@@ -86,6 +90,27 @@ impl<'a> ConstraintSpace<'a> {
 pub(crate) struct IndefiniteContainingBlock<'a> {
     pub size: LogicalVec2<Option<Au>>,
     pub style: &'a ComputedValues,
+    /// What percentage block sizes of replaced children resolve against instead of
+    /// `size.block`, see [`TableCellChildConstraints::replaced_percentage_block_size`].
+    pub replaced_percentage_block_size: Option<Au>,
+}
+
+impl<'a> IndefiniteContainingBlock<'a> {
+    /// The containing block that the sizing properties of a child resolve against.
+    fn for_child_sizing(&self, child_is_replaced: bool) -> Self {
+        let block = match self.replaced_percentage_block_size {
+            Some(block_size) if child_is_replaced => Some(block_size),
+            _ => self.size.block,
+        };
+        Self {
+            size: LogicalVec2 {
+                inline: self.size.inline,
+                block,
+            },
+            style: self.style,
+            replaced_percentage_block_size: self.replaced_percentage_block_size,
+        }
+    }
 }
 
 impl<'a> From<&ConstraintSpace<'a>> for IndefiniteContainingBlock<'a> {
@@ -96,6 +121,7 @@ impl<'a> From<&ConstraintSpace<'a>> for IndefiniteContainingBlock<'a> {
                 block: constraint_space.block_size.to_definite(),
             },
             style: constraint_space.style,
+            replaced_percentage_block_size: constraint_space.replaced_percentage_block_size,
         }
     }
 }
@@ -108,6 +134,10 @@ impl<'a> From<&'_ ContainingBlock<'a>> for IndefiniteContainingBlock<'a> {
                 block: containing_block.size.block.to_definite(),
             },
             style: containing_block.style,
+            replaced_percentage_block_size: containing_block
+                .size
+                .table_cell
+                .and_then(|table_cell| table_cell.replaced_percentage_block_size),
         }
     }
 }
@@ -117,6 +147,7 @@ impl<'a> From<&'_ DefiniteContainingBlock<'a>> for IndefiniteContainingBlock<'a>
         Self {
             size: containing_block.size.map(|v| Some(*v)),
             style: containing_block.style,
+            replaced_percentage_block_size: None,
         }
     }
 }
@@ -125,10 +156,21 @@ impl<'a> From<&'_ DefiniteContainingBlock<'a>> for IndefiniteContainingBlock<'a>
 pub(crate) struct ContainingBlockSize {
     inline: Au,
     block: SizeConstraint,
-    /// What percentage block sizes of replaced children resolve against instead of `block`.
-    /// Table cells with a fixed block size provide it, as Blink does with its replaced
-    /// percentage resolution block size.
+    /// How a table cell constrains the block sizes of its children, `None` for other boxes.
+    table_cell: Option<TableCellChildConstraints>,
+}
+
+/// How a table cell constrains the block sizes of its children, as in Blink.
+#[derive(Clone, Copy, Debug, MallocSizeOf, PartialEq)]
+pub(crate) struct TableCellChildConstraints {
+    /// What percentage block sizes of replaced children resolve against instead of the block
+    /// size of the cell: its fixed block size, or `None` to treat them as indefinite. Blink
+    /// calls this the replaced percentage resolution block size, and uses it both while the
+    /// rows are measured and afterwards.
     replaced_percentage_block_size: Option<Au>,
+    /// Whether the cell has a fixed block size or the table a non-`auto` one, which Blink calls
+    /// a restricted block size table cell.
+    is_restricted: bool,
 }
 
 pub(crate) struct ContainingBlock<'a> {
@@ -145,12 +187,31 @@ impl<'a> ContainingBlock<'a> {
     /// The containing block that the sizing properties of a child resolve against.
     fn for_child_sizing(&self, child_is_replaced: bool) -> IndefiniteContainingBlock<'a> {
         let mut containing_block = IndefiniteContainingBlock::from(self);
-        if let Some(block_size) = self
-            .size
-            .replaced_percentage_block_size
-            .filter(|_| child_is_replaced)
+        if let Some(table_cell) = self.size.table_cell.filter(|_| child_is_replaced) {
+            containing_block.size.block = table_cell.replaced_percentage_block_size;
+        }
+        containing_block
+    }
+
+    /// The containing block that the sizing properties of an in-flow block-level child resolve
+    /// against.
+    fn for_in_flow_block_level_child_sizing(
+        &self,
+        child: &IndependentFormattingContext,
+    ) -> IndefiniteContainingBlock<'a> {
+        let mut containing_block = self.for_child_sizing(child.is_replaced());
+        // While the rows are measured, Blink sizes a scroll container with a percentage block
+        // size that is a child of a restricted cell as if the percentage resolved against zero,
+        // so that its overflow doesn't make the row taller than the cell wants to be.
+        // <https://drafts.csswg.org/css-tables-3/#row-layout> describes a similar rule.
+        let is_measuring_restricted_cell = !self.size.block.is_definite() &&
+            self.size
+                .table_cell
+                .is_some_and(|table_cell| table_cell.is_restricted);
+        if is_measuring_restricted_cell &&
+            child.is_block_axis_scroll_container_with_percentage_size()
         {
-            containing_block.size.block = Some(block_size);
+            containing_block.size.block = Some(Au(0));
         }
         containing_block
     }
@@ -162,7 +223,7 @@ impl<'a> From<&'_ DefiniteContainingBlock<'a>> for ContainingBlock<'a> {
             size: ContainingBlockSize {
                 inline: definite.size.inline,
                 block: SizeConstraint::Definite(definite.size.block),
-                replaced_percentage_block_size: None,
+                table_cell: None,
             },
             style: definite.style,
         }

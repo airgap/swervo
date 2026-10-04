@@ -720,7 +720,7 @@ impl IndependentFormattingContext {
             size: ContainingBlockSize {
                 inline: inline_size,
                 block: tentative_block_size,
-                replaced_percentage_block_size: None,
+                table_cell: None,
             },
             style: &style,
         };

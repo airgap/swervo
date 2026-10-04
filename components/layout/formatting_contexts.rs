@@ -12,6 +12,7 @@ use style::context::SharedStyleContext;
 use style::logical_geometry::Direction;
 use style::properties::ComputedValues;
 use style::selector_parser::PseudoElement;
+use style::values::specified::Overflow;
 use style::values::generics::length::GenericLengthPercentageOrAuto;
 use style::values::specified::align::AlignFlags;
 
@@ -26,7 +27,7 @@ use crate::layout_box_base::{IndependentFormattingContextLayoutResult, LayoutBox
 use crate::positioned::{LayoutRootLayoutInputs, PositioningContext};
 use crate::replaced::ReplacedContents;
 use crate::sizing::{
-    self, ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, LazySize,
+    self, ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, LazySize, Size,
 };
 use crate::style_ext::{AspectRatio, ComputedValuesExt, Display, DisplayInside, LayoutStyle};
 use crate::table::Table;
@@ -463,6 +464,24 @@ impl IndependentFormattingContext {
             &self.contents,
             IndependentFormattingContextContents::Table(_)
         )
+    }
+
+    /// Whether this box is a scroll container in its block axis and has a preferred block size
+    /// that depends on a percentage.
+    pub(crate) fn is_block_axis_scroll_container_with_percentage_size(&self) -> bool {
+        let style = self.style();
+        let writing_mode = style.writing_mode;
+        let overflow = style.effective_overflow(self.base_fragment_info().flags);
+        let block_axis_overflow = if writing_mode.is_horizontal() {
+            overflow.y
+        } else {
+            overflow.x
+        };
+        matches!(block_axis_overflow, Overflow::Auto | Overflow::Scroll) &&
+            matches!(
+                style.box_size(writing_mode).block,
+                Size::Numeric(size) if size.has_percentage()
+            )
     }
 
     #[inline]

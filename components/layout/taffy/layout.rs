@@ -177,11 +177,8 @@ impl taffy::LayoutPartialTree for TaffyContainerContext<'_> {
 
                 // Compute inline size
                 let inline_size = content_box_known_dimensions.width.unwrap_or_else(|| {
-                    let constraint_space = ConstraintSpace {
-                        block_size: tentative_block_size,
-                        style,
-                        preferred_aspect_ratio,
-                    };
+                    let constraint_space =
+                        ConstraintSpace::new(tentative_block_size, style, preferred_aspect_ratio);
 
                     // TODO: pass min- and max- size
                     let result = independent_context
@@ -209,7 +206,7 @@ impl taffy::LayoutPartialTree for TaffyContainerContext<'_> {
                     size: ContainingBlockSize {
                         inline: Au::from_f32_px(inline_size),
                         block: tentative_block_size,
-                        replaced_percentage_block_size: None,
+                        table_cell: None,
                     },
                     style,
                 };
@@ -335,7 +332,7 @@ impl ComputeInlineContentSizes for TaffyContainer {
             size: ContainingBlockSize {
                 inline: Au::zero(),
                 block: SizeConstraint::default(),
-                replaced_percentage_block_size: None,
+                table_cell: None,
             },
             style,
         };
