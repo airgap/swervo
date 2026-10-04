@@ -479,7 +479,19 @@ impl DisplayListBuilder<'_> {
         let effects = style.get_effects();
         let transform_style = style.used_transform_style(fragment.base.flags);
         let has_mask = fragment.has_mask_image();
-        if effects.filter.0.is_empty() &&
+        // Every stacking context is an isolated group for its blended descendants
+        // (https://drafts.fxtf.org/compositing-1/#isolation), so one that contains a
+        // `mix-blend-mode` child must reach WebRender flagged as a blend container even when it
+        // has no effect of its own; otherwise the child blends with whatever lies behind it.
+        // Blending elements always establish stacking contexts, and children stolen from
+        // stacking containers are hoisted into the nearest real one, so direct children suffice.
+        let is_blend_container = stacking_context.children.iter().any(|child| {
+            child.fragment().is_some_and(|child| {
+                child.style().get_effects().mix_blend_mode != ComputedMixBlendMode::Normal
+            })
+        });
+        if !is_blend_container &&
+            effects.filter.0.is_empty() &&
             effects.opacity == 1.0 &&
             effects.mix_blend_mode == ComputedMixBlendMode::Normal &&
             !style.has_effective_transform_or_perspective(FragmentFlags::empty()) &&
@@ -505,12 +517,6 @@ impl DisplayListBuilder<'_> {
             ));
         }
 
-        // TODO(jdm): WebRender now requires us to create stacking context items
-        //            with the IS_BLEND_CONTAINER flag enabled if any children
-        //            of the stacking context have a blend mode applied.
-        //            This will require additional tracking during layout
-        //            before we start collecting stacking contexts so that
-        //            information will be available when we reach this point.
         let spatial_id = self.spatial_id(stacking_context.scroll_tree_node_id);
 
         // WebRender has two different ways of expressing "no clip." ClipChainId::INVALID
@@ -542,7 +548,11 @@ impl DisplayListBuilder<'_> {
             &filters,
             &[], // filter_datas
             wr::RasterSpace::Screen,
-            wr::StackingContextFlags::empty(),
+            if is_blend_container {
+                wr::StackingContextFlags::IS_BLEND_CONTAINER
+            } else {
+                wr::StackingContextFlags::empty()
+            },
             None, // snapshot
         );
 
