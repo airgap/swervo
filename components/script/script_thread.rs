@@ -1218,6 +1218,10 @@ impl ScriptThread {
             // this rendering update's scroll steps.
             document.window().advance_smooth_scrolls(cx);
 
+            // Snap containers re-snap to layout changes since the last rendering update here,
+            // so the scroll events that causes are part of this update's scroll steps.
+            document.resnap_snap_containers(cx);
+
             // > 9. For each doc of docs, run the scroll steps for doc.
             document.run_the_scroll_steps(cx);
 

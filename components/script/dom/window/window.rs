@@ -98,7 +98,7 @@ use style_traits::CSSPixel;
 use stylo_atoms::Atom;
 use time::Duration as TimeDuration;
 use webrender_api::ExternalScrollId;
-use webrender_api::units::{DeviceIntSize, DevicePixel, LayoutPixel, LayoutPoint};
+use webrender_api::units::{DeviceIntSize, DevicePixel, LayoutPixel, LayoutPoint, LayoutVector2D};
 
 use crate::dom::bindings::codegen::Bindings::DocumentBinding::{
     DocumentMethods, DocumentReadyState, NamedPropertyValue,
@@ -2101,7 +2101,7 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
             .map_or(self.scroll_offset().y, |top| top as f32);
 
         // The rest of the specification continues from `Self::scroll`.
-        self.scroll(cx, x, y, options.parent.behavior);
+        self.scroll(cx, x, y, options.parent.behavior, None);
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-window-scroll>
@@ -2109,7 +2109,7 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
         // Step 2: If invoked with two arguments, follow these substeps:
         // Step 2.1 Let options be null converted to a ScrollToOptions dictionary. [WEBIDL]
         // Step 2.2: Let x and y be the arguments, respectively.
-        self.scroll(cx, x as f32, y as f32, ScrollBehavior::Auto);
+        self.scroll(cx, x as f32, y as f32, ScrollBehavior::Auto, None);
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-window-scrollto>
@@ -2148,7 +2148,14 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
         options.top.replace(y + self.ScrollY() as f64);
 
         // Step 5: Act as if the scroll() method was invoked with options as the only argument.
-        self.Scroll(cx, &options)
+        // Unlike `scroll()`, this scroll has a direction, which snapping follows.
+        self.scroll(
+            cx,
+            options.left.unwrap() as f32,
+            options.top.unwrap() as f32,
+            options.parent.behavior,
+            Some(self.scroll_offset()),
+        )
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-window-scrollby>
@@ -2532,7 +2539,15 @@ impl Window {
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-window-scroll>
-    pub(crate) fn scroll(&self, cx: &mut JSContext, x: f32, y: f32, behavior: ScrollBehavior) {
+    /// `origin` is where the scroll started if it is directional, as `scrollBy()` is.
+    pub(crate) fn scroll(
+        &self,
+        cx: &mut JSContext,
+        x: f32,
+        y: f32,
+        behavior: ScrollBehavior,
+        origin: Option<LayoutVector2D>,
+    ) {
         // Step 3: Normalize non-finite values for x and y.
         let xfinite = if x.is_finite() { x } else { 0.0 };
         let yfinite = if y.is_finite() { y } else { 0.0 };
@@ -2586,7 +2601,15 @@ impl Window {
         // as the associated element, if there is one, or null otherwise, and the scroll
         // behavior being the value of the behavior dictionary member of options.
         let root_element = self.Document().GetDocumentElement();
-        self.perform_a_scroll(cx, x, y, scroll_id, behavior, root_element.as_deref());
+        self.perform_a_scroll(
+            cx,
+            x,
+            y,
+            scroll_id,
+            behavior,
+            root_element.as_deref(),
+            origin,
+        );
     }
 
     pub(crate) fn abort_smooth_scroll(&self, scroll_id: ExternalScrollId) {
@@ -2611,14 +2634,15 @@ impl Window {
         scroll_id: ExternalScrollId,
         behavior: ScrollBehavior,
         element: Option<&Element>,
+        origin: Option<LayoutVector2D>,
     ) {
         // Step 1: Abort any ongoing smooth scroll for box.
         self.abort_smooth_scroll(scroll_id);
 
-        // A programmatic scroll of a snap container ends at the snap position closest to
-        // the requested one. <https://drafts.csswg.org/css-scroll-snap-1/#choosing>
+        // A programmatic scroll of a snap container ends at a snap position.
+        // <https://drafts.csswg.org/css-scroll-snap-1/#choosing>
         let (x, y) = match element {
-            Some(element) if element.mandatory_scroll_snap_axis().is_some() => {
+            Some(element) if element.scroll_snap_type().is_some() => {
                 let scrolling_box = if scroll_id.is_root() {
                     Some(
                         self.Document()
@@ -2629,7 +2653,7 @@ impl Window {
                 };
                 match scrolling_box {
                     Some(scrolling_box) => {
-                        let snapped = scrolling_box.snapped_position(Vector2D::new(x, y), None);
+                        let snapped = scrolling_box.snapped_position(Vector2D::new(x, y), origin);
                         (snapped.x, snapped.y)
                     },
                     None => (x, y),
@@ -3271,13 +3295,14 @@ impl Window {
         x: f32,
         y: f32,
         behavior: ScrollBehavior,
+        origin: Option<LayoutVector2D>,
     ) {
         let scroll_id = self.scroll_id_for_element(element);
 
         // Step 6.
         // > Perform a scroll of box to position, element as the associated element and behavior as
         // > the scroll behavior.
-        self.perform_a_scroll(cx, x, y, scroll_id, behavior, Some(element));
+        self.perform_a_scroll(cx, x, y, scroll_id, behavior, Some(element), origin);
     }
 
     pub(crate) fn resolved_style_query(

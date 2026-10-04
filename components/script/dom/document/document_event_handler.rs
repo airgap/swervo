@@ -2531,8 +2531,13 @@ impl DocumentEventHandler {
             };
             // Keyboard scrolls are directional: in a snap container they move on to the next
             // snap position in their direction, even one further away than the scroll amount.
-            let snapped = scrolling_box
-                .snapped_position(current_scroll_offset + delta, Some(current_scroll_offset));
+            // Home and End instead go to an end of the box, so like in Chromium they do not
+            // stop at `scroll-snap-stop: always` snap areas on the way.
+            let origin = match scroll {
+                KeyboardScroll::Home | KeyboardScroll::End => None,
+                _ => Some(current_scroll_offset),
+            };
+            let snapped = scrolling_box.snapped_position(current_scroll_offset + delta, origin);
             (current_scroll_offset, snapped - current_scroll_offset)
         };
 

@@ -344,6 +344,16 @@ struct ScrollAwaitingCompletion {
     user_scroll_origin: Option<LayoutVector2D>,
 }
 
+/// The snap targets a snap container last snapped to on each axis.
+/// <https://drafts.csswg.org/css-scroll-snap-1/#re-snap>
+#[derive(JSTraceable, MallocSizeOf)]
+#[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
+struct SnapTargets {
+    container: Dom<Node>,
+    x: Option<Dom<Element>>,
+    y: Option<Dom<Element>>,
+}
+
 /// Reasons why a [`Document`] might need a rendering update that is otherwise
 /// untracked via other [`Document`] properties.
 #[derive(Clone, Copy, Debug, Default, JSTraceable, MallocSizeOf)]
@@ -664,6 +674,8 @@ pub(crate) struct Document {
     /// Scroll event targets whose scrolling box scrolled during the last rendering update and
     /// whose scroll is not yet considered completed.
     scrolls_awaiting_completion: DomRefCell<Vec<ScrollAwaitingCompletion>>,
+    /// The snap targets of the snap containers in this document that are snapped.
+    snap_targets: DomRefCell<Vec<SnapTargets>>,
     /// Other reasons that a rendering update might be required for this [`Document`].
     rendering_update_reasons: Cell<RenderingUpdateReason>,
     /// Whether or not this [`Document`] is waiting on canvas image updates. If it is
@@ -1441,7 +1453,8 @@ impl Document {
             //
             // FIXME(stshine): this should be the origin of the stacking context space,
             // which may differ under the influence of writing mode.
-            self.window.scroll(cx, 0.0, 0.0, ScrollBehavior::Instant);
+            self.window
+                .scroll(cx, 0.0, 0.0, ScrollBehavior::Instant, None);
             // Step 2.3. Return.
             return;
         }
@@ -1656,7 +1669,7 @@ impl Document {
             // continues to the next snap position in the direction the user scrolled, and
             // completes once it gets there.
             if let Some(user_scroll_origin) = user_scroll_origin &&
-                let Some(scrolling_box) = self.mandatory_snap_container_for_scroll_target(&target)
+                let Some(scrolling_box) = self.snap_container_for_scroll_target(&target)
             {
                 let position = scrolling_box.scroll_position();
                 let snapped = scrolling_box.snapped_position(position, Some(user_scroll_origin));
@@ -1762,21 +1775,80 @@ impl Document {
         })
     }
 
-    /// The scrolling box behind a scroll event target, if it is a `mandatory` snap container.
-    fn mandatory_snap_container_for_scroll_target(
-        &self,
-        target: &EventTarget,
-    ) -> Option<ScrollingBox> {
+    /// The scrolling box behind a scroll event target, if it is a snap container.
+    fn snap_container_for_scroll_target(&self, target: &EventTarget) -> Option<ScrollingBox> {
         if target.is::<Document>() {
             let scrolling_box = self.viewport_scrolling_box(ScrollContainerQueryFlags::Inclusive);
-            return scrolling_box
-                .is_mandatory_snap_container()
-                .then_some(scrolling_box);
+            return scrolling_box.is_snap_container().then_some(scrolling_box);
         }
         target
             .downcast::<Element>()
-            .filter(|element| element.mandatory_scroll_snap_axis().is_some())?
+            .filter(|element| element.scroll_snap_type().is_some())?
             .scrolling_box(ScrollContainerQueryFlags::Inclusive)
+    }
+
+    /// Remembers the snap targets the scrolling box of `container` snapped to on each axis,
+    /// forgetting them when it snapped to none.
+    pub(crate) fn set_snap_targets(
+        &self,
+        container: &Node,
+        x: Option<&Element>,
+        y: Option<&Element>,
+    ) {
+        let mut snap_targets = self.snap_targets.borrow_mut();
+        snap_targets.retain(|snap_targets| *snap_targets.container != *container);
+        if x.is_some() || y.is_some() {
+            snap_targets.push(SnapTargets {
+                container: Dom::from_ref(container),
+                x: x.map(Dom::from_ref),
+                y: y.map(Dom::from_ref),
+            });
+        }
+    }
+
+    /// Keeps every snap container that is not being scrolled snapped to the snap targets it
+    /// last snapped to, whose positions may have moved since with layout changes or resizes.
+    /// <https://drafts.csswg.org/css-scroll-snap-1/#re-snap>
+    pub(crate) fn resnap_snap_containers(&self, cx: &mut JSContext) {
+        let snapped_containers: Vec<_> = self
+            .snap_targets
+            .borrow()
+            .iter()
+            .map(|snap_targets| {
+                (
+                    snap_targets.container.as_rooted(),
+                    snap_targets.x.as_ref().map(|x| x.as_rooted()),
+                    snap_targets.y.as_ref().map(|y| y.as_rooted()),
+                )
+            })
+            .collect();
+        for (container, x, y) in snapped_containers {
+            let target = container.upcast::<EventTarget>();
+            let is_scrolling = self
+                .scrolls_awaiting_completion
+                .borrow()
+                .iter()
+                .any(|awaiting| *awaiting.target == *target) ||
+                self.pending_scroll_events
+                    .borrow()
+                    .iter()
+                    .any(|pending_event| *pending_event.target == *target) ||
+                self.scroll_target_has_ongoing_smooth_scroll(target);
+            if is_scrolling {
+                continue;
+            }
+            let Some(scrolling_box) = self.snap_container_for_scroll_target(target) else {
+                self.set_snap_targets(&container, None, None);
+                continue;
+            };
+            let position = scrolling_box.scroll_position();
+            let resnapped = scrolling_box.resnap_position(x.as_deref(), y.as_deref());
+            // Sub-pixel differences are rounding of the snap area positions.
+            let difference = (resnapped - position).abs();
+            if difference.x > 0.5 || difference.y > 0.5 {
+                scrolling_box.scroll_to(cx, resnapped, ScrollBehavior::Instant);
+            }
+        }
     }
 
     /// <https://drafts.csswg.org/cssom-view/#scrolling-events>
@@ -4091,6 +4163,7 @@ impl Document {
             adopted_stylesheets_frozen_types: CachedFrozenArray::new(),
             pending_scroll_events: Default::default(),
             scrolls_awaiting_completion: Default::default(),
+            snap_targets: Default::default(),
             rendering_update_reasons: Default::default(),
             waiting_on_canvas_image_updates: Cell::new(false),
             root_removal_noted: Cell::new(true),

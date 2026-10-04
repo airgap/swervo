@@ -53,7 +53,7 @@ use style::selector_parser::{RestyleDamage, SelectorParser, Snapshot};
 use style::shared_lock::Locked;
 use style::stylesheets::layer_rule::LayerOrder;
 use style::stylesheets::{CssRuleType, UrlExtraData};
-use style::values::computed::{Overflow, ScrollSnapAxis, ScrollSnapStrictness};
+use style::values::computed::{Overflow, ScrollSnapStrictness, ScrollSnapType};
 use style::values::generics::NonNegative;
 use style::values::generics::position::PreferredRatio;
 use style::values::generics::ratio::Ratio;
@@ -62,6 +62,7 @@ use style::{ArcSlice, CaseSensitivityExt, dom_apis, thread_state};
 use style_traits::CSSPixel;
 use stylo_atoms::Atom;
 use stylo_dom::ElementState;
+use webrender_api::units::LayoutVector2D;
 use xml5ever::serialize::TraversalScope::{
     ChildrenOnly as XmlChildrenOnly, IncludeNode as XmlIncludeNode,
 };
@@ -947,12 +948,11 @@ impl Element {
         )))
     }
 
-    /// The axis of this element's `scroll-snap-type` when its snapping is `mandatory`. For the
-    /// root element this is the viewport's snap type. `proximity` snapping is not implemented,
-    /// so such containers report `None` and scroll freely.
-    pub(crate) fn mandatory_scroll_snap_axis(&self) -> Option<ScrollSnapAxis> {
+    /// This element's `scroll-snap-type`, or `None` if it does not make it a snap container.
+    /// For the root element this is the viewport's snap type.
+    pub(crate) fn scroll_snap_type(&self) -> Option<ScrollSnapType> {
         let snap_type = self.style()?.get_box().scroll_snap_type;
-        (snap_type.strictness == ScrollSnapStrictness::Mandatory).then_some(snap_type.axis)
+        (snap_type.strictness != ScrollSnapStrictness::None).then_some(snap_type)
     }
 
     /// <https://drafts.csswg.org/cssom-view/#scroll-a-target-into-view>
@@ -2802,7 +2802,16 @@ impl Element {
     ///
     /// TODO(stevennovaryo): Need to update the scroll API to follow the spec since it is
     /// quite outdated.
-    pub(crate) fn scroll(&self, cx: &mut JSContext, x: f64, y: f64, behavior: ScrollBehavior) {
+    ///
+    /// `origin` is where the scroll started if it is directional, as `scrollBy()` is.
+    pub(crate) fn scroll(
+        &self,
+        cx: &mut JSContext,
+        x: f64,
+        y: f64,
+        behavior: ScrollBehavior,
+        origin: Option<LayoutVector2D>,
+    ) {
         // Step 1.2 or 2.3
         let x = if x.is_finite() { x } else { 0.0 } as f32;
         let y = if y.is_finite() { y } else { 0.0 } as f32;
@@ -2826,7 +2835,7 @@ impl Element {
         // Step 7
         if *self.root_element() == *self {
             if doc.quirks_mode() != QuirksMode::Quirks {
-                win.scroll(cx, x, y, behavior);
+                win.scroll(cx, x, y, behavior, origin);
             }
 
             return;
@@ -2837,7 +2846,7 @@ impl Element {
             doc.quirks_mode() == QuirksMode::Quirks &&
             !self.is_potentially_scrollable_body()
         {
-            win.scroll(cx, x, y, behavior);
+            win.scroll(cx, x, y, behavior, origin);
             return;
         }
 
@@ -2847,7 +2856,7 @@ impl Element {
         }
 
         // Step 11
-        win.scroll_an_element(cx, self, x, y, behavior);
+        win.scroll_an_element(cx, self, x, y, behavior, origin);
     }
 
     /// <https://html.spec.whatwg.org/multipage/#fragment-parsing-algorithm-steps>
@@ -3455,12 +3464,12 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
         // Step 1
         let left = options.left.unwrap_or(self.ScrollLeft());
         let top = options.top.unwrap_or(self.ScrollTop());
-        self.scroll(cx, left, top, options.parent.behavior);
+        self.scroll(cx, left, top, options.parent.behavior, None);
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-element-scroll>
     fn Scroll_(&self, cx: &mut JSContext, x: f64, y: f64) {
-        self.scroll(cx, x, y, ScrollBehavior::Auto);
+        self.scroll(cx, x, y, ScrollBehavior::Auto, None);
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-element-scrollto>
@@ -3485,6 +3494,7 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
             left + delta_left,
             top + delta_top,
             options.parent.behavior,
+            Some(LayoutVector2D::new(left as f32, top as f32)),
         );
     }
 
@@ -3492,7 +3502,13 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
     fn ScrollBy_(&self, cx: &mut JSContext, x: f64, y: f64) {
         let left = self.ScrollLeft();
         let top = self.ScrollTop();
-        self.scroll(cx, left + x, top + y, ScrollBehavior::Auto);
+        self.scroll(
+            cx,
+            left + x,
+            top + y,
+            ScrollBehavior::Auto,
+            Some(LayoutVector2D::new(left as f32, top as f32)),
+        );
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-element-scrolltop>
@@ -3568,7 +3584,7 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
         // Step 7
         if self.is_document_element() {
             if doc.quirks_mode() != QuirksMode::Quirks {
-                win.scroll(cx, win.ScrollX() as f32, y, behavior);
+                win.scroll(cx, win.ScrollX() as f32, y, behavior, None);
             }
 
             return;
@@ -3579,7 +3595,7 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
             doc.quirks_mode() == QuirksMode::Quirks &&
             !self.is_potentially_scrollable_body()
         {
-            win.scroll(cx, win.ScrollX() as f32, y, behavior);
+            win.scroll(cx, win.ScrollX() as f32, y, behavior, None);
             return;
         }
 
@@ -3589,7 +3605,7 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
         }
 
         // Step 11
-        win.scroll_an_element(cx, self, self.ScrollLeft() as f32, y, behavior);
+        win.scroll_an_element(cx, self, self.ScrollLeft() as f32, y, behavior, None);
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-element-scrollleft>
@@ -3667,7 +3683,7 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
                 return;
             }
 
-            win.scroll(cx, x, win.ScrollY() as f32, behavior);
+            win.scroll(cx, x, win.ScrollY() as f32, behavior, None);
             return;
         }
 
@@ -3676,7 +3692,7 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
             doc.quirks_mode() == QuirksMode::Quirks &&
             !self.is_potentially_scrollable_body()
         {
-            win.scroll(cx, x, win.ScrollY() as f32, behavior);
+            win.scroll(cx, x, win.ScrollY() as f32, behavior, None);
             return;
         }
 
@@ -3686,7 +3702,7 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
         }
 
         // Step 11
-        win.scroll_an_element(cx, self, x, self.ScrollTop() as f32, behavior);
+        win.scroll_an_element(cx, self, x, self.ScrollTop() as f32, behavior, None);
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-element-scrollintoview>
