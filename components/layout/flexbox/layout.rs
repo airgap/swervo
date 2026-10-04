@@ -39,8 +39,8 @@ use crate::positioned::{
     AbsolutelyPositionedBox, PositioningContext, PositioningContextLength, relative_adjustement,
 };
 use crate::sizing::{
-    ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, IntrinsicSizingMode,
-    LazySize, Size, SizeConstraint, Sizes,
+    ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, LazySize, Size,
+    SizeConstraint, Sizes,
 };
 use crate::style_ext::{AspectRatio, Clamp, ComputedValuesExt, ContentBoxSizesAndPBM, LayoutStyle};
 use crate::{ConstraintSpace, ContainingBlock, ContainingBlockSize, IndefiniteContainingBlock};
@@ -2232,7 +2232,6 @@ impl FlexItemBox {
                     content_box_sizes,
                     preferred_aspect_ratio,
                     automatic_cross_size_for_intrinsic_sizing,
-                    IntrinsicSizingMode::Size,
                 )
                 .into()
             }
@@ -2377,17 +2376,15 @@ impl FlexItemBox {
                     );
                 (sizes, depends_on_block_constraints)
             },
-            FlexAxis::Column => {
-                let size = self.layout_for_block_content_size(
-                    flex_context_getter(),
-                    &pbm_auto_is_zero,
-                    &content_box_sizes_and_pbm.content_box_sizes,
-                    preferred_aspect_ratio,
-                    automatic_cross_size_for_intrinsic_sizing,
-                    IntrinsicSizingMode::Contribution,
-                );
-                (size.into(), true)
-            },
+            // A column container whose height is indefinite lays its items out at their
+            // hypothetical main sizes, so like Chrome its height sums their flex base sizes,
+            // which `main_content_sizes()` clamps by the min and max main sizes. An item's
+            // content only counts through those (`flex: 1 1 66px; min-height: 0` around
+            // 100px of content is 66px tall).
+            FlexAxis::Column => (
+                ContentSizes::from(flex_base_size + pbm_auto_is_zero.main),
+                true,
+            ),
         };
 
         let outer_flex_base_size = flex_base_size + pbm_auto_is_zero.main;
@@ -2469,7 +2466,6 @@ impl FlexItemBox {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[servo_tracing::instrument(name = "FlexContainer::layout_for_block_content_size", skip_all)]
     fn layout_for_block_content_size(
         &self,
@@ -2478,82 +2474,53 @@ impl FlexItemBox {
         content_box_sizes: &LogicalVec2<Sizes>,
         preferred_aspect_ratio: Option<AspectRatio>,
         automatic_inline_size: Size<Au>,
-        intrinsic_sizing_mode: IntrinsicSizingMode,
     ) -> Au {
-        let content_block_size = || {
-            let mut positioning_context = PositioningContext::default();
-            let style = self.independent_formatting_context.style();
+        let mut positioning_context = PositioningContext::default();
+        let style = self.independent_formatting_context.style();
 
-            // We are computing the intrinsic block size, so the tentative block size that we use
-            // as an input to the intrinsic inline sizes needs to ignore the values of the sizing
-            // properties in the block axis.
-            let tentative_block_size = SizeConstraint::default();
+        // We are computing the intrinsic block size, so the tentative block size that we use
+        // as an input to the intrinsic inline sizes needs to ignore the values of the sizing
+        // properties in the block axis.
+        let tentative_block_size = SizeConstraint::default();
 
-            // TODO: This is wrong if the item writing mode is different from the flex
-            // container's writing mode.
-            let inline_size = {
-                let stretch_size =
-                    flex_context.containing_block.size.inline - pbm_auto_is_zero.cross;
-                let get_content_size = || {
-                    self.inline_content_sizes(
-                        flex_context,
-                        tentative_block_size,
-                        preferred_aspect_ratio,
-                    )
-                };
-                content_box_sizes.inline.resolve(
-                    Direction::Inline,
-                    automatic_inline_size,
-                    Au::zero,
-                    Some(stretch_size),
-                    get_content_size,
-                    false,
-                )
-            };
-            let item_as_containing_block = ContainingBlock {
-                size: ContainingBlockSize {
-                    inline: inline_size,
-                    block: tentative_block_size,
-                },
-                style,
-            };
-            self.independent_formatting_context
-                .layout(
-                    flex_context.layout_context,
-                    &mut positioning_context,
-                    &item_as_containing_block,
-                    flex_context.containing_block,
+        // TODO: This is wrong if the item writing mode is different from the flex
+        // container's writing mode.
+        let inline_size = {
+            let stretch_size =
+                flex_context.containing_block.size.inline - pbm_auto_is_zero.cross;
+            let get_content_size = || {
+                self.inline_content_sizes(
+                    flex_context,
+                    tentative_block_size,
                     preferred_aspect_ratio,
-                    &LazySize::intrinsic(),
                 )
-                .content_block_size
+            };
+            content_box_sizes.inline.resolve(
+                Direction::Inline,
+                automatic_inline_size,
+                Au::zero,
+                Some(stretch_size),
+                get_content_size,
+                false,
+            )
         };
-        match intrinsic_sizing_mode {
-            IntrinsicSizingMode::Contribution => {
-                let stretch_size = flex_context
-                    .containing_block
-                    .size
-                    .block
-                    .to_definite()
-                    .map(|block_size| block_size - pbm_auto_is_zero.main);
-                let inner_block_size = content_box_sizes.block.resolve(
-                    Direction::Block,
-                    Size::FitContent,
-                    Au::zero,
-                    stretch_size,
-                    || ContentSizes::from(content_block_size()),
-                    // Tables have a special sizing in the block axis that handles collapsed rows
-                    // by ignoring the sizing properties and instead relying on the content block size,
-                    // which should indirectly take sizing properties into account.
-                    // However, above we laid out the table with a SizeConstraint::default() block size,
-                    // so the content block size doesn't take sizing properties into account.
-                    // Therefore, pretending that it's never a table tends to provide a better result.
-                    false, /* is_table */
-                );
-                inner_block_size + pbm_auto_is_zero.main
+        let item_as_containing_block = ContainingBlock {
+            size: ContainingBlockSize {
+                inline: inline_size,
+                block: tentative_block_size,
             },
-            IntrinsicSizingMode::Size => content_block_size(),
-        }
+            style,
+        };
+        self.independent_formatting_context
+            .layout(
+                flex_context.layout_context,
+                &mut positioning_context,
+                &item_as_containing_block,
+                flex_context.containing_block,
+                preferred_aspect_ratio,
+                &LazySize::intrinsic(),
+            )
+            .content_block_size
     }
 
     fn inline_content_sizes(
