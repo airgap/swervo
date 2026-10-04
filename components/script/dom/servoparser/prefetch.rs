@@ -20,11 +20,12 @@ use net_traits::{CoreResourceMsg, FetchChannels, ReferrerPolicy, ResourceThreads
 use servo_base::generic_channel::GenericSend;
 use servo_base::id::{PipelineId, WebViewId};
 use servo_url::ServoUrl;
+use style::str::HTML_SPACE_CHARACTERS;
 
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::trace::{CustomTraceable, JSTraceable};
 use crate::dom::document::Document;
-use crate::dom::html::htmlscriptelement::script_fetch_request;
+use crate::dom::html::htmlscriptelement::{SCRIPT_JS_MIMES, script_fetch_request};
 use crate::dom::processingoptions::determine_cors_settings_for_token;
 use crate::fetch::create_a_potential_cors_request;
 use crate::script_module::ScriptFetchOptions;
@@ -120,6 +121,9 @@ impl TokenSink for PrefetchSink {
         };
         match (tag.kind, &tag.name) {
             (TagKind::StartTag, &local_name!("script")) if self.prefetching.get() => {
+                if !self.is_classic_script(tag) {
+                    return TokenSinkResult::RawData(RawKind::ScriptData);
+                }
                 if let Some(url) = self.get_url(tag, local_name!("src")) {
                     debug!("Prefetch script {}", url);
                     let cors_setting = self.get_cors_settings(tag, local_name!("crossorigin"));
@@ -233,6 +237,27 @@ impl TokenSink for PrefetchSink {
 impl PrefetchSink {
     fn get_attr<'a>(&'a self, tag: &'a Tag, name: LocalName) -> Option<&'a Attribute> {
         tag.attrs.iter().find(|attr| attr.name.local == name)
+    }
+
+    /// Only classic scripts are prefetched. A module script is fetched in CORS mode, and a
+    /// no-cors prefetch of it would leave a cached response without CORS headers for the real
+    /// fetch to reuse, failing the CORS check on CDNs that only send them for requests with
+    /// an Origin (trello.com). Other types are not scripts at all.
+    /// <https://html.spec.whatwg.org/multipage/#prepare-the-script-element>
+    fn is_classic_script(&self, tag: &Tag) -> bool {
+        match (
+            self.get_attr(tag, local_name!("type")),
+            self.get_attr(tag, local_name!("language")),
+        ) {
+            (Some(script_type), _) => {
+                let script_type = script_type.value.to_ascii_lowercase();
+                let script_type = script_type.trim_matches(HTML_SPACE_CHARACTERS);
+                script_type.is_empty() || SCRIPT_JS_MIMES.contains(&script_type)
+            },
+            (None, Some(language)) if !language.value.is_empty() => SCRIPT_JS_MIMES
+                .contains(&format!("text/{}", language.value).to_ascii_lowercase().as_str()),
+            (None, _) => true,
+        }
     }
 
     fn get_url(&self, tag: &Tag, name: LocalName) -> Option<ServoUrl> {
