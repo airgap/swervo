@@ -64,6 +64,7 @@ use crate::dom::formdataevent::FormDataEvent;
 use crate::dom::html::htmlbuttonelement::HTMLButtonElement;
 use crate::dom::html::htmlcollection::CollectionFilter;
 use crate::dom::html::htmldatalistelement::HTMLDataListElement;
+use crate::dom::html::htmldialogelement::HTMLDialogElement;
 use crate::dom::html::htmlelement::HTMLElement;
 use crate::dom::html::htmlfieldsetelement::HTMLFieldSetElement;
 use crate::dom::html::htmlformcontrolscollection::HTMLFormControlsCollection;
@@ -829,7 +830,43 @@ impl HTMLFormElement {
         // Step 10. Let method be the submitter element's method.
         let method = submitter.method();
         // Step 11. If method is dialog, then:
-        // TODO
+        if matches!(method, FormMethod::Dialog) {
+            // Step 11.1. If form does not have an ancestor dialog element, return.
+            // Step 11.2. Let subject be form's nearest ancestor dialog element.
+            let Some(subject) = self
+                .upcast::<Node>()
+                .ancestors()
+                .find_map(DomRoot::downcast::<HTMLDialogElement>)
+            else {
+                return;
+            };
+            // Step 11.3. Let result be null.
+            // Step 11.4. If submitter is an input element whose type attribute is in the Image
+            // Button state, then set result to the string formed by concatenating the selected
+            // coordinate's x-component, ",", and the selected coordinate's y-component.
+            // Step 11.5. Otherwise, if submitter has a value, then set result to that value.
+            // A submission without a submitter (requestSubmit(), submit()) sets the empty string,
+            // matching Chrome.
+            let result = match submitter {
+                FormSubmitterElement::Form(_) => Some(DOMString::new()),
+                FormSubmitterElement::Input(input) => {
+                    if matches!(*input.input_type(), InputType::Image(_)) {
+                        // The selected coordinate is not tracked yet; (0, 0) is its default.
+                        Some(DOMString::from("0,0"))
+                    } else {
+                        input
+                            .upcast::<Element>()
+                            .get_attribute_string_value(&local_name!("value"))
+                            .map(DOMString::from)
+                    }
+                },
+                FormSubmitterElement::Button(button) => button.optional_value(),
+            };
+            // Step 11.6. Close the dialog subject with result and null.
+            subject.close_the_dialog(cx, result, None);
+            // Step 11.7. Return.
+            return;
+        }
 
         // Step 12. Let action be the submitter element's action.
         let mut action = submitter.action();
@@ -910,10 +947,7 @@ impl HTMLFormElement {
         // Then, select the appropriate cell on that row based on method as given in the first cell of each column.
         // Then, jump to the steps named in that cell and defined below the table.
         match (&*scheme, method) {
-            (_, FormMethod::Dialog) => {
-                // TODO: Submit dialog
-                // https://html.spec.whatwg.org/multipage/#submit-dialog
-            },
+            (_, FormMethod::Dialog) => unreachable!("Handled in step 11"),
             // https://html.spec.whatwg.org/multipage/#submit-mutate-action
             ("http", FormMethod::Get) | ("https", FormMethod::Get) | ("data", FormMethod::Get) => {
                 load_data
