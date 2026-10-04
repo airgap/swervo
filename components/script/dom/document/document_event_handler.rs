@@ -3202,8 +3202,12 @@ fn typing_command(event: &keyboard_types::KeyboardEvent) -> Option<(CommandName,
     }
     Some(match &event.key {
         Key::Character(text) => (CommandName::InsertText, Some(DOMString::from(text.as_str()))),
+        Key::Named(NamedKey::Enter) if event.modifiers.contains(Modifiers::SHIFT) => {
+            (CommandName::InsertLineBreak, None)
+        },
         Key::Named(NamedKey::Enter) => (CommandName::InsertParagraph, None),
         Key::Named(NamedKey::Backspace) => (CommandName::Delete, None),
+        Key::Named(NamedKey::Delete) => (CommandName::ForwardDelete, None),
         _ => return None,
     })
 }

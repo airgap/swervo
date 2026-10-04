@@ -326,3 +326,38 @@ pub(crate) fn execute_delete_command(
     // Step 20. Return true.
     true
 }
+
+/// NOTE: Not in the spec, but like other browsers: when deleting leaves the caret after a `<br>`
+/// that ends its block, the line after it would not be laid out, so a placeholder `<br>` keeps
+/// that now empty last line, and the caret on it.
+pub(crate) fn keep_empty_last_line(
+    cx: &mut js::context::JSContext,
+    document: &Document,
+    selection: &Selection,
+) {
+    let active_range = selection
+        .active_range()
+        .expect("Must always have an active range");
+    if !active_range.collapsed() {
+        return;
+    }
+    let node = active_range.start_container();
+    let offset = active_range.start_offset();
+    if offset == 0 ||
+        !node.is_editable_or_editing_host() ||
+        node.children().nth(offset as usize).is_some()
+    {
+        return;
+    }
+    let Some(previous) = node.children().nth(offset as usize - 1) else {
+        return;
+    };
+    if !previous.is::<HTMLBRElement>() || !previous.precedes_a_line_break(cx.no_gc()) {
+        return;
+    }
+    let br = document.create_element(cx, "br");
+    if node.AppendChild(cx, br.upcast()).is_err() {
+        unreachable!("Must always be able to append");
+    }
+    selection.collapse_current_range(&node, offset);
+}
