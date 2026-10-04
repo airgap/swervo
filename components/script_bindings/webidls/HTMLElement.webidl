@@ -25,7 +25,7 @@ interface HTMLElement : Element {
   undefined click();
   [CEReactions] attribute DOMString accessKey;
   readonly attribute DOMString accessKeyLabel;
-  // [CEReactions] attribute boolean draggable;
+  [CEReactions] attribute boolean draggable;
   // [CEReactions] attribute boolean spellcheck;
   // [CEReactions, ReflectSetter] attribute DOMString writingSuggestions;
   // [CEReactions, ReflectSetter] attribute DOMString autocapitalize;

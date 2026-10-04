@@ -58,6 +58,7 @@ use crate::dom::bindings::root::MutNullableDom;
 use crate::dom::bindings::trace::NoTrace;
 use crate::dom::clipboardevent::ClipboardEventType;
 use crate::dom::document::FireMouseEventType;
+use crate::dom::document::drag_and_drop::{DragAndDrop, PointerState};
 use crate::dom::document::focus::FocusableArea;
 use crate::dom::document::top_layer::LightDismissEventType;
 use crate::dom::event::{EventBubbles, EventCancelable, EventComposed, EventFlags};
@@ -216,6 +217,8 @@ pub(crate) struct DocumentEventHandler {
     /// tracking when the cursor leaves the widget. Unlike `setPointerCapture`, this does
     /// not fire `gotpointercapture`/`lostpointercapture`.
     widget_mouse_capture_target: MutNullableDom<Element>,
+    /// <https://html.spec.whatwg.org/multipage/#drag-and-drop-processing-model>
+    drag_and_drop: DragAndDrop,
 }
 
 impl DocumentEventHandler {
@@ -243,6 +246,7 @@ impl DocumentEventHandler {
             pending_pointer_capture: Default::default(),
             pointer_capture_target: Default::default(),
             widget_mouse_capture_target: Default::default(),
+            drag_and_drop: DragAndDrop::new(),
         }
     }
 
@@ -455,6 +459,11 @@ impl DocumentEventHandler {
         input_event: &ConstellationInputEvent,
         mouse_leave_event: &MouseLeftViewportEvent,
     ) {
+        if self.drag_and_drop.is_dragging() {
+            self.drag_and_drop.pointer_left_viewport(cx, &self.window);
+            return;
+        }
+
         if let Some(current_hover_target) = self.current_hover_target.get() {
             let current_hover_target = current_hover_target.upcast::<Node>();
             for element in current_hover_target
@@ -609,6 +618,31 @@ impl DocumentEventHandler {
             .most_recent_mousemove_point
             .replace(Some(hit_test_result.point_in_frame));
         if old_mouse_move_point == Some(hit_test_result.point_in_frame) {
+            return;
+        }
+
+        // While dragging, the pointer drives the drag-and-drop processing model instead of
+        // firing mouse and pointer events, as in other browsers.
+        if self.drag_and_drop.is_dragging() {
+            let Some(target) = hit_test_result
+                .node
+                .inclusive_ancestors(ShadowIncluding::Yes)
+                .find_map(DomRoot::downcast::<Element>)
+            else {
+                return;
+            };
+            if input_event.pressed_mouse_buttons & 1 == 0 {
+                // The primary button was released where this document did not see it, such as
+                // outside the viewport.
+                self.end_drag_for_primary_button_release(cx);
+                return;
+            }
+            self.drag_and_drop.pointer_moved(
+                cx,
+                &self.window,
+                &target.inclusive_ancestor_element_in_non_ua_shadow_root(),
+                PointerState::new(&hit_test_result, input_event),
+            );
             return;
         }
 
@@ -767,6 +801,38 @@ impl DocumentEventHandler {
         mouse_event.upcast::<Event>().fire(cx, &pointer_target);
 
         self.update_current_hover_target_and_status(Some(new_target));
+
+        if self
+            .drag_and_drop
+            .maybe_start_drag(cx, &self.window, &hit_test_result, input_event)
+        {
+            // <https://w3c.github.io/pointerevents/#the-pointercancel-event>
+            // > The user agent MUST fire a pointer event named pointercancel when ... the
+            // > user agent has determined that a pointer is unlikely to continue to produce
+            // > events, e.g. because a drag-and-drop operation has started.
+            let cancel_event = MouseEvent::new(
+                cx,
+                &self.window,
+                Atom::from("pointercancel"),
+                EventBubbles::Bubbles,
+                EventCancelable::NotCancelable,
+                Some(&self.window),
+                0,
+                hit_test_result.point_in_frame.to_i32(),
+                hit_test_result.point_in_frame.to_i32(),
+                hit_test_result
+                    .point_relative_to_initial_containing_block
+                    .to_i32(),
+                input_event.active_keyboard_modifiers,
+                0,
+                0,
+                None,
+                None,
+            )
+            .to_pointer_event(cx, Atom::from("pointercancel"));
+            cancel_event.upcast::<Event>().fire(cx, &pointer_target);
+            self.implicit_release_pointer_capture(cx, pointer_id, "mouse", true);
+        }
     }
 
     fn update_current_hover_target_and_status(&self, new_hover_target: Option<DomRoot<Element>>) {
@@ -877,6 +943,15 @@ impl DocumentEventHandler {
         event: MouseButtonEvent,
         input_event: &ConstellationInputEvent,
     ) {
+        // A drag swallows the button events that happen during it, including the release that
+        // drops, so neither mouseup nor click fire for the press that started the drag.
+        if self.drag_and_drop.is_dragging() {
+            if event.button == MouseButton::Left && event.action == MouseButtonAction::Up {
+                self.end_drag_for_primary_button_release(cx);
+            }
+            return;
+        }
+
         // Ignore all incoming events without a hit test.
         let Some(hit_test_result) = self.window.hit_test_from_input_event(input_event) else {
             return;
@@ -1019,6 +1094,15 @@ impl DocumentEventHandler {
                     .upcast::<Event>()
                     .dispatch(cx, node.upcast(), false);
 
+                // Canceling mousedown prevents a drag from starting, as in other browsers.
+                if event.button == MouseButton::Left && result {
+                    self.drag_and_drop.note_primary_button_down(
+                        node,
+                        &hit_test_result,
+                        input_event,
+                    );
+                }
+
                 // Step 8. If result is true and target is a focusable area
                 // that is click focusable, then Run the focusing steps at target.
                 if result {
@@ -1055,6 +1139,10 @@ impl DocumentEventHandler {
             },
             // https://w3c.github.io/pointerevents/#dfn-handle-native-mouse-up
             MouseButtonAction::Up => {
+                if event.button == MouseButton::Left {
+                    self.drag_and_drop.clear_drag_candidate();
+                }
+
                 // Step 6. Dispatch pointerup event.
                 let mouse_buttons_down = self.mouse_buttons_down.get();
                 let pointer_event_name = if mouse_buttons_down == 1 {
@@ -1146,6 +1234,16 @@ impl DocumentEventHandler {
                 );
             },
         }
+    }
+
+    /// Drop at the end of a drag and reset the button state that the swallowed mouseup would
+    /// have reset.
+    fn end_drag_for_primary_button_release(&self, cx: &mut JSContext) {
+        self.drag_and_drop.pointer_released(cx, &self.window);
+        self.mouse_buttons_down
+            .set(self.mouse_buttons_down.get().saturating_sub(1));
+        self.last_mouse_button_down_point.set(None);
+        self.unset_active_element();
     }
 
     /// <https://w3c.github.io/pointerevents/#handle-native-mouse-click>
@@ -1583,6 +1681,17 @@ impl DocumentEventHandler {
         cx: &mut JSContext,
         keyboard_event: EmbedderKeyboardEvent,
     ) -> InputEventResult {
+        // Like the platform drag sessions other browsers run, a drag takes the keyboard:
+        // Escape cancels it and no key reaches the page.
+        if self.drag_and_drop.is_dragging() {
+            if keyboard_event.event.state == KeyState::Down &&
+                keyboard_event.event.key == Key::Named(NamedKey::Escape)
+            {
+                self.drag_and_drop.cancel(cx, &self.window);
+            }
+            return InputEventResult::default();
+        }
+
         let target = &self.target_for_events_following_focus();
         let keyevent = KeyboardEvent::new_with_platform_keyboard_event(
             cx,

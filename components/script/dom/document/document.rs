@@ -146,6 +146,7 @@ use crate::dom::documentorshadowroot::{
 use crate::dom::documenttimeline::DocumentTimeline;
 use crate::dom::documenttype::DocumentType;
 use crate::dom::domimplementation::DOMImplementation;
+use crate::dom::dragevent::DragEvent;
 use crate::dom::element::attributes::storage::AttrRef;
 use crate::dom::element::{CustomElementCreationMode, Element, ElementCreator};
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
@@ -5882,7 +5883,11 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
                 self.window.upcast(),
             ))),
             // FIXME(#25136): devicemotionevent, deviceorientationevent
-            // FIXME(#7529): dragevent
+            "dragevent" => Ok(DomRoot::upcast(DragEvent::new_uninitialized(
+                cx,
+                &self.window,
+                None,
+            ))),
             "events" | "event" | "htmlevents" | "svgevents" => {
                 Ok(Event::new_uninitialized(cx, self.window.upcast()))
             },

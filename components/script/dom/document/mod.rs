@@ -10,6 +10,7 @@ pub(crate) mod document_event_handler;
 pub(crate) mod documentfragment;
 pub(crate) mod documentorshadowroot;
 pub(crate) mod documenttype;
+pub(crate) mod drag_and_drop;
 pub(crate) mod focus;
 pub(crate) mod top_layer;
 mod tree_ordered_index_map;

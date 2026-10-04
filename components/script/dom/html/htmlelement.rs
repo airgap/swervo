@@ -53,11 +53,13 @@ use crate::dom::element::{
 use crate::dom::elementinternals::ElementInternals;
 use crate::dom::event::Event;
 use crate::dom::eventtarget::EventTarget;
+use crate::dom::html::htmlanchorelement::HTMLAnchorElement;
 use crate::dom::html::htmlbodyelement::HTMLBodyElement;
 use crate::dom::html::htmldetailselement::HTMLDetailsElement;
 use crate::dom::html::htmlformelement::{FormControl, HTMLFormElement};
 use crate::dom::html::htmlframesetelement::HTMLFrameSetElement;
 use crate::dom::html::htmlhtmlelement::HTMLHtmlElement;
+use crate::dom::html::htmlimageelement::HTMLImageElement;
 use crate::dom::html::htmllabelelement::HTMLLabelElement;
 use crate::dom::html::htmltextareaelement::HTMLTextAreaElement;
 use crate::dom::html::input_element::HTMLInputElement;
@@ -240,6 +242,34 @@ impl HTMLElementMethods<crate::DomTypeHolder> for HTMLElement {
     make_bool_getter!(Hidden, "hidden");
     // https://html.spec.whatwg.org/multipage/#dom-hidden
     make_bool_setter!(cx, SetHidden, "hidden");
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-draggable>
+    fn Draggable(&self) -> bool {
+        let draggable = self
+            .as_element()
+            .get_string_attribute(&local_name!("draggable"));
+        if draggable.str().eq_ignore_ascii_case("true") {
+            return true;
+        }
+        if draggable.str().eq_ignore_ascii_case("false") {
+            return false;
+        }
+        // > Otherwise, the element's draggable content attribute has the state Auto. If the
+        // > element is an img element, an object element that represents an image, or an a
+        // > element with an href content attribute, the draggable IDL attribute must return true
+        self.is::<HTMLImageElement>() ||
+            (self.is::<HTMLAnchorElement>() &&
+                self.as_element().has_attribute(&local_name!("href")))
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-draggable>
+    fn SetDraggable(&self, cx: &mut JSContext, draggable: bool) {
+        self.as_element().set_string_attribute(
+            cx,
+            &local_name!("draggable"),
+            DOMString::from(if draggable { "true" } else { "false" }),
+        );
+    }
 
     // https://html.spec.whatwg.org/multipage/#globaleventhandlers
     global_event_handlers!(NoOnload);
