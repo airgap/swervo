@@ -100,6 +100,7 @@ use time::Duration as TimeDuration;
 use webrender_api::ExternalScrollId;
 use webrender_api::units::{DeviceIntSize, DevicePixel, LayoutPixel, LayoutPoint, LayoutVector2D};
 
+use crate::dom::barprop::BarProp;
 use crate::dom::bindings::codegen::Bindings::DocumentBinding::{
     DocumentMethods, DocumentReadyState, NamedPropertyValue,
 };
@@ -359,6 +360,13 @@ pub(crate) struct Window {
     #[no_trace]
     navigation_start: Cell<CrossProcessInstant>,
     screen: MutNullableDom<Screen>,
+    /// <https://html.spec.whatwg.org/multipage/#bar-prop-objects>
+    locationbar: MutNullableDom<BarProp>,
+    menubar: MutNullableDom<BarProp>,
+    personalbar: MutNullableDom<BarProp>,
+    scrollbars: MutNullableDom<BarProp>,
+    statusbar: MutNullableDom<BarProp>,
+    toolbar: MutNullableDom<BarProp>,
     session_storage: MutNullableDom<Storage>,
     local_storage: MutNullableDom<Storage>,
     /// <https://cookiestore.spec.whatwg.org/#globals>
@@ -1828,6 +1836,36 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
     /// <https://developer.mozilla.org/en-US/docs/Web/API/Window/screen>
     fn Screen(&self, can_gc: CanGc) -> DomRoot<Screen> {
         self.screen.or_init(|| Screen::new(self, can_gc))
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-window-locationbar>
+    fn Locationbar(&self, can_gc: CanGc) -> DomRoot<BarProp> {
+        self.locationbar.or_init(|| BarProp::new(self, can_gc))
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-window-menubar>
+    fn Menubar(&self, can_gc: CanGc) -> DomRoot<BarProp> {
+        self.menubar.or_init(|| BarProp::new(self, can_gc))
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-window-personalbar>
+    fn Personalbar(&self, can_gc: CanGc) -> DomRoot<BarProp> {
+        self.personalbar.or_init(|| BarProp::new(self, can_gc))
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-window-scrollbars>
+    fn Scrollbars(&self, can_gc: CanGc) -> DomRoot<BarProp> {
+        self.scrollbars.or_init(|| BarProp::new(self, can_gc))
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-window-statusbar>
+    fn Statusbar(&self, can_gc: CanGc) -> DomRoot<BarProp> {
+        self.statusbar.or_init(|| BarProp::new(self, can_gc))
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-window-toolbar>
+    fn Toolbar(&self, can_gc: CanGc) -> DomRoot<BarProp> {
+        self.toolbar.or_init(|| BarProp::new(self, can_gc))
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-window-visualviewport>
@@ -4163,6 +4201,12 @@ impl Window {
             performance: Default::default(),
             navigation_start: Cell::new(navigation_start),
             screen: Default::default(),
+            locationbar: Default::default(),
+            menubar: Default::default(),
+            personalbar: Default::default(),
+            scrollbars: Default::default(),
+            statusbar: Default::default(),
+            toolbar: Default::default(),
             session_storage: Default::default(),
             local_storage: Default::default(),
             cookie_store: Default::default(),

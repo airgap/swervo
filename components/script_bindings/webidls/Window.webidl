@@ -16,12 +16,12 @@
     readonly attribute Location location;
   readonly attribute History history;
   readonly attribute CustomElementRegistry customElements;
-  //[Replaceable] readonly attribute BarProp locationbar;
-  //[Replaceable] readonly attribute BarProp menubar;
-  //[Replaceable] readonly attribute BarProp personalbar;
-  //[Replaceable] readonly attribute BarProp scrollbars;
-  //[Replaceable] readonly attribute BarProp statusbar;
-  //[Replaceable] readonly attribute BarProp toolbar;
+  [Replaceable] readonly attribute BarProp locationbar;
+  [Replaceable] readonly attribute BarProp menubar;
+  [Replaceable] readonly attribute BarProp personalbar;
+  [Replaceable] readonly attribute BarProp scrollbars;
+  [Replaceable] readonly attribute BarProp statusbar;
+  [Replaceable] readonly attribute BarProp toolbar;
   attribute DOMString status;
   [CrossOriginCallable] undefined close();
   [CrossOriginReadable] readonly attribute boolean closed;
