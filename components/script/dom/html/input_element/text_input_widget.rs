@@ -58,6 +58,18 @@ impl TextInputWidget {
             .update(cx, element)
     }
 
+    /// The element holding the text and the placeholder, which `<input type=number>` also
+    /// puts its spin button in.
+    pub(crate) fn inner_container(
+        &self,
+        cx: &mut JSContext,
+        element: &impl TextControlElement,
+    ) -> DomRoot<Element> {
+        self.get_or_create_shadow_tree(cx, element)
+            .inner_container
+            .as_rooted()
+    }
+
     pub(crate) fn update_placeholder_contents(
         &self,
         cx: &mut JSContext,

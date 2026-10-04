@@ -207,6 +207,12 @@ pub(crate) struct DocumentEventHandler {
     /// Map from pointer ID to the actual/current pointer capture target.
     /// Updated during process_pending_pointer_capture when events are dispatched.
     pointer_capture_target: DomRefCell<FxHashMap<i32, Dom<Element>>>,
+    /// A native widget being dragged with the primary button (the thumb of an
+    /// `<input type=range>`). Like Chrome's mouse-capturing node, it receives the mouse
+    /// and pointer move and up events until the button is released, so the drag keeps
+    /// tracking when the cursor leaves the widget. Unlike `setPointerCapture`, this does
+    /// not fire `gotpointercapture`/`lostpointercapture`.
+    widget_mouse_capture_target: MutNullableDom<Element>,
 }
 
 impl DocumentEventHandler {
@@ -233,7 +239,13 @@ impl DocumentEventHandler {
             access_key_handlers: Default::default(),
             pending_pointer_capture: Default::default(),
             pointer_capture_target: Default::default(),
+            widget_mouse_capture_target: Default::default(),
         }
+    }
+
+    /// Route mouse moves and the next mouseup to `element` until the button is released.
+    pub(crate) fn set_widget_mouse_capture(&self, element: &Element) {
+        self.widget_mouse_capture_target.set(Some(element));
     }
 
     /// Note a pending input event, to be processed at the next `update_the_rendering` task.
@@ -733,6 +745,7 @@ impl DocumentEventHandler {
         // already fired above use the actual hit-test target.
         let pointer_target = self
             .get_pointer_capture_target(pointer_id)
+            .or_else(|| self.widget_mouse_capture_target.get())
             .map(DomRoot::upcast::<EventTarget>)
             .unwrap_or_else(|| DomRoot::from_ref(new_target.upcast::<EventTarget>()));
 
@@ -1036,9 +1049,16 @@ impl DocumentEventHandler {
                 let released_disconnected =
                     self.release_disconnected_pointer_capture(cx, pointer_id, "mouse", true);
 
+                let widget_capture_target = if mouse_buttons_down == 1 {
+                    self.widget_mouse_capture_target.take()
+                } else {
+                    self.widget_mouse_capture_target.get()
+                };
+
                 // Get the current capture target (before any state changes)
                 let pointer_target = self
                     .get_pointer_capture_target(pointer_id)
+                    .or_else(|| widget_capture_target.clone())
                     .map(DomRoot::upcast::<EventTarget>)
                     .unwrap_or_else(|| DomRoot::from_ref(node.upcast::<EventTarget>()));
 
@@ -1062,9 +1082,12 @@ impl DocumentEventHandler {
                 }
 
                 // Step 7. dispatch event at target.
+                let mouse_up_target = widget_capture_target
+                    .as_deref()
+                    .map_or(node, |element| element.upcast::<Node>());
                 mouse_event
                     .upcast::<Event>()
-                    .dispatch(cx, node.upcast(), false);
+                    .dispatch(cx, mouse_up_target.upcast(), false);
 
                 // Click counts should still work for other buttons even though they
                 // do not trigger "click" and "dblclick" events, so we increment

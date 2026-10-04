@@ -21,6 +21,7 @@ use crate::dom::bindings::str::DOMString;
 use crate::dom::element::Element;
 use crate::dom::html::htmlfieldsetelement::HTMLFieldSetElement;
 use crate::dom::html::htmlformelement::FormControlElementHelpers;
+use crate::dom::html::input_element::HTMLInputElement;
 use crate::dom::node::Node;
 use crate::dom::window::Window;
 
@@ -79,6 +80,8 @@ pub(crate) struct ValidityState {
     element: Dom<Element>,
     custom_error_message: DomRefCell<DOMString>,
     invalid_flags: Cell<ValidationFlags>,
+    /// <https://html.spec.whatwg.org/multipage/#user-validity>
+    user_validity: Cell<bool>,
 }
 
 impl ValidityState {
@@ -88,6 +91,7 @@ impl ValidityState {
             element: Dom::from_ref(element),
             custom_error_message: DomRefCell::new(DOMString::new()),
             invalid_flags: Cell::new(ValidationFlags::empty()),
+            user_validity: Cell::new(false),
         }
     }
 
@@ -147,14 +151,40 @@ impl ValidityState {
         self.invalid_flags.get()
     }
 
+    /// <https://html.spec.whatwg.org/multipage/#user-validity>
+    pub(crate) fn set_user_validity(&self, cx: &mut JSContext, user_validity: bool) {
+        if self.user_validity.replace(user_validity) != user_validity {
+            self.update_pseudo_classes(cx);
+        }
+    }
+
     pub(crate) fn update_pseudo_classes(&self, cx: &mut JSContext) {
-        if self.element.is_instance_validatable() {
-            let is_valid = self.invalid_flags.get().is_empty();
-            self.element.set_state(ElementState::VALID, is_valid);
-            self.element.set_state(ElementState::INVALID, !is_valid);
-        } else {
-            self.element.set_state(ElementState::VALID, false);
-            self.element.set_state(ElementState::INVALID, false);
+        let invalid_flags = self.invalid_flags.get();
+        let is_candidate = self.element.is_instance_validatable();
+        let is_valid = invalid_flags.is_empty();
+        self.element
+            .set_state(ElementState::VALID, is_candidate && is_valid);
+        self.element
+            .set_state(ElementState::INVALID, is_candidate && !is_valid);
+
+        // <https://html.spec.whatwg.org/multipage/#selector-user-valid>
+        // <https://html.spec.whatwg.org/multipage/#selector-user-invalid>
+        let user_validity = is_candidate && self.user_validity.get();
+        self.element
+            .set_state(ElementState::USER_VALID, user_validity && is_valid);
+        self.element
+            .set_state(ElementState::USER_INVALID, user_validity && !is_valid);
+
+        // <https://html.spec.whatwg.org/multipage/#selector-in-range>
+        // <https://html.spec.whatwg.org/multipage/#selector-out-of-range>
+        if let Some(input) = self.element.downcast::<HTMLInputElement>() {
+            let has_range_limitations = is_candidate && input.has_range_limitations();
+            let out_of_range = invalid_flags
+                .intersects(ValidationFlags::RANGE_UNDERFLOW | ValidationFlags::RANGE_OVERFLOW);
+            self.element
+                .set_state(ElementState::INRANGE, has_range_limitations && !out_of_range);
+            self.element
+                .set_state(ElementState::OUTOFRANGE, has_range_limitations && out_of_range);
         }
 
         if let Some(form_control) = self.element.as_maybe_form_control() &&

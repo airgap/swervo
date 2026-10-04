@@ -748,6 +748,26 @@ impl HTMLFormElement {
             }
             // Step 6.2
             self.firing_submission_events.set(true);
+            // For each element field in form's submittable elements, set field's user validity
+            // to true. (:user-valid and :user-invalid only match input, select and textarea.)
+            let fields: Vec<_> = self
+                .controls
+                .borrow()
+                .iter()
+                .filter(|field| {
+                    field.is::<HTMLInputElement>() ||
+                        field.is::<HTMLSelectElement>() ||
+                        field.is::<HTMLTextAreaElement>()
+                })
+                .map(|field| field.as_rooted())
+                .collect();
+            for field in fields {
+                field
+                    .as_maybe_validatable()
+                    .expect("Input, select and textarea elements are validatable")
+                    .validity_state(cx)
+                    .set_user_validity(cx, true);
+            }
             // Step 6.3
             if !submitter.no_validate(self) && self.interactive_validation(cx).is_err() {
                 self.firing_submission_events.set(false);
@@ -1419,6 +1439,30 @@ impl HTMLFormElement {
             }
         }
         self.update_validity(cx);
+        self.update_default_button();
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#selector-default>: the form's default button,
+    /// its first submit button in tree order, matches `:default`.
+    pub(crate) fn update_default_button(&self) {
+        let mut found_default_button = false;
+        for control in self.controls.borrow().iter() {
+            if !Self::is_submit_button(control) {
+                continue;
+            }
+            control.set_state(ElementState::DEFAULT, !found_default_button);
+            found_default_button = true;
+        }
+    }
+
+    fn is_submit_button(element: &Element) -> bool {
+        if let Some(input) = element.downcast::<HTMLInputElement>() {
+            input.is_submit_button()
+        } else if let Some(button) = element.downcast::<HTMLButtonElement>() {
+            button.is_submit_button()
+        } else {
+            false
+        }
     }
 
     fn remove_control<T: ?Sized + FormControl>(&self, cx: &mut JSContext, control: &T) {
@@ -1436,8 +1480,13 @@ impl HTMLFormElement {
             // from that map."
             let mut past_names_map = self.past_names_map.borrow_mut();
             past_names_map.0.retain(|_k, v| v.0 != control);
+
+            if Self::is_submit_button(control) {
+                control.set_state(ElementState::DEFAULT, false);
+            }
         }
         self.update_validity(cx);
+        self.update_default_button();
     }
 }
 
@@ -1461,6 +1510,11 @@ impl Element {
     pub(crate) fn reset(&self, cx: &mut JSContext) {
         if !self.is_resettable() {
             return;
+        }
+
+        // The reset algorithms of input, select and textarea set user validity to false.
+        if let Some(validatable) = self.as_maybe_validatable() {
+            validatable.validity_state(cx).set_user_validity(cx, false);
         }
 
         if let Some(input_element) = self.downcast::<HTMLInputElement>() {

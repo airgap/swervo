@@ -108,6 +108,23 @@ input::placeholder {
   pointer-events: none !important;
 }
 
+/* Like Chrome, the spin button of <input type=number> shows while the input is hovered. It
+   overlays the end of the text, and its halves step the value up and down. */
+input::-webkit-inner-spin-button {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-end: 0;
+  inline-size: 15px;
+  pointer-events: auto;
+  cursor: default;
+  visibility: hidden;
+  background: white url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="9" height="13" viewBox="0 0 9 13"><path d="M0.5 5.5L4.5 1.5L8.5 5.5ZM0.5 7.5L4.5 11.5L8.5 7.5Z" fill="rgb(109,109,109)"/></svg>') center / 9px 13px no-repeat;
+}
+
+input:hover:not(:disabled, :read-only)::-webkit-inner-spin-button {
+  visibility: visible;
+}
+
 input::selection,
 textarea::selection {
   background: rgba(176, 214, 255, 1.0);
@@ -193,6 +210,57 @@ input[type="file"]:disabled::file-selector-button {
 input[type="file"]::file-selector-button {
   display: inline-block;
   margin-inline-end: 0.25em;
+}
+
+/* A <select> with `multiple` or a display size other than 1 is a list box: its UA shadow
+   tree slots the options and optgroups into a scroller (see htmlselectelement.rs). These
+   rules match Chrome's list box. Options of a drop-down <select> are not slotted, so the
+   option rules below do not affect it. */
+select:is([multiple], [size]:not([size="0"], [size="1"], [size=""])) {
+  background: white;
+  border-color: rgb(118, 118, 118);
+  padding: 0;
+  vertical-align: text-bottom;
+  user-select: none;
+  white-space: nowrap;
+}
+
+select option,
+select optgroup::before {
+  display: block;
+  font-weight: normal;
+  min-block-size: 1.2em;
+  padding-block: 0 1px;
+  padding-inline: 2px;
+  white-space: nowrap;
+}
+
+select optgroup {
+  display: block;
+}
+
+select optgroup::before {
+  content: attr(label);
+  font-weight: bolder;
+}
+
+select optgroup > option {
+  padding-inline-start: 20px;
+}
+
+select option:checked {
+  background-color: rgb(206, 206, 206);
+  color: rgb(16, 16, 16);
+}
+
+select:focus option:checked {
+  background-color: rgb(25, 103, 210);
+  color: white;
+}
+
+select option:disabled,
+select optgroup:disabled::before {
+  color: rgb(128, 128, 128);
 }
 
 input[type="file"] {

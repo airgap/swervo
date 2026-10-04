@@ -281,6 +281,9 @@ impl HTMLButtonElement {
         self.button_type.set(value);
         self.validity_state(cx)
             .perform_validation_and_update(cx, ValidationFlags::all());
+        if let Some(form) = self.form_owner() {
+            form.update_default_button();
+        }
     }
 
     fn command_for_element(&self, cx: &mut JSContext) -> Option<DomRoot<Element>> {
