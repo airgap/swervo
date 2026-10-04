@@ -237,8 +237,7 @@ impl LayoutBoxBase {
         let applies = |cache: &IndependentFormattingContextLayoutResultAndInputs| {
             cache.containing_block_for_children_size.inline ==
                 containing_block_for_children.size.inline &&
-                (cache.containing_block_for_children_size.block ==
-                    containing_block_for_children.size.block ||
+                (cache.containing_block_for_children_size == containing_block_for_children.size ||
                     !cache.result.depends_on_block_constraints)
         };
 

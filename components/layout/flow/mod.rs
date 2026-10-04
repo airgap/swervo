@@ -282,6 +282,7 @@ impl BlockLevelBox {
             size: ContainingBlockSize {
                 inline: inline_size,
                 block: tentative_block_size,
+                replaced_percentage_block_size: None,
             },
             style,
         };
@@ -342,6 +343,7 @@ impl OutsideMarker {
             size: ContainingBlockSize {
                 inline: content_sizes.sizes.max_content,
                 block: SizeConstraint::default(),
+                replaced_percentage_block_size: None,
             },
             style,
         };
@@ -1143,9 +1145,9 @@ impl IndependentFormattingContext {
             pbm,
             depends_on_block_constraints,
             ..
-        } = self
-            .layout_style()
-            .content_box_sizes_and_padding_border_margin(&containing_block.into());
+        } = self.layout_style().content_box_sizes_and_padding_border_margin(
+            &containing_block.for_child_sizing(self.is_replaced()),
+        );
 
         let (margin_block_start, margin_block_end) =
             solve_block_margins_for_in_flow_block_level(&pbm);
@@ -1309,6 +1311,7 @@ impl IndependentFormattingContext {
                         // for replaced elements, whose layout doesn't use the block size of the
                         // containing block for children.
                         block: containing_block_block_size(&cache, aspect_ratio_block_size),
+                        replaced_percentage_block_size: None,
                     },
                     style,
                 },
@@ -1387,6 +1390,7 @@ impl IndependentFormattingContext {
                         size: ContainingBlockSize {
                             inline: proposed_inline_size,
                             block: containing_block_block_size(&cache, aspect_ratio_block_size),
+                            replaced_percentage_block_size: None,
                         },
                         style,
                     },
@@ -1554,6 +1558,9 @@ fn solve_containing_block_padding_and_border_for_in_flow_box<'a>(
             size: ContainingBlockSize {
                 inline: containing_block.size.inline,
                 block: containing_block.size.block,
+                replaced_percentage_block_size: containing_block
+                    .size
+                    .replaced_percentage_block_size,
             },
             style,
         };
@@ -1575,12 +1582,15 @@ fn solve_containing_block_padding_and_border_for_in_flow_box<'a>(
         };
     }
 
+    let is_replaced = context.is_some_and(|context| context.is_replaced());
     let ContentBoxSizesAndPBM {
         content_box_sizes,
         pbm,
         depends_on_block_constraints,
         ..
-    } = layout_style.content_box_sizes_and_padding_border_margin(&containing_block.into());
+    } = layout_style.content_box_sizes_and_padding_border_margin(
+        &containing_block.for_child_sizing(is_replaced),
+    );
 
     let pbm_sums = pbm.sums_auto_is_zero(ignore_block_margins_for_stretch);
     let available_inline_size = Au::zero().max(containing_block.size.inline - pbm_sums.inline);
@@ -1620,7 +1630,6 @@ fn solve_containing_block_padding_and_border_for_in_flow_box<'a>(
 
     // https://drafts.csswg.org/css2/#the-width-property
     // https://drafts.csswg.org/css2/visudet.html#min-max-widths
-    let is_replaced = context.is_some_and(|context| context.is_replaced());
     let get_inline_content_sizes = || {
         let sizes = get_inline_content_sizes(&ConstraintSpace::new(
             tentative_block_size,
@@ -1672,6 +1681,7 @@ fn solve_containing_block_padding_and_border_for_in_flow_box<'a>(
         size: ContainingBlockSize {
             inline: inline_size,
             block: tentative_block_size,
+            replaced_percentage_block_size: None,
         },
         style,
     };
@@ -2183,8 +2193,9 @@ impl IndependentFormattingContext {
         let style = self.style();
         let container_writing_mode = containing_block.style.writing_mode;
         let layout_style = self.layout_style();
-        let content_box_sizes_and_pbm =
-            layout_style.content_box_sizes_and_padding_border_margin(&containing_block.into());
+        let content_box_sizes_and_pbm = layout_style.content_box_sizes_and_padding_border_margin(
+            &containing_block.for_child_sizing(self.is_replaced()),
+        );
         let pbm = &content_box_sizes_and_pbm.pbm;
         let margin = pbm.margin.auto_is(Au::zero);
         let pbm_sums = pbm.padding + pbm.border + margin;
@@ -2245,6 +2256,7 @@ impl IndependentFormattingContext {
                 inline: inline_size,
                 block: aspect_ratio_block_size
                     .map_or(tentative_block_size, SizeConstraint::Definite),
+                replaced_percentage_block_size: None,
             },
             style,
         };

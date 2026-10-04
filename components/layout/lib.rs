@@ -125,6 +125,10 @@ impl<'a> From<&'_ DefiniteContainingBlock<'a>> for IndefiniteContainingBlock<'a>
 pub(crate) struct ContainingBlockSize {
     inline: Au,
     block: SizeConstraint,
+    /// What percentage block sizes of replaced children resolve against instead of `block`.
+    /// Table cells with a fixed block size provide it, as Blink does with its replaced
+    /// percentage resolution block size.
+    replaced_percentage_block_size: Option<Au>,
 }
 
 pub(crate) struct ContainingBlock<'a> {
@@ -137,12 +141,28 @@ struct DefiniteContainingBlock<'a> {
     style: &'a ServoArc<ComputedValues>,
 }
 
+impl<'a> ContainingBlock<'a> {
+    /// The containing block that the sizing properties of a child resolve against.
+    fn for_child_sizing(&self, child_is_replaced: bool) -> IndefiniteContainingBlock<'a> {
+        let mut containing_block = IndefiniteContainingBlock::from(self);
+        if let Some(block_size) = self
+            .size
+            .replaced_percentage_block_size
+            .filter(|_| child_is_replaced)
+        {
+            containing_block.size.block = Some(block_size);
+        }
+        containing_block
+    }
+}
+
 impl<'a> From<&'_ DefiniteContainingBlock<'a>> for ContainingBlock<'a> {
     fn from(definite: &DefiniteContainingBlock<'a>) -> Self {
         ContainingBlock {
             size: ContainingBlockSize {
                 inline: definite.size.inline,
                 block: SizeConstraint::Definite(definite.size.block),
+                replaced_percentage_block_size: None,
             },
             style: definite.style,
         }

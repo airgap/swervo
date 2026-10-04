@@ -209,6 +209,7 @@ impl taffy::LayoutPartialTree for TaffyContainerContext<'_> {
                     size: ContainingBlockSize {
                         inline: Au::from_f32_px(inline_size),
                         block: tentative_block_size,
+                        replaced_percentage_block_size: None,
                     },
                     style,
                 };
@@ -334,6 +335,7 @@ impl ComputeInlineContentSizes for TaffyContainer {
             size: ContainingBlockSize {
                 inline: Au::zero(),
                 block: SizeConstraint::default(),
+                replaced_percentage_block_size: None,
             },
             style,
         };

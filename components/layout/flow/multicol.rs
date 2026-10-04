@@ -123,6 +123,7 @@ impl BlockFormattingContext {
             size: ContainingBlockSize {
                 inline: geometry.width,
                 block: containing_block.size.block,
+                replaced_percentage_block_size: None,
             },
             style: containing_block.style,
         };
