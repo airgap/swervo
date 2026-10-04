@@ -591,6 +591,8 @@ pub(crate) struct Document {
     delayed_tasks: DomRefCell<Vec<Box<dyn NonSendTaskBox>>>,
     /// <https://html.spec.whatwg.org/multipage/#completely-loaded>
     completely_loaded: Cell<bool>,
+    /// Whether the window's userscripts have been queued for this document.
+    userscripts_loaded: Cell<bool>,
     /// Set of shadow roots connected to the document tree.
     shadow_roots: DomRefCell<HashSet<Dom<ShadowRoot>>>,
     /// Whether any of the shadow roots need the stylesheets flushed.
@@ -4128,6 +4130,7 @@ impl Document {
             navigation_timing: Default::default(),
             resource_fetch_timing: RefCell::new(None),
             completely_loaded: Cell::new(false),
+            userscripts_loaded: Cell::new(false),
             script_and_layout_blockers: Cell::new(0),
             delayed_tasks: Default::default(),
             shadow_roots: DomRefCell::new(HashSet::new()),
@@ -4272,6 +4275,12 @@ impl Document {
             let task = self.delayed_tasks.borrow_mut().remove(0);
             task.run_box(cx);
         }
+    }
+
+    /// Record that userscripts have been queued for this document, returning whether they
+    /// already had been.
+    pub(crate) fn mark_userscripts_loaded(&self) -> bool {
+        self.userscripts_loaded.replace(true)
     }
 
     /// Enqueue a task to run as soon as any JS and layout blockers are removed.
