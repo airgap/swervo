@@ -21,7 +21,10 @@ use web_atoms::LocalName;
 use crate::context::LayoutContext;
 use crate::dom::{BoxSlot, LayoutBox, NodeExt};
 use crate::flow::inline::SharedInlineStyles;
-use crate::lists::{counter_values, generate_counter_representation, list_item_ordinal};
+use crate::lists::{
+    apply_quote_item, counter_values, generate_counter_representation, list_item_ordinal,
+    quote_depth,
+};
 use crate::quotes::quotes_for_lang;
 use crate::replaced::ReplacedContents;
 use crate::style_ext::{
@@ -470,6 +473,16 @@ where
     }
 }
 
+fn is_quote_item<I>(item: &ContentItem<I>) -> bool {
+    matches!(
+        item,
+        ContentItem::OpenQuote |
+            ContentItem::CloseQuote |
+            ContentItem::NoOpenQuote |
+            ContentItem::NoCloseQuote
+    )
+}
+
 /// <https://www.w3.org/TR/CSS2/generate.html#propdef-content>
 pub(crate) fn generate_pseudo_element_content(
     pseudo_element_info: &NodeAndStyleInfo,
@@ -478,6 +491,12 @@ pub(crate) fn generate_pseudo_element_content(
     match &pseudo_element_info.style.get_counters().content {
         Content::Items(items) => {
             let mut vec = vec![];
+            let mut current_quote_depth = items
+                .items
+                .iter()
+                .any(is_quote_item)
+                .then(|| quote_depth(context, pseudo_element_info.node))
+                .unwrap_or_default();
             for item in items.items.iter() {
                 match item {
                     ContentItem::String(s) => {
@@ -524,21 +543,29 @@ pub(crate) fn generate_pseudo_element_content(
                             vec.push(PseudoElementContentItem::Replaced(replaced_content));
                         }
                     },
-                    ContentItem::OpenQuote | ContentItem::CloseQuote => {
-                        // TODO(xiaochengh): calculate quote depth
+                    ContentItem::OpenQuote |
+                    ContentItem::CloseQuote |
+                    ContentItem::NoOpenQuote |
+                    ContentItem::NoCloseQuote => {
+                        let Some(depth) = apply_quote_item(item, &mut current_quote_depth) else {
+                            continue;
+                        };
+                        // Levels deeper than the list of pairs reuse its last pair.
                         let maybe_quote = match &pseudo_element_info.style.get_list().quotes {
                             Quotes::QuoteList(quote_list) => {
-                                quote_list.0.first().map(|quote_pair| {
-                                    get_quote_from_pair(
-                                        item,
-                                        &*quote_pair.opening,
-                                        &*quote_pair.closing,
-                                    )
-                                })
+                                quote_list.0.get(depth).or(quote_list.0.last()).map(
+                                    |quote_pair| {
+                                        get_quote_from_pair(
+                                            item,
+                                            &*quote_pair.opening,
+                                            &*quote_pair.closing,
+                                        )
+                                    },
+                                )
                             },
                             Quotes::Auto => {
                                 let lang = &pseudo_element_info.style.get_font()._x_lang;
-                                let quotes = quotes_for_lang(lang.0.as_ref(), 0);
+                                let quotes = quotes_for_lang(lang.0.as_ref(), depth);
                                 Some(get_quote_from_pair(item, &quotes.opening, &quotes.closing))
                             },
                         };
@@ -573,7 +600,6 @@ pub(crate) fn generate_pseudo_element_content(
                             .join(separator);
                         vec.push(PseudoElementContentItem::Text(text));
                     },
-                    ContentItem::NoOpenQuote | ContentItem::NoCloseQuote => {},
                 }
             }
             vec
