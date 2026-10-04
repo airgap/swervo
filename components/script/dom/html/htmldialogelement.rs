@@ -193,13 +193,11 @@ impl HTMLDialogElement {
         );
 
         // Step 17. Let document be subject's node document.
-        // Step 18. Let hideUntil be the result of running topmost popover ancestor given subject, document's showing hint popover list, null, and false.
-        // Step 19. If hideUntil is null, then set hideUntil to the result of running topmost popover ancestor given subject, document's showing auto popover list, null, and false.
-        // Step 20. If hideUntil is null, then set hideUntil to document.
-        // Step 21. Run hide all popovers until given hideUntil, false, and true.
+        // Step 18. Let hideUntil be the result of running topmost popover ancestor given subject, null, and false.
+        // Step 19. Run hide popovers until given document, hideUntil, false, and true.
         self.hide_popovers_not_containing_self(cx);
 
-        // Step 22. Run the dialog focusing steps given subject.
+        // Step 20. Run the dialog focusing steps given subject.
         self.run_dialog_focusing_steps(cx);
         Ok(())
     }
@@ -296,17 +294,12 @@ impl HTMLDialogElement {
             .queue_simple_event(target, atom!("close"));
     }
 
-    /// Steps 17 to 21 of showing a modal dialog and steps 8 to 12 of show(): hide every popover
+    /// Steps 17 to 19 of showing a modal dialog and steps 8 to 10 of show(): hide every popover
     /// that is not an ancestor of this dialog.
     fn hide_popovers_not_containing_self(&self, cx: &mut JSContext) {
         let document = self.owner_document();
-        let hide_until = HTMLElement::topmost_popover_ancestor(
-            self.upcast(),
-            &document.top_layer().showing_auto_popover_list(),
-            None,
-            false,
-        );
-        HTMLElement::hide_all_popovers_until(cx, &document, hide_until.as_deref(), false, true);
+        let hide_until = HTMLElement::topmost_popover_ancestor(self.upcast(), None, false);
+        HTMLElement::hide_popovers_until(cx, &document, hide_until.as_deref(), false, true);
     }
 
     /// <https://html.spec.whatwg.org/multipage/#computed-closed-by-state>
@@ -607,13 +600,11 @@ impl HTMLDialogElementMethods<crate::DomTypeHolder> for HTMLDialogElement {
         );
 
         // Step 8. Let document be this's node document.
-        // Step 9. Let hideUntil be the result of running topmost popover ancestor given this, document's showing hint popover list, null, and false.
-        // Step 10. If hideUntil is null, then set hideUntil to the result of running topmost popover ancestor given this, document's showing auto popover list, null, and false.
-        // Step 11. If hideUntil is null, then set hideUntil to document.
-        // Step 12. Run hide all popovers until given hideUntil, false, and true.
+        // Step 9. Let hideUntil be the result of running topmost popover ancestor given this, null, and false.
+        // Step 10. Run hide popovers until given document, hideUntil, false, and true.
         self.hide_popovers_not_containing_self(cx);
 
-        // Step 13. Run the dialog focusing steps given this.
+        // Step 11. Run the dialog focusing steps given this.
         self.run_dialog_focusing_steps(cx);
         Ok(())
     }

@@ -23,8 +23,17 @@ pub(crate) enum LightDismissEventType {
     PointerUp,
 }
 
+/// The two stacks that auto and hint popovers are shown in.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum PopoverStack {
+    /// <https://html.spec.whatwg.org/multipage/#showing-auto-popover-list>
+    Auto,
+    /// <https://html.spec.whatwg.org/multipage/#showing-hint-popover-list>
+    Hint,
+}
+
 /// The [`DocumentTopLayer`] holds a `Document`'s top layer together with the bookkeeping that
-/// decides what enters and leaves it: the showing auto popover list, the open dialogs list, the
+/// decides what enters and leaves it: the showing auto and hint popover lists, the open dialogs list, the
 /// light dismiss pointerdown targets and the window's close watcher manager.
 #[derive(JSTraceable, MallocSizeOf)]
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
@@ -33,6 +42,10 @@ pub(crate) struct DocumentTopLayer {
     top_layer: DomRefCell<Vec<Dom<Element>>>,
     /// <https://html.spec.whatwg.org/multipage/#showing-auto-popover-list>
     showing_auto_popover_list: DomRefCell<Vec<Dom<HTMLElement>>>,
+    /// <https://html.spec.whatwg.org/multipage/#showing-hint-popover-list>
+    showing_hint_popover_list: DomRefCell<Vec<Dom<HTMLElement>>>,
+    /// <https://html.spec.whatwg.org/multipage/#hint-stack-parent>
+    hint_stack_parent: MutNullableDom<HTMLElement>,
     /// <https://html.spec.whatwg.org/multipage/#open-dialogs-list>
     open_dialogs_list: DomRefCell<Vec<Dom<HTMLDialogElement>>>,
     /// <https://html.spec.whatwg.org/multipage/#popover-pointerdown-target>
@@ -54,6 +67,8 @@ impl Default for DocumentTopLayer {
         Self {
             top_layer: Default::default(),
             showing_auto_popover_list: Default::default(),
+            showing_hint_popover_list: Default::default(),
+            hint_stack_parent: Default::default(),
             open_dialogs_list: Default::default(),
             popover_pointerdown_target: Default::default(),
             dialog_pointerdown_target: Default::default(),
@@ -109,53 +124,92 @@ impl DocumentTopLayer {
         })
     }
 
-    pub(crate) fn showing_auto_popover_list(&self) -> Vec<DomRoot<HTMLElement>> {
-        self.showing_auto_popover_list
+    fn popover_list(&self, stack: PopoverStack) -> &DomRefCell<Vec<Dom<HTMLElement>>> {
+        match stack {
+            PopoverStack::Auto => &self.showing_auto_popover_list,
+            PopoverStack::Hint => &self.showing_hint_popover_list,
+        }
+    }
+
+    pub(crate) fn showing_popover_list(&self, stack: PopoverStack) -> Vec<DomRoot<HTMLElement>> {
+        self.popover_list(stack)
             .borrow()
             .iter()
             .map(|popover| DomRoot::from_ref(&**popover))
             .collect()
     }
 
-    pub(crate) fn push_showing_auto_popover(&self, popover: &HTMLElement) {
-        debug_assert!(!self.showing_auto_popover_list_contains(popover));
-        self.showing_auto_popover_list
+    pub(crate) fn push_showing_popover(&self, stack: PopoverStack, popover: &HTMLElement) {
+        debug_assert!(!self.showing_popover_list_contains(stack, popover));
+        self.popover_list(stack)
             .borrow_mut()
             .push(Dom::from_ref(popover));
     }
 
-    pub(crate) fn remove_showing_auto_popover(&self, popover: &HTMLElement) {
-        self.showing_auto_popover_list
-            .borrow_mut()
-            .retain(|item| &**item != popover);
+    /// Remove `popover` from whichever showing popover list it is in.
+    pub(crate) fn remove_showing_popover(&self, popover: &HTMLElement) {
+        for stack in [PopoverStack::Auto, PopoverStack::Hint] {
+            self.popover_list(stack)
+                .borrow_mut()
+                .retain(|item| &**item != popover);
+        }
     }
 
-    pub(crate) fn showing_auto_popover_list_contains(&self, popover: &HTMLElement) -> bool {
-        self.showing_auto_popover_list
+    pub(crate) fn showing_popover_list_contains(
+        &self,
+        stack: PopoverStack,
+        popover: &HTMLElement,
+    ) -> bool {
+        self.popover_list(stack)
             .borrow()
             .iter()
             .any(|item| &**item == popover)
     }
 
-    /// <https://html.spec.whatwg.org/multipage/#topmost-auto-popover>
-    pub(crate) fn topmost_auto_popover(&self) -> Option<DomRoot<HTMLElement>> {
-        self.showing_auto_popover_list
-            .borrow()
-            .last()
-            .map(|popover| DomRoot::from_ref(&**popover))
+    /// <https://html.spec.whatwg.org/multipage/#topmost-auto-or-hint-popover>
+    pub(crate) fn topmost_auto_or_hint_popover(&self) -> Option<DomRoot<HTMLElement>> {
+        // > 1. If document's showing hint popover list is not empty, then return document's
+        // >    showing hint popover list's last element.
+        // > 2. If document's showing auto popover list is not empty, then return document's
+        // >    showing auto popover list's last element.
+        // > 3. Return null.
+        [PopoverStack::Hint, PopoverStack::Auto]
+            .into_iter()
+            .find_map(|stack| {
+                self.popover_list(stack)
+                    .borrow()
+                    .last()
+                    .map(|popover| DomRoot::from_ref(&**popover))
+            })
     }
 
-    /// <https://html.spec.whatwg.org/multipage/#popover-stack-position>: one more than the index
-    /// of `popover` in the showing auto popover list, or zero when it is not in that list.
+    pub(crate) fn hint_stack_parent(&self) -> Option<DomRoot<HTMLElement>> {
+        self.hint_stack_parent.get()
+    }
+
+    pub(crate) fn set_hint_stack_parent(&self, popover: Option<&HTMLElement>) {
+        self.hint_stack_parent.set(popover);
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#popover-stack-position>
     pub(crate) fn popover_stack_position(&self, popover: Option<&HTMLElement>) -> usize {
         let Some(popover) = popover else {
             return 0;
         };
-        self.showing_auto_popover_list
-            .borrow()
-            .iter()
-            .position(|item| &**item == popover)
-            .map_or(0, |index| index + 1)
+        let position_in = |stack: PopoverStack| {
+            self.popover_list(stack)
+                .borrow()
+                .iter()
+                .position(|item| &**item == popover)
+        };
+        // > 3. If popover is in hintList, then return the index of popover in hintList + the size
+        // >    of autoList + 1.
+        if let Some(index) = position_in(PopoverStack::Hint) {
+            return index + self.showing_auto_popover_list.borrow().len() + 1;
+        }
+        // > 4. If popover is in autoList, then return the index of popover in autoList + 1.
+        // > 5. Return 0.
+        position_in(PopoverStack::Auto).map_or(0, |index| index + 1)
     }
 
     pub(crate) fn add_open_dialog(&self, dialog: &HTMLDialogElement) {
@@ -391,36 +445,34 @@ impl DocumentTopLayer {
         event_type: LightDismissEventType,
         target: &Node,
     ) {
-        // > 4. Let topmostPopover be the result of running topmost auto popover given document.
-        // > 5. If topmostPopover is null, then return.
-        if self.topmost_auto_popover().is_none() {
+        // > 4. If the result of running topmost auto or hint popover given document is null, then
+        // >    return.
+        if self.topmost_auto_or_hint_popover().is_none() {
             return;
         }
 
         match event_type {
-            // > 6. If event is a PointerEvent and event's type is "pointerdown", then: set
-            // >    document's popover pointerdown target to the result of running topmost clicked
-            // >    popover given target.
+            // > 5. If event's type is "pointerdown": set document's popover pointerdown target
+            // >    to the result of running topmost clicked popover given target.
             LightDismissEventType::PointerDown => {
                 self.popover_pointerdown_target
                     .set(self.topmost_clicked_popover(cx, target).as_deref());
             },
-            // > 7. If event is a PointerEvent and event's type is "pointerup", then:
+            // > 6. If event's type is "pointerup", then:
             LightDismissEventType::PointerUp => {
-                // > 7.1. Let ancestor be the result of running topmost clicked popover given
+                // > 6.1. Let ancestor be the result of running topmost clicked popover given
                 // >      target.
                 let ancestor = self.topmost_clicked_popover(cx, target);
-                // > 7.2. Let sameTarget be true if ancestor is document's popover pointerdown
+                // > 6.2. Let sameTarget be true if ancestor is document's popover pointerdown
                 // >      target.
                 let same_target =
                     ancestor.as_deref() == self.popover_pointerdown_target.get().as_deref();
-                // > 7.3. Set document's popover pointerdown target to null.
+                // > 6.3. Set document's popover pointerdown target to null.
                 self.popover_pointerdown_target.set(None);
-                // > 7.4. If ancestor is null, then set ancestor to document.
-                // > 7.5. If sameTarget is true, then run hide all popovers until given ancestor,
-                // >      false, and true.
+                // > 6.4. If sameTarget is false, then return.
+                // > 6.5. Run hide popovers until given document, ancestor, false, and true.
                 if same_target {
-                    HTMLElement::hide_all_popovers_until(
+                    HTMLElement::hide_popovers_until(
                         cx,
                         &target.owner_doc(),
                         ancestor.as_deref(),
