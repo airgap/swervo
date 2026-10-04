@@ -548,19 +548,19 @@ impl DocumentEventHandler {
             FireMouseEventType::Enter | FireMouseEventType::Leave
         ));
 
-        let common_ancestor = match related_target.as_ref() {
-            Some(related_target) => event_target
-                .common_ancestor_in_flat_tree(related_target)
-                .unwrap_or_else(|| DomRoot::from_ref(&*event_target)),
-            None => DomRoot::from_ref(&*event_target),
-        };
+        // Without a related target in this tree (the pointer came from or went to outside the
+        // document), the target and all of its ancestors up to and including the document are
+        // entered or left, as in Chrome.
+        let common_ancestor = related_target
+            .as_ref()
+            .and_then(|related_target| event_target.common_ancestor_in_flat_tree(related_target));
 
         // We need to create a target chain in case the event target shares
         // its boundaries with its ancestors.
         let mut targets = vec![];
         let mut current = Some(event_target);
         while let Some(node) = current {
-            if node == common_ancestor {
+            if common_ancestor.as_ref() == Some(&node) {
                 break;
             }
             current = node.parent_in_flat_tree();
