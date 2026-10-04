@@ -137,6 +137,10 @@ impl taffy::LayoutPartialTree for TaffyContainerContext<'_> {
     ) -> taffy::LayoutOutput {
         let mut child = (*self.source_child_nodes[usize::from(node_id)]).borrow_mut();
         let child = &mut *child;
+        let is_absolutely_positioned = matches!(
+            child.taffy_level_box,
+            TaffyItemBoxInner::OutOfFlowAbsolutelyPositionedBox(_)
+        );
 
         with_independent_formatting_context(
             &mut child.taffy_level_box,
@@ -216,7 +220,7 @@ impl taffy::LayoutPartialTree for TaffyContainerContext<'_> {
                 };
 
                 child.positioning_context = PositioningContext::default();
-                let layout = independent_context.layout(
+                let (layout, is_cached) = independent_context.layout_and_is_cached(
                     self.layout_context,
                     &mut child.positioning_context,
                     &content_box_size_override,
@@ -224,6 +228,14 @@ impl taffy::LayoutPartialTree for TaffyContainerContext<'_> {
                     preferred_aspect_ratio,
                     &lazy_block_size,
                 );
+                // An absolutely positioned item is laid out again once hoisted, and that
+                // layout reuses the box fragment of the previous layout whenever its layout
+                // result is cached. A fresh layout here has just refilled that cache, so the
+                // previous fragment no longer matches it: drop the fragment, or the hoisted
+                // layout paints stale content (such as an image from before it loaded).
+                if is_absolutely_positioned && !is_cached {
+                    independent_context.base.clear_fragments();
+                }
 
                 child.child_fragments = layout.fragments;
                 self.child_specific_layout_infos[usize::from(node_id)] =
