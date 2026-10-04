@@ -4050,7 +4050,7 @@ impl Document {
 
         Document {
             node: Node::new_document_node(),
-            document_or_shadow_root: DocumentOrShadowRoot::new(window),
+            document_or_shadow_root: DocumentOrShadowRoot::new(),
             window: Dom::from_ref(window),
             has_browsing_context,
             implementation: Default::default(),

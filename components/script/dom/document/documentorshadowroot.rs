@@ -26,7 +26,6 @@ use js::rust::{Handle, HandleId, HandleValue, MutableHandleValue, ToNumber};
 use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericBindings::DocumentBinding::DocumentMethods;
 use script_bindings::codegen::GenericBindings::ShadowRootBinding::ShadowRootMethods;
-use script_bindings::codegen::GenericBindings::WindowBinding::WindowMethods;
 use script_bindings::conversions::{SafeToJSValConvertible, jsid_to_string, root_from_handlevalue};
 use script_bindings::error::{Error, ErrorResult};
 use script_bindings::reflector::DomObject;
@@ -52,9 +51,8 @@ use crate::dom::css::stylesheetlist::StyleSheetListOwner;
 use crate::dom::customelementregistry::CustomElementRegistry;
 use crate::dom::element::Element;
 use crate::dom::globalscope::GlobalScope;
-use crate::dom::node::{self, Node};
+use crate::dom::node::{self, Node, NodeTraits};
 use crate::dom::types::{CSSStyleSheet, EventTarget, ShadowRoot};
-use crate::dom::window::Window;
 use crate::stylesheet_set::StylesheetSetRef;
 
 /// Stylesheet could be constructed by a CSSOM object CSSStylesheet or parsed
@@ -140,14 +138,12 @@ impl ::style::stylesheets::StylesheetInDocument for ServoStylesheetInDocument {
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
 #[derive(JSTraceable, MallocSizeOf)]
 pub(crate) struct DocumentOrShadowRoot {
-    window: Dom<Window>,
     custom_element_registry: MutNullableDom<CustomElementRegistry>,
 }
 
 impl DocumentOrShadowRoot {
-    pub(crate) fn new(window: &Window) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            window: Dom::from_ref(window),
             custom_element_registry: MutNullableDom::new(None),
         }
     }
@@ -197,7 +193,8 @@ impl DocumentOrShadowRoot {
     ) -> Option<DomRoot<Element>> {
         let x = *x as f32;
         let y = *y as f32;
-        let viewport = self.window.viewport_details().size;
+        let window = this.owner_window();
+        let viewport = window.viewport_details().size;
 
         if !has_browsing_context {
             return None;
@@ -207,9 +204,7 @@ impl DocumentOrShadowRoot {
             return None;
         }
 
-        let results = self
-            .window
-            .elements_from_point_query(LayoutPoint::new(x, y));
+        let results = window.elements_from_point_query(LayoutPoint::new(x, y));
         let Some(result) = results.first() else {
             return document_element;
         };
@@ -234,7 +229,8 @@ impl DocumentOrShadowRoot {
     ) -> Vec<DomRoot<Element>> {
         let x = *x as f32;
         let y = *y as f32;
-        let viewport = self.window.viewport_details().size;
+        let window = this.owner_window();
+        let viewport = window.viewport_details().size;
 
         if !has_browsing_context {
             return vec![];
@@ -250,9 +246,7 @@ impl DocumentOrShadowRoot {
         // box, that would be a target for hit testing at coordinates x,y even if nothing
         // would be overlapping it, when applying the transforms that apply to the
         // descendants of the viewport, append the associated element to sequence.
-        let nodes = self
-            .window
-            .elements_from_point_query(LayoutPoint::new(x, y));
+        let nodes = window.elements_from_point_query(LayoutPoint::new(x, y));
 
         let mut elements: Vec<_> = nodes
             .iter()
@@ -291,7 +285,7 @@ impl DocumentOrShadowRoot {
     /// <https://html.spec.whatwg.org/multipage/#dom-documentorshadowroot-activeelement-dev>
     pub(crate) fn active_element(&self, this: &Node) -> Option<DomRoot<Element>> {
         // Step 1. Let candidate be this's node document's focused area's DOM anchor.
-        let document = self.window.Document();
+        let document = this.owner_doc();
         let candidate = document
             .focus_handler()
             .focused_area()
@@ -403,14 +397,14 @@ impl DocumentOrShadowRoot {
         }
 
         let owner_doc = match owner {
-            StyleSheetListOwner::Document(doc) => doc,
-            StyleSheetListOwner::ShadowRoot(root) => root.owner_doc(),
+            StyleSheetListOwner::Document(doc) => doc.as_rooted(),
+            StyleSheetListOwner::ShadowRoot(root) => root.owner_document(),
         };
 
         for sheet in incoming_stylesheets.iter() {
             // > If value’s constructed flag is not set, or its constructor document is not equal
             // > to this DocumentOrShadowRoot’s node document, throw a "NotAllowedError" DOMException.
-            if !sheet.constructor_document_matches(owner_doc) {
+            if !sheet.constructor_document_matches(&owner_doc) {
                 return Err(Error::NotAllowed(None));
             }
         }

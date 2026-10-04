@@ -58,7 +58,6 @@ use crate::dom::node::{
 use crate::dom::sanitizer::Sanitizer;
 use crate::dom::trustedtypes::trustedhtml::TrustedHTML;
 use crate::dom::types::EventTarget;
-use crate::dom::window::Window;
 use crate::script_runtime::CanGc;
 use crate::stylesheet_set::StylesheetSetRef;
 
@@ -75,12 +74,10 @@ pub(crate) struct ShadowRoot {
     /// The [`DocumentFragment`] that this [`ShadowRoot`] inherits from.
     document_fragment: DocumentFragment,
     document_or_shadow_root: DocumentOrShadowRoot,
-    document: Dom<Document>,
     /// List of author styles associated with nodes in this shadow tree.
     #[custom_trace]
     author_styles: DomRefCell<AuthorStyles<ServoStylesheetInDocument>>,
     stylesheet_list: MutNullableDom<StyleSheetList>,
-    window: Dom<Window>,
 
     /// <https://dom.spec.whatwg.org/#dom-shadowroot-mode>
     mode: ShadowRootMode,
@@ -134,11 +131,9 @@ impl ShadowRoot {
 
         ShadowRoot {
             document_fragment,
-            document_or_shadow_root: DocumentOrShadowRoot::new(document.window()),
-            document: Dom::from_ref(document),
+            document_or_shadow_root: DocumentOrShadowRoot::new(),
             author_styles: DomRefCell::new(AuthorStyles::new()),
             stylesheet_list: MutNullableDom::new(None),
-            window: Dom::from_ref(document.window()),
             mode,
             slot_assignment_mode,
             clonable,
@@ -174,10 +169,6 @@ impl ShadowRoot {
             document.window(),
             can_gc,
         )
-    }
-
-    pub(crate) fn owner_doc(&self) -> &Document {
-        &self.document
     }
 
     pub(crate) fn adopted_stylesheets(&self) -> &AdoptedStyleSheets {
@@ -226,8 +217,9 @@ impl ShadowRoot {
                 })
                 .cloned();
 
-            if self.document.has_browsing_context() {
-                self.document.load_web_fonts_from_stylesheet(cx, &sheet);
+            let document = self.owner_document();
+            if document.has_browsing_context() {
+                document.load_web_fonts_from_stylesheet(cx, &sheet);
             }
 
             DocumentOrShadowRoot::add_stylesheet(
@@ -235,7 +227,7 @@ impl ShadowRoot {
                 StylesheetSetRef::Author(stylesheets),
                 sheet,
                 insertion_point,
-                self.document.style_shared_author_lock(),
+                document.style_shared_author_lock(),
             );
         }
         self.invalidate_stylesheets();
@@ -256,8 +248,9 @@ impl ShadowRoot {
 
             let insertion_point = stylesheets.iter().last().cloned();
 
-            if self.document.has_browsing_context() {
-                self.document.load_web_fonts_from_stylesheet(cx, &sheet);
+            let document = self.owner_document();
+            if document.has_browsing_context() {
+                document.load_web_fonts_from_stylesheet(cx, &sheet);
             }
 
             DocumentOrShadowRoot::add_stylesheet(
@@ -265,7 +258,7 @@ impl ShadowRoot {
                 StylesheetSetRef::Author(stylesheets),
                 sheet,
                 insertion_point,
-                self.document.style_shared_author_lock(),
+                document.style_shared_author_lock(),
             );
         }
         self.invalidate_stylesheets();
@@ -288,14 +281,15 @@ impl ShadowRoot {
     /// shadow tree was first styled (a later `<style>`, or `adoptedStyleSheets` set after a
     /// layout) never applies.
     pub(crate) fn invalidate_stylesheets(&self) {
-        self.document.invalidate_shadow_roots_stylesheets();
+        let document = self.owner_document();
+        document.invalidate_shadow_roots_stylesheets();
         self.author_styles.borrow_mut().stylesheets.force_dirty();
         // Mark the host element dirty so a reflow will be performed.
         self.Host().upcast::<Node>().dirty(NodeDamage::Style);
 
         // Also mark the host element with `RestyleHint::restyle_subtree` so a reflow
         // can traverse into the shadow tree.
-        let mut restyle = self.document.ensure_pending_restyle(&self.Host());
+        let mut restyle = document.ensure_pending_restyle(&self.Host());
         restyle.hint.insert(RestyleHint::restyle_subtree());
     }
 
@@ -414,7 +408,7 @@ impl ShadowRootMethods<crate::DomTypeHolder> for ShadowRoot {
             x,
             y,
             None,
-            self.document.has_browsing_context(),
+            self.owner_document().has_browsing_context(),
         ) {
             Some(e) => {
                 let retargeted_node = e.upcast::<EventTarget>().retarget(self.upcast());
@@ -436,7 +430,7 @@ impl ShadowRootMethods<crate::DomTypeHolder> for ShadowRoot {
                 x,
                 y,
                 None,
-                self.document.has_browsing_context(),
+                self.owner_document().has_browsing_context(),
             )
             .iter()
         {
@@ -480,7 +474,7 @@ impl ShadowRootMethods<crate::DomTypeHolder> for ShadowRoot {
         self.stylesheet_list.or_init(|| {
             StyleSheetList::new(
                 cx,
-                &self.window,
+                &self.owner_window(),
                 StyleSheetListOwner::ShadowRoot(Dom::from_ref(self)),
             )
         })
@@ -614,7 +608,7 @@ impl ShadowRootMethods<crate::DomTypeHolder> for ShadowRoot {
     fn GetFullscreenElement(&self) -> Option<DomRoot<Element>> {
         DocumentOrShadowRoot::get_fullscreen_element(
             self.upcast::<Node>(),
-            self.document.fullscreen_element(),
+            self.owner_document().fullscreen_element(),
         )
     }
 }
