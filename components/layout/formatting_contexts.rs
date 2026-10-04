@@ -569,16 +569,23 @@ impl IndependentFormattingContext {
         preferred_aspect_ratio: Option<AspectRatio>,
         lazy_block_size: &LazySize,
     ) -> (IndependentFormattingContextLayoutResult, bool) {
+        // Aligned content is placed within the resolved `lazy_block_size`, which the cache does
+        // not key on: flex items are first laid out for their intrinsic block size, and reusing
+        // that result would leave the content unaligned in the final, taller box.
         let lazy_block_size_kind = lazy_block_size.kind();
-        if let Some(cached_layout_result) = self
-            .base
-            .cached_independent_formatting_context_layout_if_applicable(
-                positioning_context,
-                containing_block_for_children,
-                lazy_block_size_kind,
-            )
-        {
-            return (cached_layout_result, true);
+        let content_is_aligned =
+            self.is_block_container() && block_container_content_alignment(self.style()).is_some();
+        if !content_is_aligned {
+            if let Some(cached_layout_result) = self
+                .base
+                .cached_independent_formatting_context_layout_if_applicable(
+                    positioning_context,
+                    containing_block_for_children,
+                    lazy_block_size_kind,
+                )
+            {
+                return (cached_layout_result, true);
+            }
         }
 
         #[cfg(feature = "tracing")]
@@ -706,6 +713,16 @@ impl ComputeInlineContentSizes for IndependentFormattingContextContents {
     }
 }
 
+/// The `align-content` value that moves a block container's content, if any.
+fn block_container_content_alignment(style: &ComputedValues) -> Option<AlignFlags> {
+    let alignment = style.get_position().align_content.primary().value();
+    (matches!(
+        alignment,
+        AlignFlags::CENTER | AlignFlags::END | AlignFlags::FLEX_END
+    ) && style.writing_mode.is_horizontal())
+    .then_some(alignment)
+}
+
 /// <https://drafts.csswg.org/css-align/#distribution-block>: `align-content` on a block container
 /// taller than its content moves the content to the center or end. Buttons center their label
 /// this way (see servo.css), like Chrome. Horizontal writing modes only.
@@ -714,14 +731,9 @@ fn align_block_container_content(
     lazy_block_size: &LazySize,
     result: &mut IndependentFormattingContextLayoutResult,
 ) {
-    let alignment = style.get_position().align_content.primary().value();
-    if !matches!(
-        alignment,
-        AlignFlags::CENTER | AlignFlags::END | AlignFlags::FLEX_END
-    ) || !style.writing_mode.is_horizontal()
-    {
+    let Some(alignment) = block_container_content_alignment(style) else {
         return;
-    }
+    };
     let content_block_size = result.content_block_size;
     let free_space = lazy_block_size.resolve(|| content_block_size) - content_block_size;
     if free_space <= Au(0) {
