@@ -49,7 +49,7 @@ use style::properties::{
     parse_style_attribute,
 };
 use style::rule_tree::{CascadeLevel, CascadeOrigin};
-use style::selector_parser::{RestyleDamage, SelectorParser, Snapshot};
+use style::selector_parser::{RestyleDamage, Snapshot};
 use style::shared_lock::Locked;
 use style::stylesheets::layer_rule::LayerOrder;
 use style::stylesheets::{CssRuleType, UrlExtraData};
@@ -4102,14 +4102,7 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
     #[cfg_attr(crown, allow(crown::unrooted_must_root))]
     fn Matches(&self, selectors: DOMString) -> Fallible<bool> {
         let document = self.owner_document();
-        let url = document.url();
-        let selectors = match SelectorParser::parse_author_origin_no_namespace(
-            &selectors.str(),
-            &UrlExtraData(url.get_arc()),
-        ) {
-            Err(_) => return Err(Error::Syntax(None)),
-            Ok(selectors) => selectors,
-        };
+        let selectors = document.parse_selector_list(&selectors.str())?;
 
         // SAFETY: traced_self is unrooted, but we have a reference to "self" so it won't be freed.
         let traced_self = Dom::from_ref(self);
@@ -4134,14 +4127,7 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
     #[cfg_attr(crown, allow(crown::unrooted_must_root))]
     fn Closest(&self, selectors: DOMString) -> Fallible<Option<DomRoot<Element>>> {
         let document = self.owner_document();
-        let url = document.url();
-        let selectors = match SelectorParser::parse_author_origin_no_namespace(
-            &selectors.str(),
-            &UrlExtraData(url.get_arc()),
-        ) {
-            Err(_) => return Err(Error::Syntax(None)),
-            Ok(selectors) => selectors,
-        };
+        let selectors = document.parse_selector_list(&selectors.str())?;
 
         // SAFETY: traced_self is unrooted, but we have a reference to "self" so it won't be freed.
         let traced_self = Dom::from_ref(self);

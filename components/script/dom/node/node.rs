@@ -1612,7 +1612,9 @@ impl Node {
     ) -> Fallible<Option<DomRoot<Element>>> {
         // > The querySelector(selectors) method steps are to return the first result of running scope-match
         // > a selectors string selectors against this, if the result is not an empty list; otherwise null.
-        let document_url = self.owner_document().url().get_arc();
+        let selector_list = self
+            .owner_document()
+            .parse_selector_list(&selectors.str())?;
 
         // If there are any duplicate ids, their targets may need to be updated in the id map before
         // layout runs, so that the map can gather their elements in DOM order.
@@ -1626,8 +1628,8 @@ impl Node {
         let first_matching_element = with_layout_state(|| {
             let layout_node: LayoutDom<'_, _> = unsafe { traced_node.to_layout() };
             ServoDangerousStyleNode::from(layout_node)
-                .scope_match_a_selectors_string::<QueryFirst>(document_url, &selectors.str())
-        })?;
+                .scope_match_a_selector_list::<QueryFirst>(&selector_list)
+        });
 
         Ok(first_matching_element.map(ServoDangerousStyleElement::rooted))
     }
@@ -1642,7 +1644,9 @@ impl Node {
     ) -> Fallible<DomRoot<NodeList>> {
         // > The querySelectorAll(selectors) method steps are to return the static result of running scope-match
         // > a selectors string selectors against this.
-        let document_url = self.owner_document().url().get_arc();
+        let selector_list = self
+            .owner_document()
+            .parse_selector_list(&selectors.str())?;
 
         // If there are any duplicate ids, their targets may need to be updated in the id map before
         // layout runs, so that the map can gather their elements in DOM order.
@@ -1654,8 +1658,8 @@ impl Node {
         let matching_elements = with_layout_state(|| {
             let layout_node: LayoutDom<'_, _> = unsafe { traced_node.to_layout() };
             ServoDangerousStyleNode::from(layout_node)
-                .scope_match_a_selectors_string::<QueryAll>(document_url, &selectors.str())
-        })?;
+                .scope_match_a_selector_list::<QueryAll>(&selector_list)
+        });
         let iter = matching_elements
             .into_iter()
             .map(ServoDangerousStyleElement::rooted)

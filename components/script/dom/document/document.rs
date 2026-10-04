@@ -55,6 +55,7 @@ use script_bindings::interfaces::DocumentHelpers;
 use script_bindings::reflector::reflect_dom_object_with_proto_and_cx;
 use script_bindings::trace::CustomTraceable;
 use script_traits::{DocumentActivity, ProgressiveWebMetricType};
+use selectors::parser::SelectorList;
 use servo_arc::Arc;
 use servo_base::cross_process_instant::CrossProcessInstant;
 use servo_base::generic_channel::GenericSend;
@@ -68,11 +69,11 @@ use style::attr::AttrValue;
 use style::context::QuirksMode;
 use style::dom::OpaqueNode;
 use style::invalidation::element::restyle_hints::RestyleHint;
-use style::selector_parser::Snapshot;
+use style::selector_parser::{SelectorImpl, SelectorParser, Snapshot};
 use style::shared_lock::{SharedRwLock, SharedRwLockReadGuard};
 use style::str::{split_html_space_chars, str_join};
 use style::stylesheet_set::DocumentStylesheetSet;
-use style::stylesheets::{Origin, OriginSet, Stylesheet};
+use style::stylesheets::{Origin, OriginSet, Stylesheet, UrlExtraData};
 use style::stylist::Stylist;
 use stylo_atoms::Atom;
 use time::Duration as TimeDuration;
@@ -506,6 +507,11 @@ pub(crate) struct Document {
     /// Information on elements needing restyle to ship over to layout when the
     /// time comes.
     pending_restyles: DomRefCell<FxHashMap<Dom<Element>, NoTrace<PendingRestyle>>>,
+    /// Selector strings parsed for `querySelector()`, `matches()` and `closest()`. Scripts
+    /// call these in loops with the same few strings, and parsing dominated those calls.
+    #[ignore_malloc_size_of = "defined in selectors"]
+    #[no_trace]
+    selector_cache: DomRefCell<FxHashMap<String, SelectorList<SelectorImpl>>>,
     /// A collection of reasons that the [`Document`] needs to be restyled at the next
     /// opportunity for a reflow. If this is empty, then the [`Document`] does not need to
     /// be restyled.
@@ -1085,6 +1091,8 @@ impl Document {
 
     pub(crate) fn set_url(&self, url: ServoUrl) {
         *self.url.borrow_mut() = url;
+        // Parsing depends on the URL (chrome-only selectors).
+        self.selector_cache.borrow_mut().clear();
     }
 
     pub(crate) fn about_base_url(&self) -> Option<ServoUrl> {
@@ -1157,6 +1165,29 @@ impl Document {
         }
 
         condition
+    }
+
+    /// Parses `selectors` the way `querySelector()` does, reusing an earlier parse of the
+    /// same string.
+    pub(crate) fn parse_selector_list(
+        &self,
+        selectors: &str,
+    ) -> Fallible<SelectorList<SelectorImpl>> {
+        if let Some(list) = self.selector_cache.borrow().get(selectors) {
+            return Ok(list.clone());
+        }
+        let list = SelectorParser::parse_author_origin_no_namespace(
+            selectors,
+            &UrlExtraData(self.url().get_arc()),
+        )
+        .map_err(|_| Error::Syntax(None))?;
+        let mut cache = self.selector_cache.borrow_mut();
+        // Bounded like Blink's SelectorQueryCache, for pages that build a new string per call.
+        if cache.len() >= 256 {
+            cache.clear();
+        }
+        cache.insert(selectors.to_owned(), list.clone());
+        Ok(list)
     }
 
     /// Returns the first `base` element in the DOM that has an `href` attribute.
@@ -4136,6 +4167,7 @@ impl Document {
             target_base_element: Default::default(),
             appropriate_template_contents_owner_document: Default::default(),
             pending_restyles: DomRefCell::new(FxHashMap::default()),
+            selector_cache: Default::default(),
             needs_restyle: Cell::new(RestyleReason::DOMChanged),
             origin: DomRefCell::new(origin),
             referrer,
