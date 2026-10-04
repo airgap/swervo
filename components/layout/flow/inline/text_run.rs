@@ -280,6 +280,7 @@ impl TextRunSegment {
                     let cluster_character_end = cluster_character_start + cluster.character_count();
                     let offsets = offsets.as_ref().map(|offsets| TextRunOffsets {
                         shared_selection: offsets.shared_selection.clone(),
+                        editable_text: offsets.editable_text.clone(),
                         character_range: cluster_character_start..cluster_character_end,
                     });
                     ifc.process_overflow_wrap_opportunity(cluster.total_advance());

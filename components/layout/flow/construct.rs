@@ -636,8 +636,10 @@ impl<'dom> BlockContainerBuilder<'dom, '_> {
             let column = match item {
                 RubyItem::Column(column) => column,
                 RubyItem::WhiteSpace => {
+                    // The space stands for white space between columns, not for text of
+                    // a node, so it has no offset into one.
                     self.ensure_inline_formatting_context_builder()
-                        .push_text(" ".into(), info);
+                        .push_text(" ".into(), 0, info);
                     continue;
                 },
             };
