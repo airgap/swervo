@@ -39,7 +39,7 @@ use style::stylesheets::scope_rule::ImplicitScopeRoot;
 use style::values::computed::{Display, Image};
 use style::values::generics::counters::{Content, ContentItem, GenericContentItems};
 use style::values::specified::align::AlignFlags;
-use style::values::specified::box_::{DisplayInside, DisplayOutside};
+use style::values::specified::box_::{Contain, DisplayInside, DisplayOutside};
 use style::values::{AtomIdent, AtomString};
 use stylo_atoms::Atom;
 use stylo_dom::ElementState;
@@ -593,7 +593,9 @@ impl<'dom> style::dom::TElement for ServoDangerousStyleElement<'dom> {
                     old_column.is_multicol() != new_column.is_multicol() ||
                     old_column.column_span != new_column.column_span ||
                     alignment_establishes_new_block_formatting_context(old) !=
-                        alignment_establishes_new_block_formatting_context(new)
+                        alignment_establishes_new_block_formatting_context(new) ||
+                    old_box.contain.intersects(Contain::LAYOUT | Contain::PAINT) !=
+                        new_box.contain.intersects(Contain::LAYOUT | Contain::PAINT)
                 {
                     return true;
                 }
