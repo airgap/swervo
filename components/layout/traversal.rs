@@ -14,6 +14,7 @@ use style::data::ElementData;
 use style::dom::{NodeInfo, TElement, TNode};
 use style::selector_parser::RestyleDamage;
 use style::traversal::{DomTraversal, PerLevelTraversalData, recalc_style_at};
+use style::values::computed::ContainerType;
 
 use crate::BoxTree;
 use crate::context::LayoutContext;
@@ -70,6 +71,20 @@ where
             &mut element_data,
             note_child,
         );
+
+        if element_data.styles.primary().clone_container_type() != ContainerType::NORMAL {
+            let layout_data = node
+                .layout_node()
+                .layout_data()
+                .expect("Layout data was initialized above")
+                .as_any()
+                .downcast_ref::<DOMLayoutData>()
+                .unwrap();
+            self.context
+                .styled_containers
+                .lock()
+                .push((node.opaque(), layout_data.self_box().downgrade()));
+        }
     }
 
     #[inline]

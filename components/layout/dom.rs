@@ -272,6 +272,13 @@ impl WeakLayoutBox {
 #[derive(Default, MallocSizeOf)]
 pub struct DOMLayoutData(AtomicRefCell<InnerDOMLayoutData>);
 
+impl DOMLayoutData {
+    /// The slot holding the box of the node itself (not of its pseudo-elements).
+    pub(crate) fn self_box(&self) -> ArcRefCell<Option<LayoutBox>> {
+        self.0.borrow().self_box.clone()
+    }
+}
+
 // The implementation of this trait allows the data to be stored in the DOM.
 impl LayoutDataTrait for DOMLayoutData {}
 impl GenericLayoutDataTrait for DOMLayoutData {
@@ -284,11 +291,8 @@ impl GenericLayoutDataTrait for DOMLayoutData {
             .borrow()
             .fragments()
             .iter()
-            .find_map(|fragment| match fragment {
-                Fragment::Box(box_fragment) | Fragment::Float(box_fragment) => {
-                    Some(box_fragment.content_rect().size.to_untyped())
-                },
-                _ => None,
+            .find_map(|fragment| {
+                Some(fragment.retrieve_box_fragment()?.content_rect().size.to_untyped())
             })
     }
 }

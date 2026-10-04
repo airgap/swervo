@@ -28,6 +28,9 @@ use style::values::computed::image::{Gradient, Image};
 use style_traits::DevicePixel;
 use webrender_api::units::{DeviceIntSize, DeviceSize};
 
+use crate::cell::WeakRefCell;
+use crate::dom::LayoutBox;
+
 pub(crate) type CachedImageOrError = Result<CachedImage, ResolveImageError>;
 
 pub(crate) struct LayoutContext<'a> {
@@ -60,6 +63,11 @@ pub(crate) struct LayoutContext<'a> {
 
     /// The device dimensions on which this layout is running, in device pixels.
     pub device_size: Size2D<f32, DevicePixel>,
+
+    /// Elements that styling gave a `container-type` during this layout, with the slots that
+    /// hold their boxes. Layout keeps these to measure containers without walking the
+    /// fragment tree, see `LayoutThread::container_slots`.
+    pub styled_containers: Mutex<Vec<(OpaqueNode, WeakRefCell<Option<LayoutBox>>)>>,
 }
 
 impl LayoutContext<'_> {

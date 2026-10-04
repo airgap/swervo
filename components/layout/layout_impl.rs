@@ -89,7 +89,8 @@ use webrender_api::units::{DevicePixel, LayoutVector2D};
 use crate::accessibility_tree::AccessibilityTree;
 use crate::context::{CachedImageOrError, ImageResolver, LayoutContext};
 use crate::display_list::{DisplayListBuilder, HitTest, PaintTimingHandler, StackingContextTree};
-use crate::dom::NodeExt;
+use crate::cell::WeakRefCell;
+use crate::dom::{LayoutBox, NodeExt};
 use crate::query::{
     find_character_offset_in_fragment_descendants, get_the_text_steps, process_box_area_request,
     process_box_areas_request, process_client_rect_request,
@@ -186,6 +187,12 @@ pub struct LayoutThread {
     /// The content box sizes of the `container-type` boxes in the last layout. Container
     /// queries were evaluated against these, see [`Self::relayout_if_container_sizes_changed`].
     container_sizes: RefCell<FxHashMap<OpaqueNode, euclid::default::Size2D<Au>>>,
+
+    /// The elements styled with a `container-type`, with weak references to the slots that hold
+    /// their boxes. Measuring these is much cheaper than walking the fragment tree after every
+    /// layout. Entries whose element was dropped, or whose box is gone or no longer a
+    /// container, are pruned when measuring; restyling such an element registers it again.
+    container_slots: RefCell<FxHashMap<OpaqueNode, WeakRefCell<Option<LayoutBox>>>>,
 
     /// Whether this document's styles have evaluated container queries or units against a
     /// container. Until then layout doesn't look for containers.
@@ -872,6 +879,7 @@ impl LayoutThread {
             need_containing_block_calculation: Cell::new(false),
             need_new_display_list: Cell::new(false),
             container_sizes: Default::default(),
+            container_slots: Default::default(),
             uses_container_queries: Cell::new(false),
             need_new_stacking_context_tree: Cell::new(false),
             box_tree: Default::default(),
@@ -1226,7 +1234,9 @@ impl LayoutThread {
                 .collect()
         };
         *self.container_sizes.borrow_mut() = sizes;
-        if changed.is_empty() || !mark_container_descendants_for_restyle(root_element, &changed) {
+        if changed.is_empty() ||
+            !mark_container_descendants_for_restyle(root_element, &changed, &mut changed.len())
+        {
             return;
         }
 
@@ -1240,6 +1250,7 @@ impl LayoutThread {
             return;
         }
         let dirty_root = driver::traverse_dom(&traversal, token, rayon_pool).as_node();
+        self.register_styled_containers(layout_context);
 
         let mut box_tree = self.box_tree.borrow_mut();
         let mut layout_roots = Vec::new();
@@ -1284,21 +1295,39 @@ impl LayoutThread {
         *self.container_sizes.borrow_mut() = self.container_box_sizes();
     }
 
-    /// The content box sizes of the `container-type` boxes in the current fragment tree.
+    fn register_styled_containers(&self, layout_context: &LayoutContext) {
+        self.container_slots
+            .borrow_mut()
+            .extend(layout_context.styled_containers.lock().drain(..));
+    }
+
+    /// The content box sizes of the `container-type` boxes in the last layout, measured like
+    /// container queries measure them (`DOMLayoutData::content_box_size`).
     fn container_box_sizes(&self) -> FxHashMap<OpaqueNode, euclid::default::Size2D<Au>> {
         let mut sizes = FxHashMap::default();
-        if let Some(fragment_tree) = &*self.fragment_tree.borrow() {
-            fragment_tree.find(|fragment, _, _| {
-                if let Fragment::Box(box_fragment) | Fragment::Float(box_fragment) = fragment &&
-                    let Some(tag) = box_fragment.base.tag &&
-                    tag.pseudo_element_chain.primary.is_none() &&
-                    box_fragment.style().clone_container_type() != ContainerType::NORMAL
-                {
-                    sizes.insert(tag.node, box_fragment.content_rect().size.to_untyped());
-                }
-                None::<()>
-            });
-        }
+        self.container_slots.borrow_mut().retain(|node, slot| {
+            let Some(slot) = slot.upgrade() else {
+                return false;
+            };
+            let slot = slot.borrow();
+            let Some(layout_box) = &*slot else {
+                return false;
+            };
+            layout_box
+                .with_base(|base| {
+                    if base.style.clone_container_type() == ContainerType::NORMAL {
+                        return false;
+                    }
+                    let size = base.fragments().iter().find_map(|fragment| {
+                        Some(fragment.retrieve_box_fragment()?.content_rect().size.to_untyped())
+                    });
+                    if let Some(size) = size {
+                        sizes.insert(*node, size);
+                    }
+                    true
+                })
+                .unwrap_or(false)
+        });
         sizes
     }
 
@@ -1369,6 +1398,7 @@ impl LayoutThread {
             parallelism_job_count_minimum: pref!(layout_parallelism_job_count_minimum) as usize,
             parallelism_job_size_minimum: pref!(layout_parallelism_job_size_minimum) as usize,
             device_size: reflow_request.viewport_details.device_size.cast_unit(),
+            styled_containers: Default::default(),
         };
 
         let restyle = reflow_request
@@ -1402,6 +1432,7 @@ impl LayoutThread {
             }
 
             dirty_root = driver::traverse_dom(&recalc_style_traversal, token, rayon_pool).as_node();
+            self.register_styled_containers(&layout_context);
         }
 
         let root_node = root_element.as_node();
@@ -2099,11 +2130,13 @@ impl ReflowPhases {
 
 /// Marks the descendants of the elements in `containers` for restyle, and their ancestors as
 /// having dirty descendants so the style traversal reaches them. Returns whether any container
-/// was found under `element`.
+/// was found under `element`. `unmarked` counts the containers not found yet; the walk stops
+/// once it reaches zero.
 #[expect(unsafe_code)]
 fn mark_container_descendants_for_restyle(
     element: ServoDangerousStyleElement<'_>,
     containers: &FxHashSet<OpaqueNode>,
+    unmarked: &mut usize,
 ) -> bool {
     let mut marked = false;
     if containers.contains(&element.as_node().opaque()) &&
@@ -2111,10 +2144,14 @@ fn mark_container_descendants_for_restyle(
     {
         data.hint.insert(RestyleHint::RESTYLE_DESCENDANTS);
         marked = true;
+        *unmarked -= 1;
     }
     for child in element.traversal_children() {
+        if *unmarked == 0 {
+            break;
+        }
         if let Some(child) = child.as_element() &&
-            mark_container_descendants_for_restyle(child, containers)
+            mark_container_descendants_for_restyle(child, containers, unmarked)
         {
             unsafe { element.set_dirty_descendants() };
             marked = true;
