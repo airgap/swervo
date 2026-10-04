@@ -232,6 +232,7 @@ fn create_http_states(
             ignore_certificate_errors,
             override_manager.clone(),
         )),
+        connection_limiter: Default::default(),
         override_manager,
         embedder_proxy: embedder_proxy.clone(),
     };
@@ -248,6 +249,7 @@ fn create_http_states(
             ignore_certificate_errors,
             override_manager.clone(),
         )),
+        connection_limiter: Default::default(),
         override_manager,
         embedder_proxy,
     };

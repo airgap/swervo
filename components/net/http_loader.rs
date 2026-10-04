@@ -24,7 +24,7 @@ use http::header::{
     CONTENT_ENCODING, CONTENT_LANGUAGE, CONTENT_LOCATION, CONTENT_TYPE, HeaderValue, RANGE,
     WWW_AUTHENTICATE,
 };
-use http::{HeaderMap, Method, Request as HyperRequest, StatusCode};
+use http::{HeaderMap, Method, Request as HyperRequest, StatusCode, Version};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::Response as HyperResponse;
@@ -75,7 +75,8 @@ use tracing::Instrument;
 
 use crate::async_runtime::spawn_task;
 use crate::connector::{
-    CertificateErrorOverrideManager, ServoClient, TlsHandshakeInfo, create_tls_config,
+    CertificateErrorOverrideManager, HostConnectionLimiter, LimitedBody, ServoClient,
+    TlsHandshakeInfo, create_tls_config,
 };
 use crate::cookie::ServoCookie;
 use crate::cookie_storage::{CookieStorage, SameSiteContext};
@@ -114,6 +115,7 @@ pub struct HttpState {
     pub auth_cache: RwLock<AuthCache>,
     pub history_states: RwLock<FxHashMap<HistoryStateId, Vec<u8>>>,
     pub client: ServoClient,
+    pub connection_limiter: HostConnectionLimiter,
     pub override_manager: CertificateErrorOverrideManager,
     pub embedder_proxy: GenericEmbedderProxy<NetToEmbedderMsg>,
 }
@@ -670,6 +672,9 @@ async fn obtain_response(
     let headers = headers.clone();
     let is_secure_scheme = url.is_secure_scheme();
 
+    let uri = request.uri().clone();
+    let permit = context.state.connection_limiter.acquire(&uri).await;
+
     // Generally, we use a persistent connection, so we will also set other PerformanceResourceTiming
     //   attributes to this as well (domain_lookup_start, domain_lookup_end, connect_start, connect_end,
     //   secure_connection_start)
@@ -677,10 +682,18 @@ async fn obtain_response(
         .timing
         .set_attribute(ResourceAttribute::RequestStart);
 
+    let state = context.state.clone();
     let client_future = client
         .request(request)
         .and_then(move |res| {
             let send_end = CrossProcessInstant::now();
+
+            let permit = if res.version() == Version::HTTP_2 {
+                state.connection_limiter.note_multiplexed(&uri);
+                None
+            } else {
+                permit
+            };
 
             // TODO(#21271) response_start: immediately after receiving first byte of response
 
@@ -718,7 +731,10 @@ async fn obtain_response(
             };
 
             future::ready(Ok((
-                Decoder::detect(res.map(|r| r.boxed()), is_secure_scheme),
+                Decoder::detect(
+                    res.map(|r| LimitedBody::new(r, permit).boxed()),
+                    is_secure_scheme,
+                ),
                 msg,
             )))
         })
