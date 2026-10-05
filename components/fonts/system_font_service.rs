@@ -150,9 +150,10 @@ impl SystemFontService {
                     variations,
                     result,
                 ) => {
-                    let _ = result.send(self.get_font_instance(
-                        painter_id, identifier, pt_size, options, variations,
-                    ));
+                    let _ =
+                        result.send(self.get_font_instance(
+                            painter_id, identifier, pt_size, options, variations,
+                        ));
                 },
                 SystemFontServiceMessage::GetFontKey(painter_id, result_sender) => {
                     self.fetch_font_keys_if_needed(painter_id);
@@ -259,14 +260,12 @@ impl SystemFontService {
         // Sans) where Chrome would; a rejected substitute leaves the family unmatched so the page's
         // next family applies. Generics are already resolved by `family_name_for_single_font_family`.
         if matches!(family, SingleFontFamily::FamilyName(_)) &&
-            !self.local_families.families.contains_key(&family_name)
-        {
-            if let Some(substitute) = platform_family_substitute(&family_name)
+            !self.local_families.families.contains_key(&family_name) &&
+            let Some(substitute) = platform_family_substitute(&family_name)
                 .map(|name: String| LowercaseFontFamilyName::from(name))
                 .filter(|name| self.local_families.families.contains_key(name))
-            {
-                family_name = substitute;
-            }
+        {
+            family_name = substitute;
         }
         self.local_families
             .families
