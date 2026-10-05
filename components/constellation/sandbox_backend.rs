@@ -100,10 +100,10 @@ pub fn content_process_policy() -> Policy {
 
     // The running binary's own directory: re-exec of self + dlopen of co-located
     // `.so`s. Needs execute.
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            fs_exec.push(dir.to_path_buf());
-        }
+    if let Ok(exe) = std::env::current_exe() &&
+        let Some(dir) = exe.parent()
+    {
+        fs_exec.push(dir.to_path_buf());
     }
 
     // System library dirs (freetype/fontconfig/harfbuzz/ICU/GStreamer dlopen).
@@ -191,8 +191,8 @@ pub fn apply_sandbox(policy: &Policy) -> SandboxOutcome {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn apply_landlock(policy: &Policy) -> (Option<LandlockStatus>, bool) {
     use landlock::{
-        ABI, Access, AccessFs, AccessNet, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset,
-        RulesetAttr, RulesetCreatedAttr, RulesetStatus,
+        ABI, AccessFs, AccessNet, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetCreatedAttr,
+        RulesetStatus,
     };
 
     // Request the highest ABI we know about; BestEffort downgrades on older
@@ -445,7 +445,7 @@ fn apply_seccomp() -> bool {
     ];
 
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> =
-        allow.iter().map(|&nr| (nr as i64, Vec::new())).collect();
+        allow.iter().map(|&nr| (nr, Vec::new())).collect();
 
     // socket() is NOT allow-any-args: restrict its domain (arg0, an int -> directly
     // filterable, unlike connect()'s sockaddr-pointer family) to AF_UNIX(=1). AF_UNIX
@@ -459,7 +459,7 @@ fn apply_seccomp() -> bool {
         .and_then(|cond| SeccompRule::new(vec![cond]))
     {
         Ok(rule) => {
-            rules.insert(libc::SYS_socket as i64, vec![rule]);
+            rules.insert(libc::SYS_socket, vec![rule]);
         },
         Err(e) => {
             log::warn!("seccomp: failed to build socket(AF_UNIX) rule (continuing): {e}");

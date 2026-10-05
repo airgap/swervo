@@ -245,7 +245,7 @@ mod imp {
                 .map_err(|_| gstreamer::FlowError::Error)?;
 
             // Drop the protection meta so downstream treats the buffer as clear.
-            while let Some(mut meta) = buffer.meta_mut::<gstreamer::meta::ProtectionMeta>() {
+            while let Some(meta) = buffer.meta_mut::<gstreamer::meta::ProtectionMeta>() {
                 let _ = meta.remove();
             }
             // Remember this PTS so a later meta-less re-push of the same sample is dropped.
