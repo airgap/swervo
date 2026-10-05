@@ -19,8 +19,10 @@ use crate::dom::bindings::codegen::Bindings::HTMLSelectElementBinding::HTMLSelec
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use crate::dom::bindings::codegen::GenericBindings::CharacterDataBinding::CharacterData_Binding::CharacterDataMethods;
 use crate::dom::bindings::codegen::GenericBindings::HTMLOptGroupElementBinding::HTMLOptGroupElement_Binding::HTMLOptGroupElementMethods;
+use crate::dom::bindings::codegen::Bindings::HTMLSlotElementBinding::HTMLSlotElement_Binding::HTMLSlotElementMethods;
+use crate::dom::bindings::codegen::Bindings::MouseEventBinding::MouseEventMethods;
 use crate::dom::bindings::codegen::UnionTypes::{
-    HTMLElementOrLong, HTMLOptionElementOrHTMLOptGroupElement,
+    ElementOrText, HTMLElementOrLong, HTMLOptionElementOrHTMLOptGroupElement,
 };
 use crate::dom::bindings::error::ErrorResult;
 use crate::dom::bindings::inheritance::Castable;
@@ -41,10 +43,11 @@ use crate::dom::html::htmlformelement::{FormControl, FormDatum, FormDatumValue, 
 use crate::dom::html::htmloptgroupelement::HTMLOptGroupElement;
 use crate::dom::html::htmloptionelement::HTMLOptionElement;
 use crate::dom::html::htmloptionscollection::HTMLOptionsCollection;
+use crate::dom::html::htmlslotelement::HTMLSlotElement;
 use crate::dom::node::{BindContext, ChildrenMutation, Node, NodeTraits,  UnbindContext};
 use crate::dom::nodelist::NodeList;
 use crate::dom::text::Text;
-use crate::dom::types::FocusEvent;
+use crate::dom::types::{FocusEvent, KeyboardEvent, MouseEvent};
 use crate::dom::validation::{is_barred_by_datalist_ancestor, Validatable};
 use crate::dom::validitystate::{ValidationFlags, ValidityState};
 use crate::dom::node::virtualmethods::VirtualMethods;
@@ -53,9 +56,11 @@ use dom_struct::dom_struct;
 use embedder_traits::{EmbedderControlRequest, SelectElementRequest};
 use embedder_traits::{SelectElementOption, SelectElementOptionOrOptgroup};
 use html5ever::{local_name, ns, LocalName, Prefix, QualName};
+use keyboard_types::{Key, Modifiers, NamedKey};
 use js::context::{JSContext, NoGC};
 use js::rust::HandleObject;
 use style::attr::AttrValue;
+use style::selector_parser::PseudoElement;
 use stylo_dom::ElementState;
 
 const DEFAULT_SELECT_SIZE: u32 = 0;
@@ -69,17 +74,10 @@ const SELECT_BOX_STYLE: &str = "
 
 const TEXT_CONTAINER_STYLE: &str = "flex: 1;";
 
-const CHEVRON_CONTAINER_STYLE: &str = "
-    background-image: url('data:image/svg+xml,<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"180\" height=\"180\" viewBox=\"0 0 180 180\"> <path d=\"M10 50h160L90 130z\" style=\"fill:currentcolor\"/> </svg>');
-    background-size: 100%;
-    background-repeat: no-repeat;
-    background-position: center;
-
-    vertical-align: middle;
-    line-height: 1;
-    display: inline-block;
-    width: 0.75em;
-    height: 0.75em;
+const LIST_BOX_CONTAINER_STYLE: &str = "
+    display: flex;
+    flex-direction: column;
+    block-size: 100%;
 ";
 
 #[derive(JSTraceable, MallocSizeOf)]
@@ -134,13 +132,24 @@ pub(crate) struct HTMLSelectElement {
     labels_node_list: MutNullableDom<NodeList>,
     validity_state: MutNullableDom<ValidityState>,
     shadow_tree: DomRefCell<Option<ShadowTree>>,
+    /// The list box row that was last clicked or moved to with the keyboard, from which
+    /// Shift-click and Shift+arrow keys extend the selection.
+    list_box_anchor: MutNullableDom<HTMLOptionElement>,
 }
 
 /// Holds handles to all elements in the UA shadow tree
 #[derive(Clone, JSTraceable, MallocSizeOf)]
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
-struct ShadowTree {
-    selected_option: Dom<Text>,
+enum ShadowTree {
+    DropDown {
+        selected_option: Dom<Text>,
+    },
+    ListBox {
+        /// The slot that the options and optgroups are assigned to.
+        options: Dom<HTMLSlotElement>,
+        /// The display size that the rows of the list box were sized for.
+        display_size: u32,
+    },
 }
 
 impl HTMLSelectElement {
@@ -162,6 +171,7 @@ impl HTMLSelectElement {
             labels_node_list: Default::default(),
             validity_state: Default::default(),
             shadow_tree: Default::default(),
+            list_box_anchor: Default::default(),
         }
     }
 
@@ -297,9 +307,29 @@ impl HTMLSelectElement {
         }
     }
 
+    /// <https://html.spec.whatwg.org/multipage/#the-select-element-2>
+    ///
+    /// > If the element's multiple attribute is absent, and the element's display size is 1,
+    /// > then the select element is expected to render as a drop-down box. Otherwise, it is
+    /// > expected to render as a list box.
+    fn is_list_box(&self) -> bool {
+        self.Multiple() || self.display_size() != 1
+    }
+
     fn create_shadow_tree(&self, cx: &mut JSContext) {
         let document = self.owner_document();
-        let root = self.upcast::<Element>().attach_ua_shadow_root(cx, true);
+        let element = self.upcast::<Element>();
+        let root = match element.shadow_root() {
+            Some(root) => root,
+            None => element.attach_ua_shadow_root(cx, true),
+        };
+        Node::replace_all(cx, None, root.upcast::<Node>());
+
+        if self.is_list_box() {
+            let shadow_tree = self.create_list_box_shadow_tree(cx, root.upcast());
+            *self.shadow_tree.borrow_mut() = Some(shadow_tree);
+            return;
+        }
 
         let select_box = Element::create(
             cx,
@@ -328,7 +358,7 @@ impl HTMLSelectElement {
             .unwrap();
 
         let text = Text::new(cx, DOMString::new(), &document);
-        let _ = self.shadow_tree.borrow_mut().insert(ShadowTree {
+        *self.shadow_tree.borrow_mut() = Some(ShadowTree::DropDown {
             selected_option: text.as_traced(),
         });
         text_container
@@ -345,11 +375,6 @@ impl HTMLSelectElement {
             CustomElementCreationMode::Asynchronous,
             None,
         );
-        chevron_container.set_string_attribute(
-            cx,
-            &local_name!("style"),
-            CHEVRON_CONTAINER_STYLE.into(),
-        );
         select_box
             .upcast::<Node>()
             .AppendChild(cx, chevron_container.upcast::<Node>())
@@ -358,10 +383,73 @@ impl HTMLSelectElement {
         root.upcast::<Node>()
             .AppendChild(cx, select_box.upcast::<Node>())
             .unwrap();
+        chevron_container
+            .upcast::<Node>()
+            .set_implemented_pseudo_element(PseudoElement::ServoSelectArrow);
+    }
+
+    /// A list box shows `display size` rows of the options themselves, slotted into a
+    /// scroller. The scroller is a flex item of a column flexbox that is as tall as the
+    /// `<select>`, so it fills a `<select>` given a height by the author and is otherwise
+    /// `display size` rows tall.
+    fn create_list_box_shadow_tree(&self, cx: &mut JSContext, root: &Node) -> ShadowTree {
+        let document = self.owner_document();
+        let create_element = |cx: &mut JSContext, local_name: LocalName| {
+            Element::create(
+                cx,
+                QualName::new(None, ns!(html), local_name),
+                None,
+                &document,
+                ElementCreator::ScriptCreated,
+                CustomElementCreationMode::Asynchronous,
+                None,
+            )
+        };
+
+        let container = create_element(cx, local_name!("div"));
+        container.set_string_attribute(cx, &local_name!("style"), LIST_BOX_CONTAINER_STYLE.into());
+
+        // Chrome's rows are 1.2em tall plus a pixel of option padding.
+        let display_size = self.display_size();
+        let scroller = create_element(cx, local_name!("div"));
+        scroller.set_string_attribute(
+            cx,
+            &local_name!("style"),
+            format!(
+                "flex: 1 1 auto; block-size: calc({display_size} * (1.2em + 1px)); \
+                 min-block-size: 0; overflow-x: hidden; overflow-y: auto;"
+            )
+            .into(),
+        );
+
+        let options = DomRoot::downcast::<HTMLSlotElement>(create_element(cx, local_name!("slot")))
+            .expect("Creating a slot element makes an HTMLSlotElement");
+
+        scroller
+            .upcast::<Node>()
+            .AppendChild(cx, options.upcast::<Node>())
+            .unwrap();
+        container
+            .upcast::<Node>()
+            .AppendChild(cx, scroller.upcast::<Node>())
+            .unwrap();
+        root.AppendChild(cx, container.upcast::<Node>()).unwrap();
+
+        ShadowTree::ListBox {
+            options: options.as_traced(),
+            display_size,
+        }
     }
 
     fn shadow_tree(&self, cx: &mut JSContext) -> Ref<'_, ShadowTree> {
-        if !self.upcast::<Element>().is_shadow_host() {
+        let is_up_to_date = match &*self.shadow_tree.borrow() {
+            Some(ShadowTree::DropDown { .. }) => !self.is_list_box(),
+            Some(ShadowTree::ListBox { display_size, .. }) => {
+                self.is_list_box() && *display_size == self.display_size()
+            },
+            None => false,
+        };
+        if !is_up_to_date {
             self.create_shadow_tree(cx);
         }
 
@@ -373,13 +461,157 @@ impl HTMLSelectElement {
     pub(crate) fn update_shadow_tree(&self, cx: &mut JSContext) {
         let shadow_tree = self.shadow_tree(cx);
 
-        let selected_options = self.selected_options(cx.no_gc());
-        let selected_options_count = selected_options.len();
+        match &*shadow_tree {
+            ShadowTree::DropDown { selected_option } => {
+                let displayed_text = self.drop_down_text(cx.no_gc());
+                selected_option
+                    .upcast::<CharacterData>()
+                    .SetData(cx, displayed_text.trim().into());
+            },
+            ShadowTree::ListBox { options, .. } => {
+                let rows = self
+                    .upcast::<Node>()
+                    .children()
+                    .filter(|child| {
+                        child.is::<HTMLOptionElement>() || child.is::<HTMLOptGroupElement>()
+                    })
+                    .map(|child| {
+                        ElementOrText::Element(
+                            DomRoot::downcast::<Element>(child)
+                                .expect("Options and optgroups are elements"),
+                        )
+                    })
+                    .collect();
+                options.Assign(cx, rows);
+            },
+        }
+    }
 
-        let displayed_text = if selected_options_count == 1 {
+    /// Pressing the primary button on a list box row selects it. With `multiple`, Ctrl-click
+    /// (Cmd-click on macOS) toggles the row and Shift-click selects the rows between it and
+    /// the anchor, as in Chrome.
+    pub(crate) fn handle_option_mouse_down(
+        &self,
+        cx: &mut JSContext,
+        option: &HTMLOptionElement,
+        mouse_event: &MouseEvent,
+    ) {
+        if mouse_event.Button() != 0 ||
+            !self.is_list_box() ||
+            self.upcast::<Element>().disabled_state()
+        {
+            return;
+        }
+        let toggle = if cfg!(target_os = "macos") {
+            mouse_event.MetaKey()
+        } else {
+            mouse_event.CtrlKey()
+        };
+        self.select_list_box_rows(cx, option, toggle, mouse_event.ShiftKey());
+    }
+
+    /// The arrow keys, Home and End move the selection of a focused list box; with `multiple`,
+    /// Shift extends it from the anchor. Returns whether the key was consumed.
+    fn handle_list_box_keydown(&self, cx: &mut JSContext, event: &KeyboardEvent) -> bool {
+        if !self.is_list_box() ||
+            event
+                .modifiers()
+                .intersects(Modifiers::CONTROL | Modifiers::ALT | Modifiers::META)
+        {
+            return false;
+        }
+        let options: Vec<DomRoot<HTMLOptionElement>> = self
+            .list_of_options(cx.no_gc())
+            .filter(|option| !option.upcast::<Element>().disabled_state())
+            .map(|option| option.as_rooted())
+            .collect();
+        let current = self
+            .list_box_anchor
+            .get()
+            .or_else(|| options.iter().rev().find(|option| option.Selected()).cloned())
+            .and_then(|current| options.iter().position(|option| *option == current));
+        let last = options.len().saturating_sub(1);
+        let target = match (event.key(), current) {
+            (Key::Named(NamedKey::ArrowDown), Some(current)) => (current + 1).min(last),
+            (Key::Named(NamedKey::ArrowUp), Some(current)) => current.saturating_sub(1),
+            (Key::Named(NamedKey::ArrowDown | NamedKey::Home), None) |
+            (Key::Named(NamedKey::Home), Some(_)) => 0,
+            (Key::Named(NamedKey::ArrowUp | NamedKey::End), None) |
+            (Key::Named(NamedKey::End), Some(_)) => last,
+            _ => return false,
+        };
+        let Some(target) = options.get(target) else {
+            return true;
+        };
+        let extend = event.modifiers().contains(Modifiers::SHIFT);
+        self.select_list_box_rows(cx, target, false, extend);
+        target
+            .upcast::<Element>()
+            .ScrollIntoViewIfNeeded(cx, false);
+        true
+    }
+
+    /// Select `option`, or with `multiple` toggle it (`toggle`) or select the rows from the
+    /// anchor to it (`extend`), then send select update notifications if anything changed.
+    fn select_list_box_rows(
+        &self,
+        cx: &mut JSContext,
+        option: &HTMLOptionElement,
+        toggle: bool,
+        extend: bool,
+    ) {
+        if option.upcast::<Element>().disabled_state() {
+            return;
+        }
+        let multiple = self.Multiple();
+        let options: Vec<DomRoot<HTMLOptionElement>> = self
+            .list_of_options(cx.no_gc())
+            .map(|option| option.as_rooted())
+            .collect();
+        let target = options
+            .iter()
+            .position(|candidate| &**candidate == option)
+            .expect("A select's option is in its list of options");
+        let anchor = self
+            .list_box_anchor
+            .get()
+            .and_then(|anchor| options.iter().position(|candidate| *candidate == anchor));
+        let range = match anchor {
+            Some(anchor) if multiple && extend => anchor.min(target)..=anchor.max(target),
+            _ => target..=target,
+        };
+
+        let mut selection_did_change = false;
+        for (index, candidate) in options.iter().enumerate() {
+            let in_range = range.contains(&index) && !candidate.upcast::<Element>().disabled_state();
+            let should_be_selected = match (multiple, toggle, extend) {
+                (true, true, false) if index == target => !candidate.Selected(),
+                (true, true, _) => candidate.Selected() || in_range,
+                _ => in_range,
+            };
+            if candidate.Selected() != should_be_selected {
+                candidate.set_selectedness(should_be_selected);
+                candidate.set_dirtiness(true);
+                selection_did_change = true;
+            }
+        }
+
+        if !(multiple && extend) || anchor.is_none() {
+            self.list_box_anchor.set(Some(option));
+        }
+        if selection_did_change {
+            self.validity_state(cx)
+                .perform_validation_and_update(cx, ValidationFlags::VALUE_MISSING);
+            self.send_update_notifications();
+        }
+    }
+
+    fn drop_down_text(&self, no_gc: &NoGC) -> String {
+        let selected_options_count = self.selected_options(no_gc).len();
+        if selected_options_count == 1 {
             let first_selected_option = self
-                .selected_option(cx.no_gc())
-                .or_else(|| self.list_of_options(cx.no_gc()).next());
+                .selected_option(no_gc)
+                .or_else(|| self.list_of_options(no_gc).next());
 
             let first_selected_option_text = first_selected_option
                 .map(|option| option.displayed_label())
@@ -389,12 +621,7 @@ impl HTMLSelectElement {
             itertools::join(first_selected_option_text.str().split_whitespace(), " ")
         } else {
             format!("{selected_options_count} selected")
-        };
-
-        shadow_tree
-            .selected_option
-            .upcast::<CharacterData>()
-            .SetData(cx, displayed_text.trim().into());
+        }
     }
 
     pub(crate) fn selected_option<'b>(
@@ -542,7 +769,8 @@ impl HTMLSelectElement {
             .queue(task!(send_select_update_notification: move |cx| {
                 let this = this.root();
 
-                // TODO: Step 1. Set the select element's user validity to true.
+                // Step 1. Set the select element's user validity to true.
+                this.validity_state(cx).set_user_validity(cx, true);
 
                 // Step 2. Fire an event named input at the select element, with the bubbles and composed
                 // attributes initialized to true.
@@ -834,6 +1062,10 @@ impl VirtualMethods for HTMLSelectElement {
         match *attr.local_name() {
             local_name!("multiple") => {
                 self.multiple_attribute_mutated(cx, mutation);
+                self.update_shadow_tree(cx);
+            },
+            local_name!("size") => {
+                self.update_shadow_tree(cx);
             },
             local_name!("required") => {
                 self.validity_state(cx)
@@ -915,6 +1147,13 @@ impl VirtualMethods for HTMLSelectElement {
     }
 
     fn handle_event(&self, cx: &mut js::context::JSContext, event: &Event) {
+        if event.type_() == atom!("keydown") &&
+            !event.DefaultPrevented() &&
+            let Some(keyboard_event) = event.downcast::<KeyboardEvent>() &&
+            self.handle_list_box_keydown(cx, keyboard_event)
+        {
+            event.mark_as_handled();
+        }
         self.super_type().unwrap().handle_event(cx, event);
         if let Some(event) = event.downcast::<FocusEvent>() &&
             *event.upcast::<Event>().type_() != *"blur"
@@ -987,7 +1226,8 @@ impl Activatable for HTMLSelectElement {
     }
 
     fn is_instance_activatable(&self) -> bool {
-        !self.upcast::<Element>().disabled_state()
+        // A list box selects rows on mousedown instead of showing a picker.
+        !self.upcast::<Element>().disabled_state() && !self.is_list_box()
     }
 
     fn activation_behavior(

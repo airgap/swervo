@@ -4,6 +4,8 @@
 
 use std::ops::Deref;
 
+use app_units::Au;
+use style::Zero;
 use style::properties::ComputedValues;
 use style::values::CustomIdent;
 use style::values::computed::{BorderSideWidth, GridTemplateAreas, LengthPercentage};
@@ -14,6 +16,7 @@ use style::{Atom, OwnedSlice};
 use taffy::prelude::TaffyAuto;
 
 use super::{convert, stylo};
+use crate::style_ext::ComputedValuesExt;
 
 /// A wrapper struct for anything that Deref's to a [`ComputedValues`], which
 /// implements Taffy's layout traits and can used with Taffy's layout algorithms.
@@ -159,18 +162,37 @@ impl<T: Deref<Target = ComputedValues>> taffy::CoreStyle for TaffyStyloStyle<T> 
     #[inline]
     fn border(&self) -> taffy::Rect<taffy::LengthPercentage> {
         let border = self.style.get_border();
-        let resolve = |width: &BorderSideWidth, style: BorderStyle| {
-            taffy::LengthPercentage::length(if style.none_or_hidden() {
-                0.0
+        // Like `LayoutStyle::border_width()`, reserve the scrollbar gutter in the border.
+        let gutter = self.style.scrollbar_gutter();
+        let resolve = |width: &BorderSideWidth, style: BorderStyle, gutter: Au| {
+            let width = if style.none_or_hidden() {
+                Au::zero()
             } else {
-                width.0.to_f32_px()
-            })
+                width.0
+            };
+            taffy::LengthPercentage::length((width + gutter).to_f32_px())
         };
         taffy::Rect {
-            left: resolve(&border.border_left_width, border.border_left_style),
-            right: resolve(&border.border_right_width, border.border_right_style),
-            top: resolve(&border.border_top_width, border.border_top_style),
-            bottom: resolve(&border.border_bottom_width, border.border_bottom_style),
+            left: resolve(
+                &border.border_left_width,
+                border.border_left_style,
+                gutter.left,
+            ),
+            right: resolve(
+                &border.border_right_width,
+                border.border_right_style,
+                gutter.right,
+            ),
+            top: resolve(
+                &border.border_top_width,
+                border.border_top_style,
+                gutter.top,
+            ),
+            bottom: resolve(
+                &border.border_bottom_width,
+                border.border_bottom_style,
+                gutter.bottom,
+            ),
         }
     }
 }

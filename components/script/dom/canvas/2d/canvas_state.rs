@@ -425,7 +425,9 @@ impl CanvasState {
                     return None;
                 }
             },
-            ImageResponse::FailedToLoadOrDecode | ImageResponse::MetadataLoaded(_) => {
+            ImageResponse::FailedToLoadOrDecode |
+            ImageResponse::MetadataLoaded(_) |
+            ImageResponse::PartiallyDecoded(_) => {
                 return None;
             },
         };
@@ -2584,6 +2586,7 @@ impl UnshapedTextRun<'_> {
             east_asian: FontVariantEastAsian::NORMAL,
             feature_settings: FontFeatureSettings::normal(),
             position: FontVariantPosition::Normal,
+            trimmed_punctuation: Vec::new(),
         };
 
         let glyphs = font.shape_text(self.string, &options);

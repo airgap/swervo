@@ -53,7 +53,8 @@ use crate::style_ext::{
 };
 use crate::table::WeakTableLevelBox;
 use crate::{
-    ConstraintSpace, ContainingBlock, ContainingBlockSize, IndefiniteContainingBlock, WritingMode,
+    ConstraintSpace, ContainingBlock, ContainingBlockSize, IndefiniteContainingBlock,
+    TableCellChildConstraints, WritingMode,
 };
 
 #[derive(PartialEq)]
@@ -63,6 +64,10 @@ enum CellContentAlignment {
     Middle,
     Baseline,
 }
+
+
+/// Blink's `kTableMaxInlineSize`.
+const TABLE_MAX_INLINE_SIZE: i32 = 1_000_000;
 
 /// A result of a final or speculative layout of a single cell in
 /// the table. Note that this is only done for slots that are not
@@ -328,17 +333,37 @@ impl<'a> TableLayout<'a> {
                     if row_index > 0 {
                         CellOrTrackMeasure::zero()
                     } else {
+                        // Blink adds the padding and border of a `content-box` cell to the
+                        // width that its percentage resolves to.
+                        let content_sizes = match percentage_size.inline {
+                            Some(_)
+                                if cell.context.base.style.get_position().box_sizing ==
+                                    BoxSizing::ContentBox =>
+                            {
+                                padding_border_sums.inline
+                            },
+                            Some(_) => Au::zero(),
+                            None => preferred_size.inline,
+                        };
                         CellOrTrackMeasure {
-                            content_sizes: preferred_size.inline.into(),
+                            content_sizes: content_sizes.into(),
                             percentage: percentage_size.inline,
                         }
                     }
                 } else {
-                    let constraint_space = ConstraintSpace::new(
-                        SizeConstraint::default(),
-                        &cell.context.base.style,
-                        cell.context.preferred_aspect_ratio(&padding_border_sums),
-                    );
+                    let constraint_space = ConstraintSpace {
+                        replaced_percentage_block_size: self
+                            .table_cell_child_constraints(
+                                &cell.context.base.style,
+                                padding_border_sums.block,
+                            )
+                            .replaced_percentage_block_size,
+                        ..ConstraintSpace::new(
+                            SizeConstraint::default(),
+                            &cell.context.base.style,
+                            cell.context.preferred_aspect_ratio(&padding_border_sums),
+                        )
+                    };
                     let inline_content_sizes = cell
                         .context
                         .inline_content_sizes(layout_context, &constraint_space)
@@ -444,14 +469,17 @@ impl<'a> TableLayout<'a> {
         for column_index in 0..self.table.size.width {
             for row_index in 0..self.table.size.height {
                 let coords = TableSlotCoordinates::new(column_index, row_index);
+                // Only the cells spanning just this column (row) constrain it, so that the size
+                // of a cell spanning several rows goes to the unconstrained rows it spans.
                 let cell_constrained = match self.table.resolve_first_cell(coords) {
-                    Some(cell) if cell.colspan == 1 => cell
-                        .context
-                        .base
-                        .style
-                        .box_size(writing_mode)
-                        .map(is_length),
-                    _ => LogicalVec2::default(),
+                    Some(cell) => {
+                        let size = cell.context.base.style.box_size(writing_mode);
+                        LogicalVec2 {
+                            inline: cell.colspan == 1 && is_length(&size.inline),
+                            block: cell.rowspan == 1 && is_length(&size.block),
+                        }
+                    },
+                    None => LogicalVec2::default(),
                 };
 
                 let rowspan_greater_than_1 = match self.table.slots[row_index][column_index] {
@@ -501,8 +529,11 @@ impl<'a> TableLayout<'a> {
         // >     1, of its corresponding table-column (if any), and of its corresponding table-column-group (if
         // >     any)
         //
-        // TODO: Take into account `table-column` and `table-column-group` lengths.
-        // TODO: Take into account changes to this computation for fixed table layout.
+        if self.is_in_fixed_mode {
+            self.compute_column_measures_in_fixed_mode(writing_mode);
+            return;
+        }
+
         let mut colspan_cell_constraints = Vec::new();
         for column_index in 0..self.table.size.width {
             let column = &mut self.columns[column_index];
@@ -560,6 +591,67 @@ impl<'a> TableLayout<'a> {
                     percentage.0.min(1. - total_intrinsic_percentage_width);
                 total_intrinsic_percentage_width += final_intrinsic_percentage_width;
                 *percentage = Percentage(final_intrinsic_percentage_width);
+            }
+        }
+    }
+
+    /// Compute the column measures of a table in fixed mode like Blink, which refines
+    /// <https://drafts.csswg.org/css-tables/#in-fixed-mode>: the width of a table-column takes
+    /// precedence over the widths of the cells in the first row, and a cell spanning several
+    /// columns gives each of them an equal share of its width. A column ends up with either a
+    /// percentage, a fixed width (it is then constrained), or neither (it is then `auto`).
+    fn compute_column_measures_in_fixed_mode(&mut self, writing_mode: WritingMode) {
+        let has_length_inline_size = |style: &ComputedValues| {
+            style
+                .box_size(writing_mode)
+                .inline
+                .to_numeric()
+                .is_some_and(|size| size.to_length().is_some())
+        };
+        let mut sized_by_table_column = vec![false; self.table.size.width];
+        for (column_index, sized_by_table_column) in sized_by_table_column.iter_mut().enumerate()
+        {
+            let column_measure =
+                self.table
+                    .get_column_measure_for_column_at_index(writing_mode, column_index, true);
+            let has_length = self
+                .table
+                .columns
+                .get(column_index)
+                .is_some_and(|column| has_length_inline_size(&column.borrow().base.style));
+            let column = &mut self.columns[column_index];
+            column.content_sizes = column_measure.content_sizes.max_content.into();
+            column.percentage = column_measure.percentage;
+            column.constrained = has_length;
+            *sized_by_table_column = has_length || column.percentage.is_some();
+        }
+
+        let border_spacing = self.table.border_spacing().inline;
+        for column_index in 0..self.table.size.width {
+            let Some(TableSlot::Cell(cell)) = self.table.slots.first().map(|row| &row[column_index])
+            else {
+                continue;
+            };
+            let cell = cell.borrow();
+            let span = cell.colspan;
+            let is_constrained = has_length_inline_size(&cell.context.base.style);
+            let cell_measure = &self.cell_measures[0][column_index].inline;
+            let share = ((cell_measure.content_sizes.max_content -
+                border_spacing.scale_by((span - 1) as f32))
+            .max(Au::zero()))
+            .scale_by(1. / span as f32);
+            let percentage = cell_measure
+                .percentage
+                .map(|percentage| Percentage(percentage.0 / span as f32));
+            let range = column_index..(column_index + span).min(self.table.size.width);
+            for spanned_column_index in range {
+                if sized_by_table_column[spanned_column_index] {
+                    continue;
+                }
+                let column = &mut self.columns[spanned_column_index];
+                column.content_sizes = share.into();
+                column.percentage = percentage;
+                column.constrained = is_constrained;
             }
         }
     }
@@ -723,6 +815,7 @@ impl<'a> TableLayout<'a> {
         let containing_block = IndefiniteContainingBlock {
             size: LogicalVec2::default(),
             style: &self.table.style,
+            replaced_percentage_block_size: None,
         };
         self.table
             .captions
@@ -936,6 +1029,95 @@ impl<'a> TableLayout<'a> {
         )
     }
 
+    /// Distribute the assignable width to the columns of a table in fixed mode, like Blink
+    /// (`DistributeInlineSizeToComputedInlineSizeFixed`). Percentage and fixed columns get their
+    /// widths, and `auto` columns share what is left. Without `auto` columns, the space left
+    /// goes to the fixed columns in proportion to their widths, or else to the percentage
+    /// columns in proportion to their percentages. When there isn't enough space, fixed columns
+    /// keep their widths and percentage columns share what is left in proportion to their
+    /// percentages.
+    fn distribute_width_to_columns_in_fixed_mode(&self) -> Vec<Au> {
+        let assignable_width = self.assignable_width;
+        let mut widths: Vec<Au> = self
+            .columns
+            .iter()
+            .map(|column| match column.percentage {
+                Some(percentage) => {
+                    assignable_width.scale_by(percentage.0) + column.content_sizes.max_content
+                },
+                None if column.constrained => column.content_sizes.max_content,
+                None => Au::zero(),
+            })
+            .collect();
+
+        let column_indices = |filter: fn(&ColumnLayout) -> bool| -> Vec<usize> {
+            (0..self.columns.len())
+                .filter(|index| filter(&self.columns[*index]))
+                .collect()
+        };
+        let percentage_columns = column_indices(|column| column.percentage.is_some());
+        let fixed_columns =
+            column_indices(|column| column.percentage.is_none() && column.constrained);
+        let auto_columns =
+            column_indices(|column| column.percentage.is_none() && !column.constrained);
+        let sum = |indices: &[usize], widths: &[Au]| -> Au {
+            indices.iter().map(|index| widths[*index]).sum()
+        };
+        let fixed_sum = sum(&fixed_columns, &widths);
+        let percentage_sum = sum(&percentage_columns, &widths);
+        let percentage_weights: Vec<f32> = self
+            .columns
+            .iter()
+            .filter_map(|column| column.percentage.map(|percentage| percentage.0))
+            .collect();
+
+        // Adds `amount` to the widths of the columns at `indices` in proportion to `weights`,
+        // or equally if the weights add up to zero, making the increments add up to `amount`.
+        let distribute =
+            |widths: &mut [Au], amount: Au, indices: &[usize], weights: &[f32]| {
+                let total_weight: f32 = weights.iter().sum();
+                let mut accumulated_weight = 0.;
+                let mut distributed = Au::zero();
+                for (position, index) in indices.iter().enumerate() {
+                    accumulated_weight += if total_weight > 0. {
+                        weights[position] / total_weight
+                    } else {
+                        1. / indices.len() as f32
+                    };
+                    let target = if position + 1 == indices.len() {
+                        amount
+                    } else {
+                        amount.scale_by(accumulated_weight)
+                    };
+                    widths[*index] += target - distributed;
+                    distributed = target;
+                }
+            };
+
+        let used_sum = fixed_sum + percentage_sum;
+        if used_sum < assignable_width {
+            let extra = assignable_width - used_sum;
+            if !auto_columns.is_empty() {
+                distribute(&mut widths, extra, &auto_columns, &[]);
+            } else if !fixed_columns.is_empty() {
+                let weights: Vec<f32> = fixed_columns
+                    .iter()
+                    .map(|index| widths[*index].to_f32_px())
+                    .collect();
+                distribute(&mut widths, extra, &fixed_columns, &weights);
+            } else {
+                distribute(&mut widths, extra, &percentage_columns, &percentage_weights);
+            }
+        } else if !percentage_columns.is_empty() {
+            for index in &percentage_columns {
+                widths[*index] = Au::zero();
+            }
+            let remaining = (assignable_width - fixed_sum).max(Au::zero());
+            distribute(&mut widths, remaining, &percentage_columns, &percentage_weights);
+        }
+        widths
+    }
+
     /// This is an implementation of *Distributing excess width to columns* from
     /// <https://drafts.csswg.org/css-tables/#distributing-width-to-columns>.
     fn distribute_extra_width_to_columns(
@@ -1073,6 +1255,111 @@ impl<'a> TableLayout<'a> {
         }
     }
 
+    /// Lay out the contents of the cell at `coordinate`. `final_block_size` is the size of the
+    /// cell's border box once the row sizes are known, or `None` while the rows are measured.
+    fn layout_cell(
+        &self,
+        layout_context: &LayoutContext,
+        containing_block_for_table: &ContainingBlock,
+        coordinate: TableSlotCoordinates,
+        cell: &TableSlotCell,
+        final_block_size: Option<Au>,
+    ) -> CellLayout {
+        let area = LogicalSides {
+            inline_start: coordinate.x,
+            inline_end: coordinate.x + cell.colspan,
+            block_start: coordinate.y,
+            block_end: coordinate.y + cell.rowspan,
+        };
+        let writing_mode = containing_block_for_table.style.writing_mode;
+        let layout_style = cell.context.layout_style();
+        let border = self
+            .get_collapsed_border_widths_for_area(area)
+            .unwrap_or_else(|| layout_style.border_width(writing_mode));
+        let padding: LogicalSides<Au> = layout_style
+            .padding(writing_mode)
+            .percentages_relative_to(self.basis_for_cell_padding_percentage);
+        let padding_border_sums = LogicalVec2 {
+            inline: padding.inline_sum() + border.inline_sum(),
+            block: padding.block_sum() + border.block_sum(),
+        };
+        let border_spacing_spanned =
+            self.table.border_spacing().inline * (cell.colspan - 1) as i32;
+
+        let mut total_cell_width = (coordinate.x..coordinate.x + cell.colspan)
+            .map(|column_index| self.distributed_column_widths[column_index])
+            .sum::<Au>() -
+            padding_border_sums.inline +
+            border_spacing_spanned;
+        total_cell_width = total_cell_width.max(Au::zero());
+
+        let style = &cell.context.base.style;
+        let block = final_block_size.map_or_else(SizeConstraint::default, |block_size| {
+            SizeConstraint::Definite((block_size - padding_border_sums.block).max(Au::zero()))
+        });
+
+        let preferred_aspect_ratio = cell.context.preferred_aspect_ratio(&padding_border_sums);
+        let containing_block_for_children = ContainingBlock {
+            size: ContainingBlockSize {
+                inline: total_cell_width,
+                block,
+                table_cell: Some(
+                    self.table_cell_child_constraints(style, padding_border_sums.block),
+                ),
+            },
+            style,
+        };
+
+        let mut positioning_context = PositioningContext::default();
+        let layout = cell.context.layout(
+            layout_context,
+            &mut positioning_context,
+            &containing_block_for_children,
+            containing_block_for_table,
+            preferred_aspect_ratio,
+            &LazySize::intrinsic(),
+        );
+
+        CellLayout {
+            layout,
+            padding,
+            border,
+            positioning_context,
+        }
+    }
+
+    /// How the cell with the given style constrains the block sizes of its children.
+    fn table_cell_child_constraints(
+        &self,
+        cell_style: &ComputedValues,
+        padding_border_block_sum: Au,
+    ) -> TableCellChildConstraints {
+        // Blink resolves percentage block sizes of a cell's replaced children against the cell's
+        // fixed block size, also while the rows are measured and while the columns are sized, so
+        // that an image with `height: 100%` neither makes the row as tall as its natural height
+        // nor the column as wide as its natural width.
+        let writing_mode = self.table.style.writing_mode;
+        let replaced_percentage_block_size =
+            cell_fixed_block_size(cell_style, writing_mode).map(|size| {
+                match cell_style.get_position().box_sizing {
+                    BoxSizing::ContentBox => size,
+                    BoxSizing::BorderBox => (size - padding_border_block_sum).max(Au::zero()),
+                }
+            });
+        TableCellChildConstraints {
+            replaced_percentage_block_size,
+            is_restricted: self.is_restricted_cell(cell_style),
+        }
+    }
+
+    /// Whether the cell with the given style has a fixed block size or the table a non-`auto`
+    /// one, which Blink calls a restricted block size table cell.
+    fn is_restricted_cell(&self, cell_style: &ComputedValues) -> bool {
+        let writing_mode = self.table.style.writing_mode;
+        !matches!(self.table.style.box_size(writing_mode).block, Size::Initial) ||
+            cell_fixed_block_size(cell_style, writing_mode).is_some()
+    }
+
     /// This is an implementation of *Row layout (first pass)* from
     /// <https://drafts.csswg.org/css-tables/#row-layout>.
     fn layout_cells_in_row(
@@ -1084,62 +1371,13 @@ impl<'a> TableLayout<'a> {
             let TableSlot::Cell(cell) = slot else {
                 return None;
             };
-
-            let cell = cell.borrow();
-            let area = LogicalSides {
-                inline_start: coordinate.x,
-                inline_end: coordinate.x + cell.colspan,
-                block_start: coordinate.y,
-                block_end: coordinate.y + cell.rowspan,
-            };
-            let layout_style = cell.context.layout_style();
-            let border = self
-                .get_collapsed_border_widths_for_area(area)
-                .unwrap_or_else(|| {
-                    layout_style.border_width(containing_block_for_table.style.writing_mode)
-                });
-            let padding: LogicalSides<Au> = layout_style
-                .padding(containing_block_for_table.style.writing_mode)
-                .percentages_relative_to(self.basis_for_cell_padding_percentage);
-            let padding_border_sums = LogicalVec2 {
-                inline: padding.inline_sum() + border.inline_sum(),
-                block: padding.block_sum() + border.block_sum(),
-            };
-            let border_spacing_spanned =
-                self.table.border_spacing().inline * (cell.colspan - 1) as i32;
-
-            let mut total_cell_width = (coordinate.x..coordinate.x + cell.colspan)
-                .map(|column_index| self.distributed_column_widths[column_index])
-                .sum::<Au>() -
-                padding_border_sums.inline +
-                border_spacing_spanned;
-            total_cell_width = total_cell_width.max(Au::zero());
-
-            let preferred_aspect_ratio = cell.context.preferred_aspect_ratio(&padding_border_sums);
-            let containing_block_for_children = ContainingBlock {
-                size: ContainingBlockSize {
-                    inline: total_cell_width,
-                    block: SizeConstraint::default(),
-                },
-                style: &cell.context.base.style,
-            };
-
-            let mut positioning_context = PositioningContext::default();
-            let layout = cell.context.layout(
+            Some(self.layout_cell(
                 layout_context,
-                &mut positioning_context,
-                &containing_block_for_children,
                 containing_block_for_table,
-                preferred_aspect_ratio,
-                &LazySize::intrinsic(),
-            );
-
-            Some(CellLayout {
-                layout,
-                padding,
-                border,
-                positioning_context,
-            })
+                coordinate,
+                &cell.borrow(),
+                None,
+            ))
         };
 
         let job_sizes = self
@@ -1206,8 +1444,7 @@ impl<'a> TableLayout<'a> {
     fn do_first_row_layout(&mut self, writing_mode: WritingMode) -> Vec<Au> {
         let mut row_sizes = (0..self.table.size.height)
             .map(|row_index| {
-                let (mut max_ascent, mut max_descent, mut max_row_height) =
-                    (Au::zero(), Au::zero(), Au::zero());
+                let (mut max_descent, mut max_row_height) = (Au::zero(), Au::zero());
 
                 for column_index in 0..self.table.size.width {
                     let cell = match self.table.slots[row_index][column_index] {
@@ -1231,29 +1468,42 @@ impl<'a> TableLayout<'a> {
                         max_row_height.max_assign(outer_block_size);
                     }
 
-                    if cell.content_alignment() == CellContentAlignment::Baseline {
-                        let ascent = layout.ascent();
-                        let border_padding_start =
-                            layout.border.block_start + layout.padding.block_start;
+                    // Only take into account the descent of this cell if doesn't span
+                    // rows. The descent portion of the cell in cells that do span rows
+                    // may extend into other rows.
+                    if cell.content_alignment() == CellContentAlignment::Baseline &&
+                        cell.rowspan == 1
+                    {
                         let border_padding_end = layout.border.block_end + layout.padding.block_end;
-                        max_ascent.max_assign(ascent + border_padding_start);
-
-                        // Only take into account the descent of this cell if doesn't span
-                        // rows. The descent portion of the cell in cells that do span rows
-                        // may extend into other rows.
-                        if cell.rowspan == 1 {
-                            max_descent.max_assign(
-                                layout.layout.content_block_size - ascent + border_padding_end,
-                            );
-                        }
+                        max_descent.max_assign(
+                            layout.layout.content_block_size - layout.ascent() + border_padding_end,
+                        );
                     }
                 }
+                let max_ascent = self.row_baseline(row_index);
                 self.row_baselines.push(max_ascent);
                 max_row_height.max(max_ascent + max_descent)
             })
             .collect();
         self.calculate_row_sizes_after_first_layout(&mut row_sizes, writing_mode);
         row_sizes
+    }
+
+    /// The largest distance from the top of a baseline-aligned cell in the row to its baseline.
+    fn row_baseline(&self, row_index: usize) -> Au {
+        (0..self.table.size.width)
+            .filter_map(|column_index| {
+                let TableSlot::Cell(cell) = &self.table.slots[row_index][column_index] else {
+                    return None;
+                };
+                if cell.borrow().content_alignment() != CellContentAlignment::Baseline {
+                    return None;
+                }
+                let layout = self.cells_laid_out[row_index][column_index].as_ref()?;
+                Some(layout.ascent() + layout.border.block_start + layout.padding.block_start)
+            })
+            .max()
+            .unwrap_or_else(Au::zero)
     }
 
     #[allow(clippy::ptr_arg)] // Needs to be a vec because of the function above
@@ -1357,7 +1607,12 @@ impl<'a> TableLayout<'a> {
             return;
         }
 
-        let is_constrained = |track_index: &usize| self.rows[*track_index].constrained;
+        // Like Blink, a row with a percentage block size counts as constrained, so that it keeps
+        // the size its percentage asks for while the unconstrained rows take what is left.
+        let is_constrained = |track_index: &usize| {
+            let row = &self.rows[*track_index];
+            row.constrained || !row.percent.is_zero()
+        };
         let is_unconstrained = |track_index: &usize| !is_constrained(track_index);
         let is_empty: Vec<bool> = track_sizes.iter().map(|size| size.is_zero()).collect();
         let is_not_empty = |track_index: &usize| !is_empty[*track_index];
@@ -1506,11 +1761,15 @@ impl<'a> TableLayout<'a> {
         // extra space to rows using the same distribution algorithm used for distributing rowspan
         // space.
         // TODO: This should first distribute space to row groups and then to rows.
+        // Like Blink, percentages of rows resolve against the table height without the border
+        // spacing before the first row and after the last one.
+        let percentage_resolution_size =
+            self.final_table_height - self.table.border_spacing().block * 2;
         self.distribute_extra_size_to_rows(
             self.final_table_height - table_height_from_rows,
             0..self.table.size.height,
             &mut row_sizes,
-            Some(self.final_table_height),
+            Some(percentage_resolution_size),
             false, /* rowspan_distribution */
         );
         self.row_sizes = row_sizes;
@@ -1526,6 +1785,7 @@ impl<'a> TableLayout<'a> {
             size: ContainingBlockSize {
                 inline: self.table_width + self.pbm.padding_border_sums.inline,
                 block: SizeConstraint::default(),
+                table_cell: None,
             },
             style: &self.table.style,
         };
@@ -1596,6 +1856,7 @@ impl<'a> TableLayout<'a> {
             size: ContainingBlockSize {
                 inline: self.table_width,
                 block: containing_block_for_table.size.block,
+                table_cell: None,
             },
             style: containing_block_for_children.style,
         };
@@ -1754,8 +2015,11 @@ impl<'a> TableLayout<'a> {
         containing_block_for_logical_conversion: &ContainingBlock,
         containing_block_for_children: &ContainingBlock,
     ) -> BoxFragment {
-        self.distributed_column_widths =
-            Self::distribute_width_to_columns(self.assignable_width, &self.columns);
+        self.distributed_column_widths = if self.is_in_fixed_mode {
+            self.distribute_width_to_columns_in_fixed_mode()
+        } else {
+            Self::distribute_width_to_columns(self.assignable_width, &self.columns)
+        };
         self.layout_cells_in_row(layout_context, containing_block_for_children);
         let table_writing_mode = containing_block_for_children.style.writing_mode;
         let first_layout_row_heights = self.do_first_row_layout(table_writing_mode);
@@ -1790,6 +2054,11 @@ impl<'a> TableLayout<'a> {
 
         let mut table_fragments = Vec::new();
         let table_and_track_dimensions = TableAndTrackDimensions::new(self);
+        self.relayout_cells_for_percentage_block_sizes(
+            layout_context,
+            containing_block_for_children,
+            &table_and_track_dimensions,
+        );
         self.make_fragments_for_columns_and_column_groups(
             &table_and_track_dimensions,
             &mut table_fragments,
@@ -1806,13 +2075,38 @@ impl<'a> TableLayout<'a> {
             // > the lowest and highest content edges of the cells in the row. [CSS2]
             //
             // If any cell below has baseline alignment, these values will be overwritten,
-            // but they are initialized to the content edge of the first row.
+            // but they are initialized to the lowest content edge of the cells in the first row,
+            // which is what Blink and CSS 2 use:
+            // <https://drafts.csswg.org/css2/#height-layout>
             if row_index == 0 {
+                let lowest_content_edge = (0..self.table.size.width)
+                    .filter_map(|column_index| {
+                        let TableSlot::Cell(cell) = &self.table.slots[0][column_index] else {
+                            return None;
+                        };
+                        let cell = cell.borrow();
+                        if cell.rowspan != 1 {
+                            return None;
+                        }
+                        let layout = self.cells_laid_out[0][column_index].as_ref()?;
+                        let cell_rect = table_and_track_dimensions.get_cell_rect(
+                            TableSlotCoordinates::new(column_index, 0),
+                            cell.rowspan,
+                            cell.colspan,
+                        );
+                        Some(
+                            cell_rect.max_block_position() -
+                                layout.padding.block_end -
+                                layout.border.block_end,
+                        )
+                    })
+                    .max();
                 let row_end = table_and_track_dimensions
                     .get_row_rect(0)
                     .max_block_position();
-                baselines.first = Some(row_end);
-                baselines.last = Some(row_end);
+                let baseline = lowest_content_edge.unwrap_or(row_end);
+                baselines.first = Some(baseline);
+                baselines.last = Some(baseline);
             }
 
             let row_is_collapsed = self.is_row_collapsed(row_index);
@@ -1905,6 +2199,55 @@ impl<'a> TableLayout<'a> {
             self.specific_layout_info_for_grid(),
         )
         .with_baselines(baselines)
+    }
+
+    /// Like Blink, resolve percentage block sizes inside a cell against the final block size of
+    /// the cell when either the cell has a fixed block size or the table has a non-`auto` one.
+    /// These percentages were indefinite while the rows were measured, so the affected cells
+    /// are laid out again now that the row sizes are known.
+    fn relayout_cells_for_percentage_block_sizes(
+        &mut self,
+        layout_context: &LayoutContext,
+        containing_block_for_table: &ContainingBlock,
+        dimensions: &TableAndTrackDimensions,
+    ) {
+        let table = self.table;
+        for row_index in 0..table.size.height {
+            let mut relaid_out_row = false;
+            for column_index in 0..table.size.width {
+                let Some(cell_layout) = &self.cells_laid_out[row_index][column_index] else {
+                    continue;
+                };
+                if !cell_layout.layout.depends_on_block_constraints {
+                    continue;
+                }
+                let TableSlot::Cell(cell) = &table.slots[row_index][column_index] else {
+                    unreachable!("Only cells are laid out");
+                };
+                let cell = cell.borrow();
+                if !self.is_restricted_cell(&cell.context.base.style) {
+                    continue;
+                }
+                let coordinate = TableSlotCoordinates::new(column_index, row_index);
+                let block_size = dimensions
+                    .get_cell_rect(coordinate, cell.rowspan, cell.colspan)
+                    .size
+                    .block;
+                let layout = self.layout_cell(
+                    layout_context,
+                    containing_block_for_table,
+                    coordinate,
+                    &cell,
+                    Some(block_size),
+                );
+                self.cells_laid_out[row_index][column_index] = Some(layout);
+                relaid_out_row = true;
+            }
+            // Like Blink, align the cells to the baselines of their final layouts.
+            if relaid_out_row {
+                self.row_baselines[row_index] = self.row_baseline(row_index);
+            }
+        }
     }
 
     fn specific_layout_info_for_grid(&mut self) -> Option<SpecificLayoutInfo> {
@@ -2296,6 +2639,7 @@ impl<'a> RowFragmentLayout<'a> {
             size: ContainingBlockSize {
                 inline: rect.size.inline,
                 block: SizeConstraint::Definite(rect.size.block),
+                table_cell: None,
             },
             style: table_style,
         };
@@ -2341,6 +2685,7 @@ impl<'a> RowFragmentLayout<'a> {
             size: ContainingBlockSize {
                 inline: inline_size,
                 block: block_size,
+                table_cell: None,
             },
             style: containing_block_for_logical_conversion.style,
         };
@@ -2632,13 +2977,28 @@ impl Table {
         }
         .borrow();
 
+        // Like Blink, a table-column-group gives its width to those of its table-columns that
+        // have an `auto` one, except in fixed mode.
+        let column_group = column
+            .group_index
+            .map(|group_index| self.column_groups[group_index].borrow());
+        let style = match &column_group {
+            Some(column_group)
+                if !is_in_fixed_mode &&
+                    matches!(column.base.style.box_size(writing_mode).inline, Size::Initial) =>
+            {
+                &column_group.base.style
+            },
+            _ => &column.base.style,
+        };
+
         let CellOrColumnOuterSizes {
             preferred: preferred_size,
             min: min_size,
             max: max_size,
             percentage: percentage_size,
         } = CellOrColumnOuterSizes::new(
-            &column.base.style,
+            style,
             writing_mode,
             &Default::default(),
             is_in_fixed_mode,
@@ -2784,7 +3144,22 @@ impl ComputeInlineContentSizes for Table {
             );
         layout.compute_measures(layout_context, writing_mode);
 
-        let grid_content_sizes = layout.compute_grid_min_max();
+        let mut grid_content_sizes = layout.compute_grid_min_max();
+
+        // A fixed-layout table ignores cell content, so its max-content would be its column
+        // widths alone. Blink gives one with a percentage inline size a huge max-content
+        // instead, so a shrink-to-fit container lets it reach its percentage rather than
+        // collapsing it (booking.com's date picker).
+        if layout.is_in_fixed_mode &&
+            matches!(
+                &self.style.box_size(writing_mode).inline,
+                Size::Numeric(inline_size) if inline_size.has_percentage()
+            )
+        {
+            grid_content_sizes.max_content = grid_content_sizes
+                .max_content
+                .max(Au::from_px(TABLE_MAX_INLINE_SIZE));
+        }
 
         // Padding and border should apply to the table grid, but they will be taken into
         // account when computing the inline content sizes of the table wrapper (our parent), so
@@ -2988,6 +3363,16 @@ fn get_size_percentage_contribution(
             max_size.block.to_percentage(),
         ),
     }
+}
+
+/// The block size of a cell if it is a `<length>`, which Blink calls a fixed block size.
+fn cell_fixed_block_size(style: &ComputedValues, writing_mode: WritingMode) -> Option<Au> {
+    style
+        .box_size(writing_mode)
+        .block
+        .to_numeric()
+        .and_then(|length_percentage| length_percentage.to_length())
+        .map(Au::from)
 }
 
 struct CellOrColumnOuterSizes {

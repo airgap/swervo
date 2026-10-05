@@ -1809,7 +1809,7 @@ impl Node {
     }
 
     /// <https://w3c.github.io/editing/docs/execCommand/#precedes-a-line-break>
-    fn precedes_a_line_break(&self, no_gc: &NoGC) -> bool {
+    pub(crate) fn precedes_a_line_break(&self, no_gc: &NoGC) -> bool {
         let mut node = DomRoot::from_ref(self);
         // Step 1. Let offset be node's length.
         let mut offset = node.len();
@@ -1945,6 +1945,7 @@ impl Node {
                 })
             {
                 start_offset -= 1;
+                continue;
             }
             // Step 3.4. Otherwise, break from this loop.
             break;

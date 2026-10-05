@@ -3,11 +3,12 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::fmt::{Debug, Formatter};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 use app_units::Au;
 use atomic_refcell::{AtomicRef, AtomicRefCell};
+use rustc_hash::FxHashMap;
 use euclid::Point2D;
 use layout_api::LayoutDamage;
 use malloc_size_of_derive::MallocSizeOf;
@@ -31,7 +32,7 @@ use crate::fragment_tree::{
 use crate::geom::LogicalSides1D;
 use crate::positioned::{PositioningContext, relative_adjustement};
 use crate::sizing::{
-    ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, SizeConstraint,
+    ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, LazySizeKind, SizeConstraint,
 };
 use crate::traversal::ElementDamageSet;
 use crate::{ConstraintSpace, ContainingBlock, ContainingBlockSize};
@@ -47,13 +48,21 @@ pub(crate) struct LayoutBoxBase {
     pub base_fragment_info: BaseFragmentInfo,
     pub style: ServoArc<ComputedValues>,
     pub cached_inline_content_size:
-        AtomicRefCell<Option<Box<(SizeConstraint, InlineContentSizesResult)>>>,
+        AtomicRefCell<Option<Box<(SizeConstraint, Option<Au>, InlineContentSizesResult)>>>,
     pub outer_inline_content_sizes_depend_on_content: AtomicBool,
 
     /// The cached layout results for this [`LayoutBoxBase`]. These are either cached
     /// independent formatting context results or a cached block layout for use within
     /// a block flow.
     cached_layout_result: AtomicRefCell<Option<LayoutResultAndInputs>>,
+
+    /// The cached independent formatting context layout whose block size was left to its
+    /// contents (see [`LazySizeKind`]). Flex layout lays an item out
+    /// once to measure it and once more at its final size; keeping the measurement apart
+    /// from [`Self::cached_layout_result`] stops the two from evicting each other, which made
+    /// nested flex containers take time exponential in their depth.
+    cached_measure_result:
+        AtomicRefCell<Option<Box<IndependentFormattingContextLayoutResultAndInputs>>>,
 
     /// Whether or not the cached layout result for this [`LayoutBoxBase`] is dirty.
     /// This flag is used to preserve the cache when it can be used to do a faster
@@ -64,8 +73,74 @@ pub(crate) struct LayoutBoxBase {
     /// This is used as a heuristic to know when to perform parallel layout.
     subtree_size: AtomicUsize,
 
-    pub fragments: AtomicRefCell<Vec<Fragment>>,
+    #[conditional_malloc_size_of]
+    fragments: Arc<BoxFragments>,
     pub parent_box: Option<WeakLayoutBox>,
+}
+
+/// The fragments of a box. Each of them refers back to this, so that reusing a cached layout
+/// result can make the fragments in it the fragments of their boxes again: in the meantime the
+/// boxes may have been laid out at another size, and layout queries would otherwise look at
+/// fragments that are not in the fragment tree.
+#[derive(Default, MallocSizeOf)]
+pub(crate) struct BoxFragments {
+    fragments: AtomicRefCell<Vec<Fragment>>,
+    /// Which of the cached layout results of the box the fragments of its descendants belong to:
+    /// one of the `CONTENTS_FROM_*` values.
+    contents_from: AtomicU8,
+}
+
+const CONTENTS_FROM_UNKNOWN: u8 = 0;
+const CONTENTS_FROM_LAYOUT: u8 = 1;
+const CONTENTS_FROM_MEASURE: u8 = 2;
+
+/// Make `fragments` and their descendants the fragments of the boxes they were made for.
+fn make_fragments_current(fragments: &[Fragment]) {
+    type FragmentsByOwner = FxHashMap<*const BoxFragments, (Arc<BoxFragments>, Vec<Fragment>)>;
+    fn collect(fragment: &Fragment, by_owner: &mut FragmentsByOwner) {
+        if let Some(owner) = fragment
+            .base()
+            .and_then(|base| base.owner.borrow().as_ref().and_then(Weak::upgrade))
+        {
+            by_owner
+                .entry(Arc::as_ptr(&owner))
+                .or_insert_with(|| (owner.clone(), Vec::new()))
+                .1
+                .push(fragment.clone());
+        }
+        match fragment {
+            Fragment::LayoutRoot(layout_root_fragment) => {
+                collect(&layout_root_fragment.inner(), by_owner)
+            },
+            Fragment::Box(box_fragment) | Fragment::Float(box_fragment) => {
+                for child in &box_fragment.children {
+                    collect(child, by_owner);
+                }
+            },
+            Fragment::Positioning(positioning_fragment) => {
+                for child in &positioning_fragment.children {
+                    collect(child, by_owner);
+                }
+            },
+            Fragment::Text(_) |
+            Fragment::AbsoluteOrFixedPositionedPlaceholder(_) |
+            Fragment::Image(_) |
+            Fragment::IFrame(_) => {},
+        }
+    }
+
+    let mut by_owner = FxHashMap::default();
+    for fragment in fragments {
+        collect(fragment, &mut by_owner);
+    }
+    for (owner, fragments) in by_owner.into_values() {
+        *owner.fragments.borrow_mut() = fragments;
+        // The descendants of this box now hold the fragments of one of its earlier layouts,
+        // which might not be the one its cache slots remember as current.
+        owner
+            .contents_from
+            .store(CONTENTS_FROM_UNKNOWN, Ordering::Relaxed);
+    }
 }
 
 impl LayoutBoxBase {
@@ -79,9 +154,10 @@ impl LayoutBoxBase {
             cached_inline_content_size: AtomicRefCell::default(),
             outer_inline_content_sizes_depend_on_content: AtomicBool::new(true),
             cached_layout_result: AtomicRefCell::default(),
+            cached_measure_result: AtomicRefCell::default(),
             cached_layout_result_dirty: AtomicBool::default(),
             subtree_size: AtomicUsize::default(),
-            fragments: AtomicRefCell::default(),
+            fragments: Arc::default(),
             parent_box: None,
         }
     }
@@ -106,9 +182,12 @@ impl LayoutBoxBase {
     ) -> InlineContentSizesResult {
         let mut cache = self.cached_inline_content_size.borrow_mut();
         if let Some(cached_inline_content_size) = cache.as_ref() {
-            let (previous_cb_block_size, result) = **cached_inline_content_size;
+            let (previous_cb_block_size, previous_replaced_percentage_block_size, result) =
+                **cached_inline_content_size;
             if !result.depends_on_block_constraints ||
-                previous_cb_block_size == constraint_space.block_size
+                (previous_cb_block_size == constraint_space.block_size &&
+                    previous_replaced_percentage_block_size ==
+                        constraint_space.replaced_percentage_block_size)
             {
                 return result;
             }
@@ -127,24 +206,47 @@ impl LayoutBoxBase {
         } else {
             layout_box.compute_inline_content_sizes_with_fixup(layout_context, constraint_space)
         };
-        *cache = Some(Box::new((constraint_space.block_size, result)));
+        *cache = Some(Box::new((
+            constraint_space.block_size,
+            constraint_space.replaced_percentage_block_size,
+            result,
+        )));
         result
     }
 
     pub(crate) fn fragments(&self) -> AtomicRef<'_, Vec<Fragment>> {
-        self.fragments.borrow()
+        self.fragments.fragments.borrow()
+    }
+
+    fn claim_fragment(&self, fragment: &Fragment) {
+        if let Some(base) = fragment.base() {
+            *base.owner.borrow_mut() = Some(Arc::downgrade(&self.fragments));
+        }
     }
 
     pub(crate) fn add_fragment(&self, fragment: Fragment) {
-        self.fragments.borrow_mut().push(fragment);
+        self.claim_fragment(&fragment);
+        self.fragments.fragments.borrow_mut().push(fragment);
     }
 
     pub(crate) fn set_fragment(&self, fragment: Fragment) {
-        *self.fragments.borrow_mut() = vec![fragment];
+        self.claim_fragment(&fragment);
+        *self.fragments.fragments.borrow_mut() = vec![fragment];
     }
 
     pub(crate) fn clear_fragments(&self) {
-        self.fragments.borrow_mut().clear();
+        self.fragments.fragments.borrow_mut().clear();
+    }
+
+    /// Record that the fragments of the descendants of this box belong to the cached layout
+    /// result in `contents_from`, making them so first if they don't.
+    fn use_contents_from(&self, contents_from: u8, fragments: &[Fragment]) {
+        if self.fragments.contents_from.load(Ordering::Relaxed) != contents_from {
+            make_fragments_current(fragments);
+            self.fragments
+                .contents_from
+                .store(contents_from, Ordering::Relaxed);
+        }
     }
 
     /// Clear all resulting fragments and dirty and fragment caches. Resulting fragments are
@@ -157,7 +259,7 @@ impl LayoutBoxBase {
 
     pub(crate) fn repair_style(&mut self, new_style: &ServoArc<ComputedValues>) {
         self.style = new_style.clone();
-        for fragment in self.fragments.borrow_mut().iter_mut() {
+        for fragment in self.fragments.fragments.borrow_mut().iter_mut() {
             if let Some(base) = fragment.base() {
                 base.repair_style(new_style);
             }
@@ -219,29 +321,54 @@ impl LayoutBoxBase {
         &self,
         positioning_context: &mut PositioningContext,
         containing_block_for_children: &ContainingBlock<'_>,
+        lazy_block_size: LazySizeKind,
     ) -> Option<IndependentFormattingContextLayoutResult> {
         if self.cached_layout_result_dirty.load(Ordering::Relaxed) {
             return None;
         }
 
-        let cache = self.cached_layout_result.borrow();
-        let Some(LayoutResultAndInputs::IndependentFormattingContext(cache)) = &*cache else {
-            return None;
+        let applies = |cache: &IndependentFormattingContextLayoutResultAndInputs| {
+            cache.containing_block_for_children_size.inline ==
+                containing_block_for_children.size.inline &&
+                (cache.containing_block_for_children_size == containing_block_for_children.size ||
+                    !cache.result.depends_on_block_constraints)
         };
 
-        let cache = &**cache;
-        if cache.containing_block_for_children_size.inline !=
-            containing_block_for_children.size.inline
-        {
-            return None;
-        }
-        if cache.containing_block_for_children_size.block !=
-            containing_block_for_children.size.block &&
-            cache.result.depends_on_block_constraints
-        {
-            return None;
-        }
+        let layout_cache = self.cached_layout_result.borrow();
+        let measure_cache = self.cached_measure_result.borrow();
+        let measure = measure_cache.as_deref().filter(|cache| applies(cache));
+        let measure =
+            |filter: &dyn Fn(&IndependentFormattingContextLayoutResultAndInputs) -> bool| {
+                measure
+                    .filter(|cache| filter(cache))
+                    .map(|cache| (cache, CONTENTS_FROM_MEASURE))
+            };
+        let (cache, contents_from) = match lazy_block_size {
+            LazySizeKind::Fixed(block_size) => {
+                let layout = match &*layout_cache {
+                    Some(LayoutResultAndInputs::IndependentFormattingContext(cache))
+                        if cache.lazy_block_size == lazy_block_size && applies(cache) =>
+                    {
+                        Some((&**cache, CONTENTS_FROM_LAYOUT))
+                    },
+                    _ => None,
+                };
+                // Being told to use the block size that the contents asked for anyway gives
+                // the same layout as measuring, which is what a flex container does with
+                // its items while it is itself being measured.
+                layout.or_else(|| {
+                    measure(&|cache| {
+                        cache.lazy_block_size == LazySizeKind::Intrinsic &&
+                            cache.result.content_block_size == block_size
+                    })
+                })
+            },
+            LazySizeKind::Intrinsic | LazySizeKind::Constrained => {
+                measure(&|cache| cache.lazy_block_size == lazy_block_size)
+            },
+        }?;
 
+        self.use_contents_from(contents_from, &cache.result.fragments);
         positioning_context.append(cache.positioning_context.clone());
         Some(cache.result.clone())
     }
@@ -249,19 +376,42 @@ impl LayoutBoxBase {
     pub(crate) fn cache_independent_formatting_context_layout(
         &self,
         containing_block_for_children: &ContainingBlock<'_>,
+        lazy_block_size: LazySizeKind,
         child_positioning_context: &PositioningContext,
         result: &IndependentFormattingContextLayoutResult,
     ) {
-        self.cached_layout_result_dirty
-            .store(false, Ordering::Relaxed);
-        *self.cached_layout_result.borrow_mut() =
-            Some(LayoutResultAndInputs::IndependentFormattingContext(
-                Box::new(IndependentFormattingContextLayoutResultAndInputs {
-                    result: result.clone(),
-                    positioning_context: child_positioning_context.clone(),
-                    containing_block_for_children_size: containing_block_for_children.size.clone(),
-                }),
-            ));
+        let was_dirty = self
+            .cached_layout_result_dirty
+            .swap(false, Ordering::Relaxed);
+        let entry = Box::new(IndependentFormattingContextLayoutResultAndInputs {
+            result: result.clone(),
+            positioning_context: child_positioning_context.clone(),
+            containing_block_for_children_size: containing_block_for_children.size.clone(),
+            lazy_block_size,
+        });
+        // Clearing the dirty flag revalidates both slots, so the one not written here must go.
+        let contents_from = match lazy_block_size {
+            LazySizeKind::Fixed(_) => CONTENTS_FROM_LAYOUT,
+            LazySizeKind::Intrinsic | LazySizeKind::Constrained => CONTENTS_FROM_MEASURE,
+        };
+        self.fragments
+            .contents_from
+            .store(contents_from, Ordering::Relaxed);
+        match lazy_block_size {
+            LazySizeKind::Fixed(_) => {
+                if was_dirty {
+                    *self.cached_measure_result.borrow_mut() = None;
+                }
+                *self.cached_layout_result.borrow_mut() =
+                    Some(LayoutResultAndInputs::IndependentFormattingContext(entry));
+            },
+            LazySizeKind::Intrinsic | LazySizeKind::Constrained => {
+                if was_dirty {
+                    *self.cached_layout_result.borrow_mut() = None;
+                }
+                *self.cached_measure_result.borrow_mut() = Some(entry);
+            },
+        }
     }
 
     pub(crate) fn cached_same_formatting_context_block_if_applicable(
@@ -294,6 +444,7 @@ impl LayoutBoxBase {
         }
 
         let fragment = result.result.fragment.clone();
+        self.use_contents_from(CONTENTS_FROM_LAYOUT, &fragment.children);
         {
             let mut origin = result.result.original_offset;
             if self.style.clone_position() == Position::Relative {
@@ -323,8 +474,15 @@ impl LayoutBoxBase {
             }
         }
 
-        self.cached_layout_result_dirty
-            .store(false, Ordering::Relaxed);
+        if self
+            .cached_layout_result_dirty
+            .swap(false, Ordering::Relaxed)
+        {
+            *self.cached_measure_result.borrow_mut() = None;
+        }
+        self.fragments
+            .contents_from
+            .store(CONTENTS_FROM_LAYOUT, Ordering::Relaxed);
         *self.cached_layout_result.borrow_mut() =
             Some(LayoutResultAndInputs::SameFormattingContextBlock(Box::new(
                 SameFormattingContextBlockLayoutResultAndInputs {
@@ -348,13 +506,13 @@ impl LayoutBoxBase {
     }
 
     pub(crate) fn clear_scrollable_overflow_all_on_fragments(&self) {
-        for fragment in self.fragments.borrow().iter() {
+        for fragment in self.fragments().iter() {
             fragment.clear_scrollable_overflow();
         }
     }
 
     pub(crate) fn mark_fragments_as_descendants_changed(&self) {
-        for fragment in self.fragments.borrow().iter() {
+        for fragment in self.fragments().iter() {
             if let Some(base) = fragment.base() {
                 base.set_status(FragmentStatus::OnlyDescendantsChanged);
             }
@@ -412,6 +570,12 @@ pub(crate) struct IndependentFormattingContextLayoutResultAndInputs {
     /// The [`ContainingBlockSize`] to use for this box's contents, but not
     /// for the box itself.
     pub containing_block_for_children_size: ContainingBlockSize,
+
+    /// How the block size of this layout was determined. The result depends on it even when
+    /// the containing block size is indefinite in the block axis, as for a column flex item
+    /// whose main size is not definite: that layout reports the used main size as its content
+    /// block size, which must not be reused when the intrinsic block size is requested.
+    pub lazy_block_size: LazySizeKind,
 
     /// A [`PositioningContext`] holding absolutely-positioned descendants
     /// collected during the layout of this box.

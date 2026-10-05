@@ -101,12 +101,15 @@ use servo_arc::Arc as ServoArc;
 use style::Zero;
 use style::computed_values::line_break::T as LineBreak;
 use style::computed_values::text_wrap_mode::T as TextWrapMode;
+use style::computed_values::text_wrap_style::T as TextWrapStyle;
 use style::computed_values::white_space_collapse::T as WhiteSpaceCollapse;
 use style::computed_values::word_break::T as WordBreak;
 use style::context::{QuirksMode, SharedStyleContext};
+use style::dom::OpaqueNode;
 use style::properties::ComputedValues;
-use style::values::computed::Overflow;
-use style::values::specified::box_::DisplayInside;
+use style::selector_parser::PseudoElement;
+use style::values::computed::{Overflow, OverflowWrap, UserSelect};
+use style::values::specified::box_::{Display as StyloDisplay, DisplayInside};
 use style::values::specified::text::TextOverflowSide;
 use style::properties::style_structs::InheritedText;
 use style::values::computed::BaselineShift;
@@ -135,7 +138,7 @@ use crate::formatting_contexts::{Baselines, IndependentFormattingContext};
 use crate::fragment_tree::{
     BaseFragmentInfo, BoxFragment, CollapsedMargin, Fragment, FragmentFlags, PositioningFragment,
 };
-use crate::geom::{LogicalRect, LogicalSides1D, LogicalVec2, ToLogical};
+use crate::geom::{LogicalRect, LogicalSides1D, LogicalVec2, PhysicalSize, ToLogical};
 use crate::layout_box_base::LayoutBoxBase;
 use crate::positioned::{AbsolutelyPositionedBox, PositioningContext};
 use crate::sizing::{ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult};
@@ -145,6 +148,11 @@ use crate::{ConstraintSpace, ContainingBlock, IndefiniteContainingBlock, SharedS
 // From gfxFontConstants.h in Firefox.
 static FONT_SUBSCRIPT_OFFSET_RATIO: f32 = 0.20;
 static FONT_SUPERSCRIPT_OFFSET_RATIO: f32 = 0.34;
+
+/// Chrome only balances `text-wrap: balance` blocks of up to this many lines and wraps longer
+/// text greedily, which the spec permits for performance.
+/// <https://drafts.csswg.org/css-text-4/#valdef-text-wrap-style-balance>
+const MAX_LINES_TO_BALANCE: usize = 6;
 
 #[derive(Debug, MallocSizeOf)]
 pub(crate) struct InlineFormattingContext {
@@ -190,11 +198,150 @@ pub(crate) struct InlineFormattingContext {
     #[ignore_malloc_size_of = "This is stored primarily in the DOM"]
     shared_selection: Option<SharedSelection>,
 
+    /// Where in the DOM the text of this [`InlineFormattingContext`] came from, for selections
+    /// and carets.
+    #[ignore_malloc_size_of = "Proportional to the text content, which is measured"]
+    text_origins: Option<Arc<TextOrigins>>,
+
     /// The cached multiplier for `tab-size: <number>`:
     /// <https://drafts.csswg.org/css-text/#tab-size-property>
     /// > the advance width of the space character (U+0020) of the nearest block container ancestor
     /// > of the preserved tab, including its associated `letter-spacing` and `word-spacing`.
     tab_size_multiplier: OnceLock<Au>,
+}
+
+/// The DOM node that produced a range of the text of an [`InlineFormattingContext`].
+#[derive(Debug, MallocSizeOf)]
+pub(crate) struct TextOrigin {
+    /// A text node, a `<br>` for the line feed generated for it, or an empty editing host, which
+    /// produces no characters but has a line for its caret.
+    pub node: OpaqueNode,
+    pub kind: TextOriginKind,
+    /// The index of the first character this node produced in the inline formatting context.
+    pub character_start: usize,
+    /// For every character produced, the UTF-16 offset in the node where it starts, then the
+    /// offset just past the last one. White space collapsing drops DOM characters, so the
+    /// offsets need not be contiguous, and `text-transform` can produce several characters
+    /// from one, which then share its offset.
+    pub dom_offsets: Vec<u32>,
+    /// Whether the node is editable, which makes its text selectable whatever `user-select`.
+    pub is_editable: bool,
+}
+
+#[derive(Clone, Copy, Debug, MallocSizeOf, PartialEq)]
+pub(crate) enum TextOriginKind {
+    Text,
+    LineBreak,
+    EmptyEditingHost,
+}
+
+impl TextOrigin {
+    fn character_end(&self) -> usize {
+        self.character_start + self.dom_offsets.len() - 1
+    }
+
+    /// The character offset of a UTF-16 offset in the node, limited to the characters produced
+    /// here. Offsets inside collapsed white space map to the character after the white space
+    /// kept.
+    pub(crate) fn character_offset(&self, offset: u32) -> usize {
+        let characters = &self.dom_offsets[..self.dom_offsets.len() - 1];
+        self.character_start + characters.partition_point(|start| *start < offset)
+    }
+}
+
+/// Maps character offsets in the text of an [`InlineFormattingContext`] to DOM positions and
+/// back, for placing and painting carets and selections.
+#[derive(Debug, Default, MallocSizeOf)]
+pub(crate) struct TextOrigins {
+    /// The sources in text order.
+    pub sources: Vec<TextOrigin>,
+    /// Whether any of the text is editable (`contenteditable`).
+    pub is_editable: bool,
+}
+
+impl TextOrigins {
+    /// The DOM position (node and UTF-16 offset) of the given character offset. At the boundary
+    /// of two nodes this is the end of the first, unless the first is a line break.
+    pub(crate) fn dom_position(&self, character: usize) -> Option<(OpaqueNode, u32)> {
+        let mut index = self
+            .sources
+            .partition_point(|source| source.character_end() < character);
+        // The end of a line break is the start of the next line, so what follows it is the
+        // position there.
+        if self.sources.get(index).is_some_and(|source| {
+            source.kind == TextOriginKind::LineBreak && source.character_end() == character
+        }) && self
+            .sources
+            .get(index + 1)
+            .is_some_and(|next| next.character_start == character)
+        {
+            index += 1;
+        }
+        let source = self.sources.get(index)?;
+        if character < source.character_start {
+            return None;
+        }
+        Some((
+            source.node,
+            source.dom_offsets[character - source.character_start],
+        ))
+    }
+
+    /// The character offset of the given DOM position, if the node is in this text. Positions
+    /// inside collapsed white space map to the character after the white space kept.
+    pub(crate) fn character_offset(&self, node: OpaqueNode, offset: u32) -> Option<usize> {
+        let mut sources = self.sources.iter().filter(|source| source.node == node);
+        let first = sources.next()?;
+        let source = std::iter::once(first)
+            .chain(sources)
+            .take_while(|source| source.dom_offsets[0] <= offset)
+            .last()
+            .unwrap_or(first);
+        Some(source.character_offset(offset))
+    }
+
+    /// The characters laid out for a range of UTF-16 offsets in the data of the text node
+    /// `node`, if any of its text is in this inline formatting context.
+    pub(crate) fn character_range(
+        &self,
+        node: OpaqueNode,
+        utf16_range: &std::ops::Range<usize>,
+    ) -> Option<std::ops::Range<usize>> {
+        Some(
+            self.character_offset(node, utf16_range.start as u32)?..
+                self.character_offset(node, utf16_range.end as u32)?,
+        )
+    }
+
+    /// Whether the characters in `character_range`, all with the parent style `style`, can be
+    /// selected. As in Blink, `user-select: none` text cannot be, unless it is editable.
+    /// <https://drafts.csswg.org/css-ui-4/#content-selection>
+    pub(crate) fn is_selectable(
+        &self,
+        character_range: &std::ops::Range<usize>,
+        style: &ComputedValues,
+    ) -> bool {
+        style.clone_user_select() != UserSelect::None ||
+            self.sources_in(character_range)
+                .filter(|source| {
+                    source.character_end() > character_range.start &&
+                        source.character_start < character_range.end
+                })
+                .any(|source| source.is_editable)
+    }
+
+    /// The sources of the characters in the given range, including those touching its ends.
+    pub(crate) fn sources_in(
+        &self,
+        character_range: &std::ops::Range<usize>,
+    ) -> impl Iterator<Item = &TextOrigin> {
+        let first = self
+            .sources
+            .partition_point(|source| source.character_end() < character_range.start);
+        self.sources[first..]
+            .iter()
+            .take_while(move |source| source.character_start <= character_range.end)
+    }
 }
 
 /// [`TextRun`] and `TextFragment`s need a handle on their parent inline box (or inline
@@ -923,6 +1070,11 @@ struct InlineFormattingContextLayout<'layout_data> {
     /// by the boundary between two characters, the text-wrap-mode property of their nearest
     /// common ancestor is used.
     text_wrap_mode: TextWrapMode,
+
+    /// The inline size that lines must fit in when no floats are involved. This is the
+    /// containing block's inline size except when `text-wrap: balance` narrows it; text
+    /// alignment still uses the full containing block.
+    line_break_inline_size: Au,
 }
 
 impl InlineFormattingContextLayout<'_> {
@@ -1313,7 +1465,10 @@ impl InlineFormattingContextLayout<'_> {
             },
         };
         let editable_or_block_level = line_items.iter().any(|item| match item {
-            LineItem::TextRun(_, text_run) => text_run.offsets.is_some(),
+            LineItem::TextRun(_, text_run) => text_run
+                .offsets
+                .as_ref()
+                .is_some_and(|offsets| offsets.shared_selection.is_some()),
             LineItem::BlockLevel(..) => true,
             _ => false,
         });
@@ -1359,6 +1514,7 @@ impl InlineFormattingContextLayout<'_> {
             inline_styles: self.ifc.shared_inline_styles.clone(),
             text: vec![ellipsis.clone()],
             offsets: None,
+            character_start: None,
             is_empty_for_text_cursor: false,
         };
 
@@ -1628,7 +1784,7 @@ impl InlineFormattingContextLayout<'_> {
                 .size
         } else {
             LogicalVec2 {
-                inline: containing_block.size.inline,
+                inline: self.line_break_inline_size,
                 block: MAX_AU,
             }
         };
@@ -1661,7 +1817,7 @@ impl InlineFormattingContextLayout<'_> {
 
         // If the potential line is larger than the containing block we do not even need to consider
         // floats. We definitely have to do a linebreak.
-        if potential_line_size.inline > containing_block.size.inline {
+        if potential_line_size.inline > self.line_break_inline_size {
             return true;
         }
 
@@ -1744,6 +1900,7 @@ impl InlineFormattingContextLayout<'_> {
         text_run: &TextRun,
         info: &Arc<FontAndScriptInfo>,
         offsets: Option<TextRunOffsets>,
+        character_start: usize,
     ) {
         let inline_advance = glyph_store.total_advance();
         let flags = if glyph_store.is_whitespace() {
@@ -1806,21 +1963,37 @@ impl InlineFormattingContextLayout<'_> {
                 inline_styles: text_run.inline_styles.clone(),
                 info: info.clone(),
                 offsets: offsets.map(Box::new),
+                character_start: Some(character_start),
                 is_empty_for_text_cursor: false,
             },
         ));
     }
 
-    /// If the current line is empty and this [`InlineFormattingContext`] has a selection, push an
-    /// empty [`LineItem::TextRun`] so that text carets can be placed on otherwise empty lines.
+    /// If the current line is empty and this [`InlineFormattingContext`] has a selection, or is
+    /// editable, push an empty [`LineItem::TextRun`] so that text carets can be placed on
+    /// otherwise empty lines.
     fn possibly_push_empty_text_run_to_line_for_text_caret(&mut self) {
         let line_start_offset = self.current_line.starting_character_offset;
-        let Some(shared_selection) = self.ifc.shared_selection.clone() else {
+        // In editable content only lines ended by a line break and the line of an empty editing
+        // host are kept: the empty line after a final line break is not laid out, unlike the
+        // one after a final line feed in a `<textarea>`.
+        let editable_line = self.ifc.text_origins.as_ref().is_some_and(|text_origins| {
+            text_origins.is_editable &&
+                (!self.finishing_last_line ||
+                    text_origins.sources.first().is_some_and(|source| {
+                        source.kind == TextOriginKind::EmptyEditingHost
+                    }))
+        });
+        if self.ifc.shared_selection.is_none() && !editable_line {
             return;
-        };
+        }
         let offsets = TextRunOffsets {
-            shared_selection,
+            shared_selection: self.ifc.shared_selection.clone(),
+            text_origins: self.ifc.text_origins.clone(),
             character_range: line_start_offset..line_start_offset + 1,
+            line_block_start: Au::zero(),
+            line_block_size: Au::zero(),
+            ends_line: false,
         };
 
         // If the last content line item is a text item, then the placeholder for the text caret is not necessary.
@@ -1848,6 +2021,7 @@ impl InlineFormattingContextLayout<'_> {
                 inline_styles: self.ifc.shared_inline_styles.clone(),
                 info: Arc::new(FontAndScriptInfo::simple_for_font(font)),
                 offsets: Some(Box::new(offsets)),
+                character_start: None,
                 is_empty_for_text_cursor: true,
             },
         ));
@@ -1928,10 +2102,113 @@ impl InlineFormattingContextLayout<'_> {
         if self.text_wrap_mode == TextWrapMode::Nowrap {
             return;
         }
-        if !self.unbreakable_segment_fits_on_line() {
-            self.process_line_break(false /* forced_line_break */);
+
+        // Inline boxes that open right before the soft wrap opportunity belong to the line
+        // after it, along with their inline-start padding, border and margin, like in Chrome
+        // and Firefox. Otherwise `foo <a>bar</a>` breaking before "bar" leaves an empty
+        // fragment of the `<a>` at the end of the first line, which then becomes the box that
+        // `offsetTop` and `getClientRects()` report first.
+        let trailing_inline_box_starts = self
+            .current_line_segment
+            .line_items
+            .iter()
+            .rev()
+            .take_while(|item| matches!(item, LineItem::InlineStartBoxPaddingBorderMargin(_)))
+            .count();
+        let split_index = self.current_line_segment.line_items.len() - trailing_inline_box_starts;
+        let inline_box_starts = self.current_line_segment.line_items.split_off(split_index);
+        let inline_box_starts_size = inline_box_starts
+            .iter()
+            .map(|item| {
+                let (padding, border, margin) = self.inline_pbm_of_line_item(item);
+                padding + border + margin
+            })
+            .sum();
+        self.current_line_segment.inline_size -= inline_box_starts_size;
+        self.current_line_segment.has_inline_pbm = self
+            .current_line_segment
+            .line_items
+            .iter()
+            .any(|item| self.line_item_has_inline_pbm(item));
+
+        if !self.current_line_segment.line_items.is_empty() {
+            if !self.unbreakable_segment_fits_on_line() {
+                self.process_line_break(false /* forced_line_break */);
+            }
+            self.commit_current_segment_to_line();
         }
-        self.commit_current_segment_to_line();
+
+        for item in inline_box_starts {
+            self.current_line_segment.has_inline_pbm |= self.line_item_has_inline_pbm(&item);
+            self.current_line_segment.line_items.push(item);
+        }
+        self.current_line_segment.inline_size += inline_box_starts_size;
+    }
+
+    /// The inline-axis padding, border and margin that an inline box start or end line item
+    /// adds to its line.
+    fn inline_pbm_of_line_item(&self, item: &LineItem) -> (Au, Au, Au) {
+        let (identifier, is_start) = match item {
+            LineItem::InlineStartBoxPaddingBorderMargin(identifier) => (identifier, true),
+            LineItem::InlineEndBoxPaddingBorderMargin(identifier) => (identifier, false),
+            _ => return (Au::zero(), Au::zero(), Au::zero()),
+        };
+        let pbm = &self.inline_box_states[identifier.index_in_inline_boxes as usize].pbm;
+        if is_start {
+            (
+                pbm.padding.inline_start,
+                pbm.border.inline_start,
+                pbm.margin.inline_start.auto_is(Au::zero),
+            )
+        } else {
+            (
+                pbm.padding.inline_end,
+                pbm.border.inline_end,
+                pbm.margin.inline_end.auto_is(Au::zero),
+            )
+        }
+    }
+
+    /// Mirrors how [`Self::start_inline_box()`] and [`Self::finish_inline_box()`] set
+    /// `has_inline_pbm`: a negative margin counts even if the sum is zero.
+    fn line_item_has_inline_pbm(&self, item: &LineItem) -> bool {
+        let (padding, border, margin) = self.inline_pbm_of_line_item(item);
+        !padding.is_zero() || !border.is_zero() || !margin.is_zero()
+    }
+
+    /// Whether adding `inline_size` more content to the current unbreakable segment would make
+    /// it overflow the current line.
+    fn unbreakable_segment_would_overflow(&self, inline_size: Au) -> bool {
+        let available_inline_size = self
+            .current_line
+            .placement_among_floats
+            .get()
+            .map_or(self.containing_block().size.inline, |placement| {
+                placement.size.inline
+            });
+        self.current_line.inline_position + self.current_line_segment.inline_size + inline_size >
+            available_inline_size
+    }
+
+    /// Process a soft wrap opportunity inside a word from `overflow-wrap: anywhere | break-word`
+    /// before content of size `next_inline_size`. Per
+    /// <https://drafts.csswg.org/css-text-3/#overflow-wrap-property> it is only taken if there are
+    /// no otherwise-acceptable break points in the line: when the word does not fit even after
+    /// moving it to a line of its own.
+    fn process_overflow_wrap_opportunity(&mut self, next_inline_size: Au) {
+        if self.text_wrap_mode == TextWrapMode::Nowrap ||
+            !self.current_line_segment.has_content ||
+            !self.unbreakable_segment_would_overflow(next_inline_size)
+        {
+            return;
+        }
+        if self.current_line.has_content {
+            self.process_line_break(false /* forced_line_break */);
+            if !self.unbreakable_segment_would_overflow(next_inline_size) {
+                return;
+            }
+        }
+        self.process_soft_wrap_opportunity();
     }
 
     /// Commit the current unbrekable segment to the current line. In addition, this will
@@ -2138,6 +2415,8 @@ impl InlineFormattingContext {
             is_single_line_text_input,
             has_right_to_left_content,
             shared_selection: builder.shared_selection,
+            text_origins: (!builder.text_origins.sources.is_empty())
+                .then(|| Arc::new(builder.text_origins)),
             tab_size_multiplier: Default::default(),
         }
     }
@@ -2172,6 +2451,87 @@ impl InlineFormattingContext {
         sequential_layout_state: Option<&mut SequentialLayoutState>,
         collapsible_with_parent_start_margin: CollapsibleWithParentStartMargin,
     ) -> IndependentFormattingContextLayoutResult {
+        // Balancing lays the lines out several times, which must not place floats more than
+        // once, so it only happens outside of float contexts.
+        let line_break_inline_size = match sequential_layout_state {
+            None => self.balanced_line_break_inline_size(
+                layout_context,
+                containing_block,
+                collapsible_with_parent_start_margin,
+            ),
+            Some(_) => None,
+        }
+        .unwrap_or(containing_block.size.inline);
+        self.layout_with_line_break_inline_size(
+            layout_context,
+            positioning_context,
+            containing_block,
+            sequential_layout_state,
+            collapsible_with_parent_start_margin,
+            line_break_inline_size,
+        )
+        .0
+    }
+
+    /// <https://drafts.csswg.org/css-text-4/#valdef-text-wrap-style-balance>
+    ///
+    /// Like Chrome, this finds the narrowest line-breaking inline size that keeps the number
+    /// of lines that greedy wrapping produces at the full inline size, so all lines end up
+    /// about as long as each other.
+    fn balanced_line_break_inline_size(
+        &self,
+        layout_context: &LayoutContext,
+        containing_block: &ContainingBlock,
+        collapsible_with_parent_start_margin: CollapsibleWithParentStartMargin,
+    ) -> Option<Au> {
+        let style_text = containing_block.style.get_inherited_text();
+        if style_text.text_wrap_style != TextWrapStyle::Balance ||
+            style_text.text_wrap_mode != TextWrapMode::Wrap
+        {
+            return None;
+        }
+
+        let count_lines = |line_break_inline_size| {
+            self.layout_with_line_break_inline_size(
+                layout_context,
+                &mut PositioningContext::default(),
+                containing_block,
+                None,
+                collapsible_with_parent_start_margin,
+                line_break_inline_size,
+            )
+            .1
+        };
+        let full_inline_size = containing_block.size.inline;
+        let line_count = count_lines(full_inline_size);
+        if !(2..=MAX_LINES_TO_BALANCE).contains(&line_count) {
+            return None;
+        }
+
+        let mut too_narrow = Au::zero();
+        let mut wide_enough = full_inline_size;
+        while wide_enough - too_narrow > Au::from_px(1) {
+            let middle = (too_narrow + wide_enough).scale_by(0.5);
+            if count_lines(middle) <= line_count {
+                wide_enough = middle;
+            } else {
+                too_narrow = middle;
+            }
+        }
+        Some(wide_enough)
+    }
+
+    /// Lays out the lines, breaking them to fit `line_break_inline_size`, and also returns
+    /// how many non-phantom lines that produced.
+    fn layout_with_line_break_inline_size(
+        &self,
+        layout_context: &LayoutContext,
+        positioning_context: &mut PositioningContext,
+        containing_block: &ContainingBlock,
+        sequential_layout_state: Option<&mut SequentialLayoutState>,
+        collapsible_with_parent_start_margin: CollapsibleWithParentStartMargin,
+        line_break_inline_size: Au,
+    ) -> (IndependentFormattingContextLayoutResult, usize) {
         // Clear any cached inline fragments from previous layouts.
         for inline_box in self.inline_boxes.iter() {
             inline_box.borrow().base.clear_fragments();
@@ -2221,6 +2581,7 @@ impl InlineFormattingContext {
             depends_on_block_constraints: false,
             white_space_collapse: style_text.white_space_collapse,
             text_wrap_mode: style_text.text_wrap_mode,
+            line_break_inline_size,
         };
 
         for item in self.inline_items.iter() {
@@ -2270,15 +2631,18 @@ impl InlineFormattingContext {
             .clamped_content_block_size
             .unwrap_or(content_block_size);
 
-        IndependentFormattingContextLayoutResult {
-            fragments: layout.fragments,
-            content_block_size,
-            collapsible_margins_in_children,
-            baselines,
-            depends_on_block_constraints: layout.depends_on_block_constraints,
-            content_inline_size_for_table: None,
-            specific_layout_info: None,
-        }
+        (
+            IndependentFormattingContextLayoutResult {
+                fragments: layout.fragments,
+                content_block_size,
+                collapsible_margins_in_children,
+                baselines,
+                depends_on_block_constraints: layout.depends_on_block_constraints,
+                content_inline_size_for_table: None,
+                specific_layout_info: None,
+            },
+            layout.lines_laid_out,
+        )
     }
 
     pub(crate) fn subtree_size(&self) -> usize {
@@ -2727,8 +3091,15 @@ impl IndependentFormattingContext {
             .map(|baseline| pbm_sums.block_start + baseline)
             .unwrap_or(size.block);
 
-        let (block_sizes, baseline_offset_in_parent) =
-            self.get_block_sizes_and_baseline_offset(layout, size.block, baseline_offset);
+        // The annotation of a ruby column overflows the line box instead of growing it, as in
+        // Chrome, where it sits in the leading above the line or above the first line.
+        let annotation_block_size =
+            ruby_annotation_block_size(&fragment).to_logical(container_writing_mode).block;
+        let (block_sizes, baseline_offset_in_parent) = self.get_block_sizes_and_baseline_offset(
+            layout,
+            size.block - annotation_block_size,
+            baseline_offset - annotation_block_size,
+        );
         layout.update_unbreakable_segment_for_new_content(
             &block_sizes,
             size.inline,
@@ -2807,6 +3178,22 @@ impl IndependentFormattingContext {
         contribution.adjust_for_baseline_offset(baseline_offset);
 
         (contribution, baseline_offset)
+    }
+}
+
+/// The size of the annotation stacked over the base of a ruby column, see
+/// `BlockContainerBuilder::handle_ruby`, or zero for any other atomic inline.
+fn ruby_annotation_block_size(fragment: &BoxFragment) -> PhysicalSize<Au> {
+    if fragment.style().pseudo() != Some(PseudoElement::ServoRubyColumn) {
+        return PhysicalSize::zero();
+    }
+    match fragment.children.first() {
+        Some(Fragment::Box(annotation))
+            if annotation.style().get_box().display == StyloDisplay::RubyText =>
+        {
+            annotation.margin_rect().size
+        },
+        _ => PhysicalSize::zero(),
     }
 }
 
@@ -3139,7 +3526,21 @@ impl<'layout_data> ContentSizesComputation<'layout_data> {
             }
 
             self.commit_pending_whitespace();
-            self.add_inline_size(advance);
+            // Unlike `break-word`, the opportunities `overflow-wrap: anywhere` introduces count
+            // for the min-content size.
+            if can_wrap &&
+                style_text.overflow_wrap == OverflowWrap::Anywhere &&
+                style_text.word_break != WordBreak::BreakAll
+            {
+                for (cluster_index, cluster) in run.split_into_clusters().iter().enumerate() {
+                    if cluster_index != 0 {
+                        self.line_break_opportunity();
+                    }
+                    self.add_inline_size(cluster.total_advance());
+                }
+            } else {
+                self.add_inline_size(advance);
+            }
 
             // Typically whitespace glyphs are placed in a separate store,
             // but for `white-space: break-spaces` we place the first whitespace

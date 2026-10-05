@@ -160,6 +160,43 @@ pub struct ScriptSelection {
 }
 
 pub type SharedSelection = Arc<AtomicRefCell<ScriptSelection>>;
+
+/// The selection of a document as layout paints it, in DOM terms. Unlike a [`ScriptSelection`]
+/// it can span many text nodes and inline formatting contexts.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DocumentSelection {
+    /// The insertion point of a selection collapsed in the focused editing host: a text node, a
+    /// `<br>` or an empty editing host and a UTF-16 offset in it (0 or 1 for a `<br>`).
+    pub caret: Option<(OpaqueNode, u32)>,
+    /// The selected UTF-16 range of every text node in a non-collapsed selection, and the range
+    /// 0..1 of every `<br>` in it.
+    pub selected_text: Vec<(OpaqueNode, Range<u32>)>,
+    /// The node that a non-collapsed selection ends in.
+    pub end_node: Option<OpaqueNode>,
+}
+
+/// A position where a caret can be placed in text, as laid out.
+#[derive(Clone, Debug)]
+pub struct CaretStop {
+    /// The text node, the `<br>` or the empty editing host that this position is in.
+    pub node: UntrustedNodeAddress,
+    /// A UTF-16 offset in the text node, or 0 (before) / 1 (after) for a `<br>`.
+    pub offset: u32,
+    /// The horizontal position of the caret in the viewport.
+    pub x: Au,
+    /// Whether the text around this position can be selected, as `user-select` decides.
+    pub selectable: bool,
+}
+
+/// The caret positions of one line box, in visual order.
+#[derive(Clone, Debug)]
+pub struct CaretLine {
+    /// The top of the line in the viewport.
+    pub top: Au,
+    /// The bottom of the line in the viewport.
+    pub bottom: Au,
+    pub stops: Vec<CaretStop>,
+}
 pub struct HTMLCanvasData {
     pub image_key: Option<ImageKey>,
     pub width: u32,
@@ -190,10 +227,14 @@ pub const SVG_PAINT_PROPERTIES: [LonghandId; 16] = [
 
 /// A fingerprint of the paint properties an `<svg>` element's serialization was built from.
 /// The serialization is cached across restyles, so layout compares this to detect paint changes
-/// (a hover colour, a theme switch) that must re-serialize the subtree.
+/// (a hover colour, a theme switch) that must re-serialize the subtree. `width` and `height`
+/// are included because a root without a `viewBox` serializes its CSS size as the viewport.
 pub fn svg_paint_signature(style: &ComputedValues) -> String {
     let mut signature = String::new();
-    for property in SVG_PAINT_PROPERTIES {
+    for property in SVG_PAINT_PROPERTIES
+        .into_iter()
+        .chain([LonghandId::Width, LonghandId::Height])
+    {
         style
             .computed_or_resolved_value(property, None, &mut signature)
             .expect("Writing CSS to a String cannot fail");
@@ -255,7 +296,7 @@ pub enum PendingImageState {
 }
 
 /// The destination in layout where an image is needed.
-#[derive(Debug, MallocSizeOf)]
+#[derive(Clone, Copy, Debug, MallocSizeOf)]
 pub enum LayoutImageDestination {
     BoxTreeConstruction,
     DisplayListBuilding,
@@ -365,17 +406,15 @@ pub trait Layout {
     fn set_quirks_mode(&mut self, quirks_mode: QuirksMode);
 
     /// Removes a stylesheet from the Layout.
-    fn remove_stylesheet(&mut self, stylesheet: ServoArc<Stylesheet>);
+    /// Returns whether the stylesheet's removal removed any web fonts, in which case all text
+    /// must be laid out again before the next display list.
+    fn remove_stylesheet(&mut self, stylesheet: ServoArc<Stylesheet>) -> bool;
 
     /// Removes an image from the Layout image resolver cache.
     fn remove_cached_image(&mut self, image_url: &ServoUrl);
 
     /// Requests a reflow.
     fn reflow(&mut self, reflow_request: ReflowRequest) -> Option<ReflowResult>;
-
-    /// Do not request a reflow, but ensure that any previous reflow completes building a stacking
-    /// context tree so that it is ready to query the final size of any elements in script.
-    fn ensure_stacking_context_tree(&self, viewport_details: ViewportDetails);
 
     /// Tells layout that script has added some paint worklet modules.
     fn register_paint_worklet_modules(
@@ -429,6 +468,12 @@ pub trait Layout {
         exclude_transform_and_inline: bool,
     ) -> Option<Rect<Au, CSSPixel>>;
     fn query_box_areas(&self, node: TrustedNodeAddress, area: BoxAreaType) -> CSSPixelRectVec;
+    /// Query the boxes of the glyphs for the given range, in UTF-16 code units, of a text node.
+    fn query_text_range_rects(
+        &self,
+        node: TrustedNodeAddress,
+        utf16_range: Range<usize>,
+    ) -> CSSPixelRectVec;
     fn query_client_rect(&self, node: TrustedNodeAddress) -> Rect<i32, CSSPixel>;
     fn query_current_css_zoom(&self, node: TrustedNodeAddress) -> f32;
     fn query_element_inner_outer_text(&self, node: TrustedNodeAddress) -> String;
@@ -462,8 +507,11 @@ pub trait Layout {
         node: TrustedNodeAddress,
         point: Point2D<Au, CSSPixel>,
     ) -> Option<usize>;
+    /// The caret positions of the text inside the given node, by line.
+    fn query_caret_stops(&self, node: TrustedNodeAddress) -> Vec<CaretLine>;
     fn query_elements_from_point(&self, point: LayoutPoint) -> Vec<ElementsFromPointResult>;
     fn query_effective_overflow(&self, node: TrustedNodeAddress) -> Option<AxesOverflow>;
+    fn stylist(&self) -> &Stylist;
     fn stylist_mut(&mut self) -> &mut Stylist;
 
     /// Set whether the accessibility tree should be constructed for this Layout.
@@ -616,6 +664,7 @@ pub enum QueryMsg {
     ScrollingAreaOrOffsetQuery,
     StyleQuery,
     TextIndexQuery,
+    CaretStopsQuery,
     PaddingQuery,
     FlushForUpdateTheRenderingQuery,
 }
@@ -662,6 +711,10 @@ bitflags! {
         const ThemeChanged = 1 << 4;
         const ViewportChanged = 1 << 5;
         const PaintWorkletLoaded = 1 << 6;
+        const SelectionChanged = 1 << 7;
+        /// A reflow for a query about styles restyled without laying out, leaving the
+        /// damage of that restyle to the next reflow.
+        const LayoutDeferred = 1 << 8;
     }
 }
 
@@ -700,6 +753,9 @@ bitflags! {
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub struct ReflowPhasesRun: u8 {
         const RanLayout = 1 << 0;
+        /// Styles were updated but layout was left for a later reflow, which has to start
+        /// from the same dirty root. See [`RestyleReason::LayoutDeferred`].
+        const DeferredLayout = 1 << 1;
         const BuiltStackingContextTree = 1 << 2;
         const BuiltDisplayList = 1 << 3;
         const UpdatedScrollNodeOffset = 1 << 4;
@@ -767,6 +823,8 @@ pub struct ReflowRequest {
     pub animating_images: Arc<RwLock<AnimatingImages>>,
     /// The node highlighted by the devtools, if any
     pub highlighted_dom_node: Option<OpaqueNode>,
+    /// The selection of the document, which layout paints.
+    pub document_selection: Option<DocumentSelection>,
     /// The current font context.
     pub document_context: WebFontDocumentContext,
     /// Nodes which were removed from the DOM tree since the last reflow, which were rooted in

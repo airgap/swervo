@@ -120,3 +120,4 @@ partial interface HTMLInputElement {
   //         attribute DOMString align;
   attribute DOMString useMap;
 };
+HTMLInputElement includes PopoverInvokerElement;

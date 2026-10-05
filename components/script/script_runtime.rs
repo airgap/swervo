@@ -982,7 +982,11 @@ impl Runtime {
                     .map(|val| (val * 1024 * 1024) as u32)
                     .unwrap_or(u32::MAX),
             );
-            // NOTE: This is disabled above, so enabling it here will do nothing for now.
+            // This runs after the unconditional disable above and overrides it, so the pref has to
+            // stay off by default: DOM-to-DOM edges (`Dom<T>`, `MutNullableDom<T>`) are written
+            // without pre-barriers, so a node moved from a parent the incremental marker has not
+            // scanned yet into one it already scanned is never marked, is swept, and leaves its
+            // new parent (or a `NodeList` holding it) pointing at freed memory.
             JS_SetGCParameter(
                 cx,
                 JSGCParamKey::JSGC_INCREMENTAL_GC_ENABLED,

@@ -12,18 +12,26 @@ use script_bindings::domstring::parse_floating_point_number;
 use script_bindings::root::Dom;
 use style::selector_parser::PseudoElement;
 
+use crate::dom::bindings::codegen::Bindings::DOMRectBinding::DOMRect_Binding::DOMRectMethods;
+use crate::dom::bindings::codegen::Bindings::ElementBinding::ElementMethods;
+use crate::dom::bindings::codegen::Bindings::EventBinding::EventMethods;
+use crate::dom::bindings::codegen::Bindings::MouseEventBinding::MouseEventMethods;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::element::{CustomElementCreationMode, Element, ElementCreator};
+use crate::dom::event::Event;
 use crate::dom::input_element::HTMLInputElement;
 use crate::dom::input_element::input_type::SpecificInputType;
 use crate::dom::node::{Node, NodeTraits};
+use crate::dom::types::MouseEvent;
 
 #[derive(Default, JSTraceable, MallocSizeOf, PartialEq)]
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
 pub(crate) struct RangeInputType {
     shadow_tree: DomRefCell<Option<RangeInputShadowTree>>,
+    /// The value when the thumb started being dragged, or `None` when it is not being dragged.
+    drag_start_value: DomRefCell<Option<DOMString>>,
 }
 
 impl RangeInputType {
@@ -49,6 +57,71 @@ impl RangeInputType {
         let shadow_root = shadow_root.upcast();
         *self.shadow_tree.borrow_mut() = Some(RangeInputShadowTree::new(cx, shadow_root));
         self.get_or_create_shadow_tree(cx, input)
+    }
+}
+
+impl RangeInputType {
+    /// Pressing the primary button on the slider moves the thumb under the pointer and
+    /// starts a drag that follows the pointer until the button is released. `input` fires
+    /// whenever the value changes and `change` fires on release, as in Chrome.
+    pub(crate) fn handle_mouse_event(
+        &self,
+        cx: &mut JSContext,
+        input: &HTMLInputElement,
+        mouse_event: &MouseEvent,
+    ) {
+        let event_type = mouse_event.upcast::<Event>().type_();
+        if event_type == atom!("mousedown") {
+            if mouse_event.Button() != 0 {
+                return;
+            }
+            *self.drag_start_value.borrow_mut() = Some(input.Value());
+            input
+                .owner_document()
+                .event_handler()
+                .set_widget_mouse_capture(input.upcast());
+            self.move_thumb_to_pointer(cx, input, mouse_event);
+        } else if event_type == atom!("mousemove") && self.drag_start_value.borrow().is_some() {
+            self.move_thumb_to_pointer(cx, input, mouse_event);
+        } else if event_type == atom!("mouseup") &&
+            let Some(drag_start_value) = self.drag_start_value.borrow_mut().take() &&
+            drag_start_value != input.Value()
+        {
+            input.queue_user_change_event();
+        }
+    }
+
+    fn move_thumb_to_pointer(
+        &self,
+        cx: &mut JSContext,
+        input: &HTMLInputElement,
+        mouse_event: &MouseEvent,
+    ) {
+        // The track and thumb are absolutely positioned against the padding box, with the
+        // center of the thumb at the value's fraction of its width.
+        let element = input.upcast::<Element>();
+        let padding_box_left = element.GetBoundingClientRect(cx).X() + f64::from(element.ClientLeft());
+        let padding_box_width = f64::from(element.ClientWidth());
+        if padding_box_width <= 0.0 {
+            return;
+        }
+        let fraction =
+            ((f64::from(mouse_event.ClientX()) - padding_box_left) / padding_box_width).clamp(0.0, 1.0);
+
+        let min = input
+            .minimum()
+            .expect("This value should be available for range input.");
+        let max = input
+            .maximum()
+            .expect("This value should be available for range input.");
+        let value_before = input.Value();
+        // The value sanitization algorithm snaps the value to the nearest step.
+        input
+            .SetValue(cx, DOMString::from((min + fraction * (max - min)).to_string()))
+            .expect("Setting the value of a range input can't fail");
+        if input.Value() != value_before {
+            input.queue_user_input_event();
+        }
     }
 }
 

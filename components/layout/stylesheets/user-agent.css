@@ -57,10 +57,25 @@ listing, plaintext, pre, xmp {
 }
 
 dialog:not([open]) { display: none; }
-/* https://html.spec.whatwg.org/multipage/#flow-content-3: closed popovers are hidden. The Popover
- * API isn't implemented yet, so this keeps them out of the page flow (Notion scrolled its page
- * to a closed language menu laid out inline). */
+/* https://html.spec.whatwg.org/multipage/#flow-content-3 */
 [popover]:not(:popover-open):not(dialog[open]) { display: none; }
+dialog:popover-open { display: block; }
+[popover] {
+  position: fixed;
+  inset: 0;
+  width: fit-content;
+  height: fit-content;
+  margin: auto;
+  border: solid;
+  padding: 0.25em;
+  overflow: auto;
+  background-color: Canvas;
+  color: CanvasText;
+}
+:popover-open::backdrop {
+  pointer-events: none !important;
+  background-color: transparent;
+}
 dialog {
   position: absolute;
   inset-inline-start: 0; inset-inline-end: 0;
@@ -69,8 +84,8 @@ dialog {
   margin: auto;
   border: solid;
   padding: 1em;
-  background-color: white; /* FIXME: should be Canvas */
-  color: black; /* FIXME: should be CanvasText */
+  background-color: Canvas;
+  color: CanvasText;
 }
 dialog:modal {
   position: fixed;
@@ -79,9 +94,32 @@ dialog:modal {
   max-width: calc(100% - 6px - 2em);
   max-height: calc(100% - 6px - 2em);
 }
-/* FIXME: support ::backdrop */
 dialog::backdrop {
   background: rgba(0,0,0,0.1);
+}
+
+/* https://drafts.csswg.org/css-position-4/#overlay puts elements in the top layer, together
+   with their ::backdrop. Pages can only transition it, which keeps an element in the top layer
+   while it animates out. */
+*, ::before, ::after, ::marker {
+  overlay: none !important;
+}
+dialog:modal, :popover-open {
+  overlay: auto !important;
+}
+/* https://drafts.csswg.org/css-position-4/#backdrop */
+::backdrop {
+  display: block;
+  position: fixed;
+  inset: 0;
+  -servo-top-layer: top;
+}
+
+/* https://html.spec.whatwg.org/multipage/#inert-subtrees: hit testing skips inert nodes, so
+   clicks reach whatever is beneath them, as in Chrome. A modal dialog escapes the inertness of
+   its ancestors. */
+[inert], [inert] :not(dialog:modal, [inert] dialog:modal *) {
+  pointer-events: none !important;
 }
 
 cite, dfn, em, i, var { font-style: italic; }
@@ -96,6 +134,11 @@ sub, sup { line-height: normal; font-size: smaller; }
 
 ruby { display: ruby; }
 rt { display: ruby-text; }
+/* Chrome's sizing of annotations. Their centering over the base comes from text-align here,
+   since Servo lays a ruby column out as a block container. */
+ruby, rt { text-indent: 0; }
+rt { line-height: normal; }
+ruby > rt { font-size: 50%; text-align: center; }
 
 /*
  * All tag names that can be links are listed here, because applying pseudo-class selectors
@@ -401,6 +444,10 @@ textarea { white-space: pre-wrap; }
   -servo-top-layer: top;
 }
 
+*|*:not(:root):fullscreen::backdrop {
+  background: black;
+}
+
 iframe:fullscreen {
   border:none !important;
   padding:0 !important;
@@ -436,3 +483,8 @@ marquee {
   display: block;
 }
 
+
+/* https://svgwg.org/svg2-draft/styling.html#UAStyleSheet */
+svg|svg:not(:root), svg|image, svg|marker, svg|pattern, svg|symbol {
+  overflow: hidden;
+}

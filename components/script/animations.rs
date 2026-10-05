@@ -142,6 +142,10 @@ impl Animations {
             opaque_node,
             PseudoElement::After,
         ));
+        cancel_animations_for(AnimationSetKey::new_for_pseudo(
+            opaque_node,
+            PseudoElement::Backdrop,
+        ));
     }
 
     /// This does three things:

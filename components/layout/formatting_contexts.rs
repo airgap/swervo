@@ -12,6 +12,8 @@ use style::context::SharedStyleContext;
 use style::logical_geometry::Direction;
 use style::properties::ComputedValues;
 use style::selector_parser::PseudoElement;
+use style::values::specified::Overflow;
+use style::values::generics::length::GenericLengthPercentageOrAuto;
 use style::values::specified::align::AlignFlags;
 
 use crate::context::LayoutContext;
@@ -25,14 +27,14 @@ use crate::layout_box_base::{IndependentFormattingContextLayoutResult, LayoutBox
 use crate::positioned::{LayoutRootLayoutInputs, PositioningContext};
 use crate::replaced::ReplacedContents;
 use crate::sizing::{
-    self, ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, LazySize,
+    self, ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, LazySize, Size,
 };
 use crate::style_ext::{AspectRatio, ComputedValuesExt, Display, DisplayInside, LayoutStyle};
 use crate::table::Table;
 use crate::taffy::TaffyContainer;
 use crate::{
     ArcRefCell, ConstraintSpace, ContainingBlock, IndefiniteContainingBlock, LogicalVec2,
-    PropagatedBoxTreeData, SizeConstraint,
+    PropagatedBoxTreeData,
 };
 
 /// <https://drafts.csswg.org/css-display/#independent-formatting-context>
@@ -292,31 +294,44 @@ impl IndependentFormattingContext {
         layout_context: &LayoutContext,
         constraint_space: &ConstraintSpace,
     ) -> InlineContentSizesResult {
+        // A text control's `size` or `cols` attribute gives its intrinsic inline size whatever its
+        // text, as in Chrome (`TextFieldIntrinsicInlineSize`); this is what a percentage width
+        // resolves against in a shrink-to-fit container.
+        if let GenericLengthPercentageOrAuto::LengthPercentage(width) = self
+            .style()
+            .get_position()
+            .clone__servo_text_control_width() &&
+            self.style().writing_mode.is_horizontal()
+        {
+            let size = width.0.to_used_value(Au(0));
+            return InlineContentSizesResult {
+                sizes: ContentSizes {
+                    min_content: size,
+                    max_content: size,
+                },
+                depends_on_block_constraints: false,
+            };
+        }
         let result = self
             .base
             .inline_content_sizes(layout_context, constraint_space, &self.contents);
-        // <https://drafts.csswg.org/css-sizing-4/#aspect-ratio-size-transfers>: a non-replaced
-        // box with an `aspect-ratio` and a definite block size takes its automatic inline size
-        // from the ratio (an inline-block with `height: 50px; aspect-ratio: 2` is 100px wide),
-        // but no narrower than its min-content size. Replaced boxes transfer in their own
-        // content sizes.
+        // Replaced boxes transfer their aspect ratio in their own content sizes.
         if self.is_replaced() {
             return result;
         }
-        let (Some(ratio), SizeConstraint::Definite(block_size)) =
-            (constraint_space.preferred_aspect_ratio, constraint_space.block_size)
-        else {
+        let Some(ratio) = constraint_space.preferred_aspect_ratio else {
             return result;
         };
-        let inline_size = ratio
-            .compute_dependent_size(Direction::Inline, block_size)
-            .max(result.sizes.min_content);
-        InlineContentSizesResult {
-            sizes: ContentSizes {
-                min_content: inline_size,
-                max_content: inline_size,
+        match sizing::content_sizes_with_aspect_ratio(
+            result.sizes,
+            ratio,
+            constraint_space.block_size,
+        ) {
+            Some(sizes) => InlineContentSizesResult {
+                sizes,
+                depends_on_block_constraints: true,
             },
-            depends_on_block_constraints: true,
+            None => result,
         }
     }
 
@@ -451,6 +466,24 @@ impl IndependentFormattingContext {
         )
     }
 
+    /// Whether this box is a scroll container in its block axis and has a preferred block size
+    /// that depends on a percentage.
+    pub(crate) fn is_block_axis_scroll_container_with_percentage_size(&self) -> bool {
+        let style = self.style();
+        let writing_mode = style.writing_mode;
+        let overflow = style.effective_overflow(self.base_fragment_info().flags);
+        let block_axis_overflow = if writing_mode.is_horizontal() {
+            overflow.y
+        } else {
+            overflow.x
+        };
+        matches!(block_axis_overflow, Overflow::Auto | Overflow::Scroll) &&
+            matches!(
+                style.box_size(writing_mode).block,
+                Size::Numeric(size) if size.has_percentage()
+            )
+    }
+
     #[inline]
     pub(crate) fn is_grid(&self) -> bool {
         matches!(
@@ -497,9 +530,45 @@ impl IndependentFormattingContext {
                 replaced_layout
             },
             IndependentFormattingContextContents::Flow(bfc) => {
-                let mut result =
-                    bfc.layout(layout_context, positioning_context, containing_block_for_children);
-                align_block_container_content(self.style(), lazy_block_size, &mut result);
+                let multicol_result = self
+                    .style()
+                    .is_multicol()
+                    .then(|| {
+                        bfc.layout_multicol(
+                            layout_context,
+                            positioning_context,
+                            containing_block_for_children,
+                            self.style(),
+                        )
+                    })
+                    .flatten();
+                let mut result = multicol_result.unwrap_or_else(|| {
+                    bfc.layout(layout_context, positioning_context, containing_block_for_children)
+                });
+                // A `<textarea>`'s `rows` attribute gives its intrinsic block size whatever its
+                // text, which scrolls instead (Chrome's `TextAreaIntrinsicBlockSize`). The UA sheet
+                // also sizes date and time fields this way.
+                let text_control_block_size = match self
+                    .style()
+                    .get_position()
+                    .clone__servo_text_control_height()
+                {
+                    GenericLengthPercentageOrAuto::LengthPercentage(height)
+                        if self.style().writing_mode.is_horizontal() =>
+                    {
+                        Some(height.0.to_used_value(Au(0)))
+                    },
+                    _ => None,
+                };
+                align_block_container_content(
+                    self.style(),
+                    lazy_block_size,
+                    text_control_block_size,
+                    &mut result,
+                );
+                if let Some(block_size) = text_control_block_size {
+                    result.content_block_size = block_size;
+                }
                 result
             },
             IndependentFormattingContextContents::Flex(fc) => fc.layout(
@@ -532,14 +601,23 @@ impl IndependentFormattingContext {
         preferred_aspect_ratio: Option<AspectRatio>,
         lazy_block_size: &LazySize,
     ) -> (IndependentFormattingContextLayoutResult, bool) {
-        if let Some(cached_layout_result) = self
-            .base
-            .cached_independent_formatting_context_layout_if_applicable(
-                positioning_context,
-                containing_block_for_children,
-            )
-        {
-            return (cached_layout_result, true);
+        // Aligned content is placed within the resolved `lazy_block_size`, which the cache does
+        // not key on: flex items are first laid out for their intrinsic block size, and reusing
+        // that result would leave the content unaligned in the final, taller box.
+        let lazy_block_size_kind = lazy_block_size.kind();
+        let content_is_aligned =
+            self.is_block_container() && block_container_content_alignment(self.style()).is_some();
+        if !content_is_aligned {
+            if let Some(cached_layout_result) = self
+                .base
+                .cached_independent_formatting_context_layout_if_applicable(
+                    positioning_context,
+                    containing_block_for_children,
+                    lazy_block_size_kind,
+                )
+            {
+                return (cached_layout_result, true);
+            }
         }
 
         #[cfg(feature = "tracing")]
@@ -558,6 +636,7 @@ impl IndependentFormattingContext {
         );
         self.base.cache_independent_formatting_context_layout(
             containing_block_for_children,
+            lazy_block_size_kind,
             &child_positioning_context,
             &result,
         );
@@ -666,24 +745,31 @@ impl ComputeInlineContentSizes for IndependentFormattingContextContents {
     }
 }
 
+/// The `align-content` value that moves a block container's content, if any.
+fn block_container_content_alignment(style: &ComputedValues) -> Option<AlignFlags> {
+    let alignment = style.get_position().align_content.primary().value();
+    (matches!(
+        alignment,
+        AlignFlags::CENTER | AlignFlags::END | AlignFlags::FLEX_END
+    ) && style.writing_mode.is_horizontal())
+    .then_some(alignment)
+}
+
 /// <https://drafts.csswg.org/css-align/#distribution-block>: `align-content` on a block container
 /// taller than its content moves the content to the center or end. Buttons center their label
 /// this way (see servo.css), like Chrome. Horizontal writing modes only.
 fn align_block_container_content(
     style: &ComputedValues,
     lazy_block_size: &LazySize,
+    intrinsic_block_size: Option<Au>,
     result: &mut IndependentFormattingContextLayoutResult,
 ) {
-    let alignment = style.get_position().align_content.primary().value();
-    if !matches!(
-        alignment,
-        AlignFlags::CENTER | AlignFlags::END | AlignFlags::FLEX_END
-    ) || !style.writing_mode.is_horizontal()
-    {
+    let Some(alignment) = block_container_content_alignment(style) else {
         return;
-    }
+    };
     let content_block_size = result.content_block_size;
-    let free_space = lazy_block_size.resolve(|| content_block_size) - content_block_size;
+    let free_space = lazy_block_size.resolve(|| intrinsic_block_size.unwrap_or(content_block_size)) -
+        content_block_size;
     if free_space <= Au(0) {
         return;
     }

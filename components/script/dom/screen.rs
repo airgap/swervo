@@ -3,9 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use dom_struct::dom_struct;
-use embedder_traits::{EmbedderMsg, ScreenMetrics};
 use script_bindings::reflector::{Reflector, reflect_dom_object};
-use servo_base::generic_channel;
 
 use crate::dom::bindings::codegen::Bindings::ScreenBinding::ScreenMethods;
 use crate::dom::bindings::num::Finite;
@@ -30,39 +28,27 @@ impl Screen {
     pub(crate) fn new(window: &Window, can_gc: CanGc) -> DomRoot<Screen> {
         reflect_dom_object(Box::new(Screen::new_inherited(window)), window, can_gc)
     }
-
-    /// Retrives [`ScreenMetrics`] from the embedder.
-    fn screen_metrics(&self) -> ScreenMetrics {
-        let (sender, receiver) = generic_channel::channel().expect("Failed to create IPC channel!");
-
-        self.window.send_to_embedder(EmbedderMsg::GetScreenMetrics(
-            self.window.webview_id(),
-            sender,
-        ));
-
-        receiver.recv().unwrap_or_default()
-    }
 }
 
 impl ScreenMethods<crate::DomTypeHolder> for Screen {
     /// <https://drafts.csswg.org/cssom-view/#dom-screen-availwidth>
     fn AvailWidth(&self) -> Finite<f64> {
-        Finite::wrap(self.screen_metrics().available_size.width as f64)
+        Finite::wrap(self.window.screen_metrics().available_size.width as f64)
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-screen-availheight>
     fn AvailHeight(&self) -> Finite<f64> {
-        Finite::wrap(self.screen_metrics().available_size.height as f64)
+        Finite::wrap(self.window.screen_metrics().available_size.height as f64)
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-screen-width>
     fn Width(&self) -> Finite<f64> {
-        Finite::wrap(self.screen_metrics().screen_size.width as f64)
+        Finite::wrap(self.window.screen_metrics().screen_size.width as f64)
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-screen-height>
     fn Height(&self) -> Finite<f64> {
-        Finite::wrap(self.screen_metrics().screen_size.height as f64)
+        Finite::wrap(self.window.screen_metrics().screen_size.height as f64)
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-screen-colordepth>

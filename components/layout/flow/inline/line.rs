@@ -14,6 +14,7 @@ use malloc_size_of_derive::MallocSizeOf;
 use style::Zero;
 use style::computed_values::position::T as Position;
 use style::computed_values::white_space_collapse::T as WhiteSpaceCollapse;
+use style::properties::ComputedValues;
 use style::values::computed::BaselineShift;
 use style::values::generics::box_::BaselineShiftKeyword;
 use style::values::specified::align::AlignFlags;
@@ -21,7 +22,9 @@ use style::values::specified::box_::DisplayOutside;
 use unicode_bidi::{BidiInfo, Level};
 
 use super::inline_box::{InlineBoxContainerState, InlineBoxIdentifier, InlineBoxTreePathToken};
-use super::{InlineFormattingContextLayout, LineBlockSizes, SharedInlineStyles, line_height};
+use super::{
+    TextOrigins, InlineFormattingContextLayout, LineBlockSizes, SharedInlineStyles, line_height,
+};
 use crate::cell::ArcRefCell;
 use crate::flow::inline::text_run::FontAndScriptInfo;
 use crate::fragment_tree::{BaseFragment, BaseFragmentInfo, BoxFragment, Fragment, TextFragment};
@@ -273,7 +276,20 @@ impl LineItemLayout<'_, '_> {
         iterator(line_items)
     }
 
-    pub(super) fn layout(&mut self, line_items: Vec<LineItem>) -> Vec<Fragment> {
+    pub(super) fn layout(&mut self, mut line_items: Vec<LineItem>) -> Vec<Fragment> {
+        // White space trimmed at the end of the line leaves text runs without glyphs, which
+        // produce no fragments.
+        if let Some(LineItem::TextRun(_, text_run)) =
+            line_items.iter_mut().rev().find(|line_item| match line_item {
+                LineItem::TextRun(_, text_run) => {
+                    !text_run.text.is_empty() || text_run.is_empty_for_text_cursor
+                },
+                _ => line_item.is_in_flow_content(),
+            }) &&
+            let Some(offsets) = text_run.offsets.as_mut()
+        {
+            offsets.ends_line = true;
+        }
         let line_item_iterator = self.reorder_line_items_for_bidi(line_items);
         for item in line_item_iterator.into_iter().by_ref() {
             // When preparing to lay out a new line item, start and end inline boxes, so that the current
@@ -449,6 +465,7 @@ impl LineItemLayout<'_, '_> {
             size: ContainingBlockSize {
                 inline: content_rect.size.inline,
                 block: Default::default(),
+                table_cell: None,
             },
             style: containing_block.style,
         };
@@ -595,11 +612,24 @@ impl LineItemLayout<'_, '_> {
                 inline: inline_advance,
             },
         };
+        let mut offsets = text_item.offsets;
+        if let Some(offsets) = offsets.as_mut() {
+            offsets.line_block_start = font_metrics.ascent - self.current_state.baseline_offset;
+            offsets.line_block_size = self.line_metrics.block_size;
+        }
 
         let font_key = text_item.info.font.key(
             self.layout.layout_context.painter_id,
             &self.layout.layout_context.font_context,
         );
+        let stroke_font_key =
+            text_stroke_width(&text_item.inline_styles.style.borrow()).map(|width| {
+                text_item.info.font.stroked_key(
+                    self.layout.layout_context.painter_id,
+                    &self.layout.layout_context.font_context,
+                    width,
+                )
+            });
 
         self.current_state.inline_advance += inline_advance;
         self.current_state.fragments.push((
@@ -612,10 +642,12 @@ impl LineItemLayout<'_, '_> {
                 selected_style: text_item.inline_styles.selected.clone(),
                 font_metrics: font_metrics.clone(),
                 font_key,
+                stroke_font_key,
                 font: text_item.info.font.clone(),
                 glyphs: text_item.text,
                 justification_adjustment: self.justification_adjustment,
-                offsets: text_item.offsets,
+                offsets,
+                character_start: text_item.character_start,
                 is_empty_for_text_cursor: text_item.is_empty_for_text_cursor,
             })),
             content_rect,
@@ -855,12 +887,23 @@ impl LineItem {
 
 #[derive(Debug, MallocSizeOf)]
 pub(crate) struct TextRunOffsets {
-    /// The selection range of the containing inline formatting context.
+    /// The selection range of the containing inline formatting context, for text controls.
     #[ignore_malloc_size_of = "This is stored primarily in the DOM"]
-    pub shared_selection: SharedSelection,
+    pub shared_selection: Option<SharedSelection>,
+    /// The DOM origin of the text of the containing inline formatting context, for selections
+    /// and carets in the document.
+    #[ignore_malloc_size_of = "Measured in the inline formatting context"]
+    pub text_origins: Option<Arc<TextOrigins>>,
     /// The range of characters this [`TextRun`] represents within the entire text of its
     /// inline formatting context.
     pub character_range: Range<usize>,
+    /// The block offset of the start of the line box relative to the fragment and the block size
+    /// of the line box, which selected text is highlighted over. Set when the line is laid out.
+    pub line_block_start: Au,
+    pub line_block_size: Au,
+    /// Whether this text is the last content of its line, so that the line break after it,
+    /// which has no glyphs, is painted at its end when selected.
+    pub ends_line: bool,
 }
 
 pub(super) struct TextRunLineItem {
@@ -871,6 +914,10 @@ pub(super) struct TextRunLineItem {
     /// When necessary, this field store the [`TextRunOffsets`] for a particular
     /// [`TextRunLineItem`]. This is currently only used inside of text inputs.
     pub offsets: Option<Box<TextRunOffsets>>,
+    /// The index of the first character of `text` within the characters of the inline
+    /// formatting context, or `None` for generated glyphs (such as a `text-overflow`
+    /// ellipsis) that do not correspond to any text in the DOM.
+    pub character_start: Option<usize>,
     /// Whether or not this [`TextFragment`] is an empty fragment added for the
     /// benefit of placing a text cursor on an otherwise empty editable line.
     pub is_empty_for_text_cursor: bool,
@@ -925,11 +972,12 @@ impl TextRunLineItem {
             .position(|glyph| !glyph.is_whitespace())
             .unwrap_or(self.text.len());
 
-        *whitespace_trimmed += self
-            .text
-            .drain(0..index_of_first_non_whitespace)
-            .map(|glyph| glyph.total_advance())
-            .sum();
+        for glyph in self.text.drain(0..index_of_first_non_whitespace) {
+            *whitespace_trimmed += glyph.total_advance();
+            if let Some(character_start) = self.character_start.as_mut() {
+                *character_start += glyph.character_count();
+            }
+        }
 
         // Only keep going if we only encountered whitespace.
         self.text.is_empty()
@@ -942,8 +990,12 @@ impl TextRunLineItem {
         new_offsets: &Option<TextRunOffsets>,
         new_inline_styles: &SharedInlineStyles,
     ) -> bool {
+        // Right-to-left slices stay separate items: bidi reordering moves whole line items, and
+        // the slices of one item are painted left to right in logical order, which reversed the
+        // words of Hebrew and Arabic text in `nowrap` runs and text inputs.
         if !Arc::ptr_eq(&self.info.font, &new_info.font) ||
             self.info.bidi_level != new_info.bidi_level ||
+            self.info.bidi_level.is_rtl() ||
             !self.inline_styles.ptr_eq(new_inline_styles)
         {
             return false;
@@ -1016,6 +1068,21 @@ pub(super) struct FloatLineItem {
 
 /// Sort a mutable slice by the given indices array in place, reording the slice so that final
 /// value of `slice[x]` is `slice[indices[x]]`.
+/// The width of the `-webkit-text-stroke` that text with this style paints, if any.
+/// <https://compat.spec.whatwg.org/#the-webkit-text-stroke-width>
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
+fn text_stroke_width(style: &ComputedValues) -> Option<Au> {
+    let width = style.get_inherited_text().clone__webkit_text_stroke_width();
+    (width > Au::zero()).then_some(width)
+}
+
+/// Only WebRender's FreeType glyph rasterizer strokes glyph outlines, so text elsewhere paints no
+/// stroke rather than painting its glyphs filled in the stroke color.
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "freebsd")))]
+fn text_stroke_width(_style: &ComputedValues) -> Option<Au> {
+    None
+}
+
 fn sort_by_indices_in_place<T>(data: &mut [T], mut indices: Vec<usize>) {
     for idx in 0..data.len() {
         if indices[idx] == idx {

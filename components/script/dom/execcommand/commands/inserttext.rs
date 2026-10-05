@@ -11,6 +11,7 @@ use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::characterdata::CharacterData;
 use crate::dom::document::Document;
+use crate::dom::html::htmlbrelement::HTMLBRElement;
 use crate::dom::node::Node;
 use crate::dom::selection::Selection;
 use crate::dom::text::Text;
@@ -91,9 +92,45 @@ pub(crate) fn execute_insert_text_command(
         }
     };
 
-    // Step 10. Canonicalize whitespace around the insertion, so a typed space at the end of a
-    // line stays visible (it becomes a no-break space).
-    text_node.canonicalize_whitespace(cx, end_offset, true);
-    selection.collapse_current_range(&text_node, end_offset);
+    // NOTE: Not in the spec, but like other browsers: text typed on a line that only held a
+    // placeholder `<br>` (one keeping an empty last line visible) replaces it.
+    if text_node.len() == inserted_length &&
+        text_node
+            .GetPreviousSibling()
+            .is_none_or(|previous| previous.is::<HTMLBRElement>()) &&
+        let Some(next) = text_node.GetNextSibling() &&
+        next.is::<HTMLBRElement>() &&
+        next.precedes_a_line_break(cx.no_gc())
+    {
+        next.remove_self(cx);
+    }
+
+    // Step 12.2. Call collapse(node, offset) on the context object's selection.
+    // Step 12.3. Call extend(node, offset + 1) on the context object's selection.
+    selection.collapse_current_range(&text_node, end_offset - inserted_length);
+    selection.extend_current_range(&text_node, end_offset);
+
+    // Step 15. Canonicalize whitespace (the active range's start node, the active range's start
+    // offset).
+    // Step 16. Canonicalize whitespace (the active range's end node, the active range's end
+    // offset).
+    //
+    // Canonicalizing at the start turns a no-break space that ended the line back into a space
+    // once text follows it, and at the end makes a typed space at the end of a line a visible
+    // no-break space. Collapsed spaces are not fixed: that would delete a second space typed at
+    // the end of a line, which other browsers keep.
+    let active_range = selection
+        .active_range()
+        .expect("Must always have an active range");
+    active_range
+        .start_container()
+        .canonicalize_whitespace(cx, active_range.start_offset(), false);
+    active_range
+        .end_container()
+        .canonicalize_whitespace(cx, active_range.end_offset(), false);
+
+    // Step 18. Call collapse() on the context object's selection, with first argument equal to
+    // the active range's end node and second argument equal to the active range's end offset.
+    selection.collapse_current_range(&active_range.end_container(), active_range.end_offset());
     true
 }

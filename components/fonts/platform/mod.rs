@@ -279,3 +279,66 @@ pub(crate) fn add_noto_fallback_families(
     families.push("Noto Sans Symbols");
     families.push("Noto Sans Symbols2");
 }
+
+/// The CJK font that stands in for the generic family `generic` (`None` being the standard font,
+/// i.e. the initial `font-family`) in content written in `language`.
+///
+/// Chrome replaces a generic family whose font lacks a common ideograph (U+4E00, or U+AC00 for
+/// Korean) with the system's fallback font for that character in the content language
+/// (`FontCache::GetGenericFamilyNameForScript`), so that all `lang=ja` text, Latin and punctuation
+/// included, renders in the Japanese font. Its default generic fonts (Arial, Times New Roman and
+/// their metric-compatible stand-ins) never have ideographs. On Linux that fallback is what
+/// fontconfig sorts first for e.g. `sans-serif:lang=ja`: the Noto CJK face for the language.
+#[cfg(all(
+    any(target_os = "linux", target_os = "freebsd"),
+    not(target_os = "android"),
+    not(target_env = "ohos")
+))]
+pub(crate) fn han_generic_font_family(
+    language: &icu_locid::LanguageIdentifier,
+    generic: style::values::computed::font::GenericFontFamily,
+) -> Option<&'static str> {
+    use icu_locid::subtags::{language, region, script};
+    use style::values::computed::font::GenericFontFamily;
+
+    let serif = match generic {
+        GenericFontFamily::Serif => true,
+        GenericFontFamily::None |
+        GenericFontFamily::SansSerif |
+        GenericFontFamily::Cursive |
+        GenericFontFamily::Fantasy => false,
+        GenericFontFamily::Monospace | GenericFontFamily::SystemUi => return None,
+    };
+    let (sans_family, serif_family) = match language.language {
+        lang if lang == language!("ja") => ("Noto Sans CJK JP", "Noto Serif CJK JP"),
+        lang if lang == language!("ko") => ("Noto Sans CJK KR", "Noto Serif CJK KR"),
+        lang if lang == language!("zh") => match (language.region, language.script) {
+            (Some(region), _) if region == region!("HK") || region == region!("MO") => {
+                ("Noto Sans CJK HK", "Noto Serif CJK HK")
+            },
+            (Some(region), _) if region == region!("TW") => {
+                ("Noto Sans CJK TC", "Noto Serif CJK TC")
+            },
+            (None, Some(han_script)) if han_script == script!("Hant") => {
+                ("Noto Sans CJK TC", "Noto Serif CJK TC")
+            },
+            _ => ("Noto Sans CJK SC", "Noto Serif CJK SC"),
+        },
+        _ => return None,
+    };
+    Some(if serif { serif_family } else { sans_family })
+}
+
+/// Other platforms' Chrome resolves generic families per script through its own font settings,
+/// which these platforms' font lists don't model.
+#[cfg(not(all(
+    any(target_os = "linux", target_os = "freebsd"),
+    not(target_os = "android"),
+    not(target_env = "ohos")
+)))]
+pub(crate) fn han_generic_font_family(
+    _: &icu_locid::LanguageIdentifier,
+    _: style::values::computed::font::GenericFontFamily,
+) -> Option<&'static str> {
+    None
+}

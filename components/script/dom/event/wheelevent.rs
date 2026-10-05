@@ -33,6 +33,8 @@ pub(crate) struct WheelEvent {
     delta_y: Cell<Finite<f64>>,
     delta_z: Cell<Finite<f64>>,
     delta_mode: Cell<u32>,
+    wheel_delta_x: Cell<i32>,
+    wheel_delta_y: Cell<i32>,
 }
 
 impl WheelEvent {
@@ -43,6 +45,8 @@ impl WheelEvent {
             delta_y: Cell::new(Finite::wrap(0.0)),
             delta_z: Cell::new(Finite::wrap(0.0)),
             delta_mode: Cell::new(0),
+            wheel_delta_x: Cell::new(0),
+            wheel_delta_y: Cell::new(0),
         }
     }
 
@@ -196,6 +200,15 @@ impl WheelEvent {
         self.delta_y.set(delta_y);
         self.delta_z.set(delta_z);
         self.delta_mode.set(delta_mode);
+        // Blink derives the legacy deltas of script-created events from the standard ones,
+        // truncated (`deltaY: -50.7` gives `wheelDeltaY` -50). Trusted events overwrite them.
+        self.wheel_delta_x.set(*delta_x as i32);
+        self.wheel_delta_y.set(*delta_y as i32);
+    }
+
+    pub(crate) fn set_wheel_delta(&self, wheel_delta_x: i32, wheel_delta_y: i32) {
+        self.wheel_delta_x.set(wheel_delta_x);
+        self.wheel_delta_y.set(wheel_delta_y);
     }
 }
 
@@ -239,6 +252,12 @@ impl WheelEventMethods<crate::DomTypeHolder> for WheelEvent {
             init.deltaZ,
             init.deltaMode,
         );
+        if init.wheelDeltaX != 0 {
+            event.wheel_delta_x.set(init.wheelDeltaX);
+        }
+        if init.wheelDeltaY != 0 {
+            event.wheel_delta_y.set(init.wheelDeltaY);
+        }
 
         Ok(event)
     }
@@ -261,6 +280,22 @@ impl WheelEventMethods<crate::DomTypeHolder> for WheelEvent {
     /// <https://w3c.github.io/uievents/#widl-WheelEvent-deltaMode>
     fn DeltaMode(&self) -> u32 {
         self.delta_mode.get()
+    }
+
+    /// Legacy, non-standard; implemented as in Blink, which pages that sniff for it expect.
+    fn WheelDeltaX(&self) -> i32 {
+        self.wheel_delta_x.get()
+    }
+
+    fn WheelDeltaY(&self) -> i32 {
+        self.wheel_delta_y.get()
+    }
+
+    fn WheelDelta(&self) -> i32 {
+        match self.wheel_delta_y.get() {
+            0 => self.wheel_delta_x.get(),
+            wheel_delta_y => wheel_delta_y,
+        }
     }
 
     /// <https://w3c.github.io/uievents/#widl-WheelEvent-initWheelEvent>

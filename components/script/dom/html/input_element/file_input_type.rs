@@ -34,6 +34,7 @@ use crate::dom::htmlelement::HTMLElement;
 use crate::dom::input_element::HTMLInputElement;
 use crate::dom::input_element::input_type::{SpecificInputActivationType, SpecificInputType};
 use crate::dom::node::{Node, NodeTraits};
+use crate::dom::validation::Validatable;
 
 const DEFAULT_FILE_INPUT_VALUE: &str = "No file chosen";
 const DEFAULT_FILE_INPUT_MULTIPLE_VALUE: &str = "No files chosen";
@@ -132,6 +133,7 @@ impl FileInputType {
             EventCancelable::NotCancelable,
             EventComposed::Composed,
         );
+        input.validity_state(cx).set_user_validity(cx, true);
         target.fire_bubbling_event(cx, atom!("change"));
     }
 }

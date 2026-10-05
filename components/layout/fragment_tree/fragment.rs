@@ -10,6 +10,7 @@ use euclid::{Point2D, Rect, Size2D};
 use fonts::{FontMetrics, FontRef, ShapedTextSlice};
 use layout_api::BoxAreaType;
 use malloc_size_of_derive::MallocSizeOf;
+use script::layout_dom::ServoLayoutNode;
 use servo_base::id::PipelineId;
 use servo_base::print_tree::PrintTree;
 use servo_url::ServoUrl;
@@ -93,6 +94,9 @@ pub(crate) struct TextFragment {
     #[conditional_malloc_size_of]
     pub font_metrics: Arc<FontMetrics>,
     pub font_key: FontInstanceKey,
+    /// The instance of the font that paints `-webkit-text-stroke` over the glyphs, if the stroke
+    /// has a width.
+    pub stroke_font_key: Option<FontInstanceKey>,
     /// The font used to shape `glyphs`. Retained so the display-list builder can rasterize the
     /// glyphs to an alpha coverage mask for `background-clip: text`.
     pub font: FontRef,
@@ -103,6 +107,10 @@ pub(crate) struct TextFragment {
     /// When necessary, this field store the [`TextRunOffsets`] for a particular
     /// [`TextRunLineItem`]. This is currently only used inside of text inputs.
     pub offsets: Option<Box<TextRunOffsets>>,
+    /// The index of the first character of `glyphs` within the characters of the inline
+    /// formatting context, or `None` for generated glyphs that have no DOM text. Used to
+    /// find the geometry of DOM text ranges.
+    pub character_start: Option<usize>,
     /// Whether or not this [`TextFragment`] is an empty fragment added for the
     /// benefit of placing a text cursor on an otherwise empty editable line.
     pub is_empty_for_text_cursor: bool,
@@ -181,13 +189,16 @@ impl Fragment {
         }
     }
 
-    pub(crate) fn scrolling_area(&self, layout_thread: &LayoutThread) -> PhysicalRect<Au> {
+    pub(crate) fn scrolling_area(
+        &self,
+        containing_block_computation: ContainingBlockCalculation<'_>,
+    ) -> PhysicalRect<Au> {
         self.retrieve_box_fragment().map_or_else(
             || self.scrollable_overflow_for_parent(),
             |box_fragment| {
                 box_fragment.offset_by_containing_block(
                     &box_fragment.with_style().scrollable_overflow(),
-                    layout_thread.into(),
+                    containing_block_computation,
                 )
             },
         )
@@ -344,17 +355,30 @@ impl Fragment {
         level: usize,
         process_func: &mut impl FnMut(&Fragment, usize, &PhysicalRect<Au>) -> Option<T>,
     ) -> Option<T> {
+        self.find_descending_into(manager, level, &|_| true, process_func)
+    }
+
+    /// Like [`Self::find`], but only visits the children of fragments for which `descend`
+    /// returns true.
+    pub(crate) fn find_descending_into<T>(
+        &self,
+        manager: &ContainingBlockManager<PhysicalRect<Au>>,
+        level: usize,
+        descend: &impl Fn(&Fragment) -> bool,
+        process_func: &mut impl FnMut(&Fragment, usize, &PhysicalRect<Au>) -> Option<T>,
+    ) -> Option<T> {
         let containing_block = manager.get_containing_block_for_fragment(self);
         if let Some(result) = process_func(self, level, containing_block) {
             return Some(result);
         }
+        if !descend(self) {
+            return None;
+        }
 
         match self {
-            Fragment::LayoutRoot(layout_root_fragment) => {
-                layout_root_fragment
-                    .inner()
-                    .find(manager, level, process_func)
-            },
+            Fragment::LayoutRoot(layout_root_fragment) => layout_root_fragment
+                .inner()
+                .find_descending_into(manager, level, descend, process_func),
             Fragment::Box(fragment) | Fragment::Float(fragment) => {
                 let style = fragment.style();
                 let content_rect = fragment
@@ -375,10 +399,9 @@ impl Fragment {
                     manager.new_for_non_absolute_descendants(&content_rect)
                 };
 
-                fragment
-                    .children
-                    .iter()
-                    .find_map(|child| child.find(&new_manager, level + 1, process_func))
+                fragment.children.iter().find_map(|child| {
+                    child.find_descending_into(&new_manager, level + 1, descend, process_func)
+                })
             },
             Fragment::Positioning(fragment) => {
                 let content_rect = fragment
@@ -386,10 +409,9 @@ impl Fragment {
                     .rect()
                     .translate(containing_block.origin.to_vector());
                 let new_manager = manager.new_for_non_absolute_descendants(&content_rect);
-                fragment
-                    .children
-                    .iter()
-                    .find_map(|child| child.find(&new_manager, level + 1, process_func))
+                fragment.children.iter().find_map(|child| {
+                    child.find_descending_into(&new_manager, level + 1, descend, process_func)
+                })
             },
             _ => None,
         }
@@ -447,6 +469,63 @@ impl TextFragment {
             .max(Au::zero())
             .max(point_in_fragment.y - rect.max_y());
         Au::from_f64_px((dx.to_f64_px().powi(2) + dy.to_f64_px().powi(2)).sqrt())
+    }
+
+    /// The rectangle, relative to this fragment's containing fragment, of the glyphs for the
+    /// characters in `character_range` (characters of the inline formatting context). Returns
+    /// `None` when this fragment holds none of those characters. A collapsed range yields a
+    /// zero-width rectangle at its position. The block size is the font's ascent plus descent,
+    /// matching what other engines report for the boxes of text.
+    ///
+    /// TODO: Right-to-left text, whose glyphs are stored in visual order, is not handled.
+    pub(crate) fn rect_for_character_range(
+        &self,
+        character_range: &std::ops::Range<usize>,
+    ) -> Option<PhysicalRect<Au>> {
+        let fragment_start = self.character_start?;
+        let fragment_end = fragment_start +
+            self.glyphs
+                .iter()
+                .map(|slice| slice.character_count())
+                .sum::<usize>();
+        let intersects = if character_range.is_empty() {
+            (fragment_start..=fragment_end).contains(&character_range.start)
+        } else {
+            character_range.start < fragment_end && character_range.end > fragment_start
+        };
+        if !intersects {
+            return None;
+        }
+
+        let mut start_advance = None;
+        let mut end_advance = None;
+        let mut character_index = fragment_start;
+        let mut advance = Au::zero();
+        for glyph in self.glyphs.iter().flat_map(|slice| slice.glyphs()) {
+            if start_advance.is_none() && character_index >= character_range.start {
+                start_advance = Some(advance);
+            }
+            if character_index >= character_range.end {
+                end_advance = Some(advance);
+                break;
+            }
+            character_index += glyph.character_count();
+            advance += glyph.advance();
+            if glyph.char_is_word_separator() {
+                advance += self.justification_adjustment;
+            }
+        }
+        let start_advance = start_advance.unwrap_or(advance);
+        let end_advance = end_advance.unwrap_or(advance);
+
+        let rect = self.base.rect();
+        Some(PhysicalRect::new(
+            PhysicalPoint::new(rect.origin.x + start_advance, rect.origin.y),
+            Size2D::new(
+                end_advance - start_advance,
+                self.font_metrics.ascent + self.font_metrics.descent,
+            ),
+        ))
     }
 
     /// Given a point relative to this [`TextFragment`], find the most appropriate
@@ -573,10 +652,13 @@ impl CollapsedMargin {
 /// context tree construction, a quick traversal is performed to calculate them for
 /// the purpose of the query.
 pub(crate) enum ContainingBlockCalculation<'a> {
-    /// This token variant is for the purpose of a layout query. In this case, if stacking
-    /// context tree construction has not yet taken place, a cumulative containing block
-    /// calculation traversal will be performed.
-    Lazy { layout_thread: &'a LayoutThread },
+    /// This token variant is for the purpose of a layout query about `node`. In this case, if
+    /// stacking context tree construction has not yet taken place, the cumulative containing
+    /// blocks of the fragments of `node` and of its ancestors are calculated.
+    Lazy {
+        layout_thread: &'a LayoutThread,
+        node: ServoLayoutNode<'a>,
+    },
     /// This token variant is used when the code can guarantee that stacking context
     /// tree construction has already taken place.
     ///
@@ -588,14 +670,11 @@ pub(crate) enum ContainingBlockCalculation<'a> {
 impl ContainingBlockCalculation<'_> {
     pub(crate) fn ensure(&self) {
         match self {
-            Self::Lazy { layout_thread } => layout_thread.ensure_containing_block_calculation(),
+            Self::Lazy {
+                layout_thread,
+                node,
+            } => layout_thread.ensure_containing_block_calculation_for_node(*node),
             Self::AlreadyDoneWithStackingContextTree => {},
         }
-    }
-}
-
-impl<'a> From<&'a LayoutThread> for ContainingBlockCalculation<'a> {
-    fn from(layout_thread: &'a LayoutThread) -> Self {
-        Self::Lazy { layout_thread }
     }
 }

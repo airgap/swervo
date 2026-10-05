@@ -11,6 +11,12 @@ use crate::realms::enter_auto_realm;
 
 pub(crate) fn load_script(head: &HTMLHeadElement) {
     let doc = head.owner_document();
+    // Documents without a browsing context (DOMParser, createHTMLDocument, XHR responses)
+    // share the window but are never rendered, and a page that adds more heads must not
+    // re-run the scripts: like extension content scripts, they run once per loaded document.
+    if !doc.has_browsing_context() || doc.mark_userscripts_loaded() {
+        return;
+    }
     let userscripts = doc.window().userscripts().to_owned();
     if userscripts.is_empty() {
         return;

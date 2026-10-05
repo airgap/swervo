@@ -193,6 +193,11 @@ impl SpecificInputActivationType for RadioInputActivation {
             EventComposed::Composed,
         );
 
+        // Chrome sets user validity whenever the user commits a change, as the spec does for
+        // controls with an explicit commit action.
+        // <https://html.spec.whatwg.org/multipage/#common-input-element-events>
+        input.validity_state(cx).set_user_validity(cx, true);
+
         // Step 3: Fire an event named change at the element with the bubbles attribute
         // initialized to true.
         target.fire_bubbling_event(cx, atom!("change"));

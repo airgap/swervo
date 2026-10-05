@@ -36,19 +36,21 @@ use crate::geom::{
     PhysicalSides, ToLogical, ToLogicalWithContainingBlock,
 };
 use crate::layout_box_base::{IndependentFormattingContextLayoutResult, LayoutBoxBase};
+use crate::lists::SymbolMarker;
 use crate::positioned::{AbsolutelyPositionedBox, PositioningContext, PositioningContextLength};
 use crate::sizing::{
     self, ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, LazySize, Size,
     SizeConstraint, Sizes,
 };
 use crate::style_ext::{
-    AspectRatio, Clamp, ComputedValuesExt, ContentBoxSizesAndPBM, LayoutStyle, PaddingBorderMargin,
+    AspectRatio, ComputedValuesExt, ContentBoxSizesAndPBM, LayoutStyle, PaddingBorderMargin,
 };
 use crate::{ConstraintSpace, ContainingBlock, ContainingBlockSize, IndefiniteContainingBlock};
 
 mod construct;
 pub mod float;
 pub mod inline;
+mod multicol;
 mod root;
 mod same_formatting_context_block;
 
@@ -280,6 +282,7 @@ impl BlockLevelBox {
             size: ContainingBlockSize {
                 inline: inline_size,
                 block: tentative_block_size,
+                table_cell: None,
             },
             style,
         };
@@ -340,6 +343,7 @@ impl OutsideMarker {
             size: ContainingBlockSize {
                 inline: content_sizes.sizes.max_content,
                 block: SizeConstraint::default(),
+                table_cell: None,
             },
             style,
         };
@@ -378,9 +382,19 @@ impl OutsideMarker {
         // they are the same, but this could change in the future.
         let pbm_of_list_item =
             LayoutStyle::Default(&self.list_item_style).padding_border_margin(containing_block);
+        let font_context = &layout_context.font_context;
+        let marker_inline_offset = SymbolMarker::for_outside_marker(style)
+            .and_then(|_| {
+                font_context
+                    .font_group(style.clone_font())
+                    .first(font_context)
+            })
+            .map_or(max_inline_size, |font| {
+                SymbolMarker::inline_offset(font.metrics.ascent)
+            });
         let content_rect = LogicalRect {
             start_corner: LogicalVec2 {
-                inline: -max_inline_size -
+                inline: -marker_inline_offset -
                     (pbm_of_list_item.border.inline_start +
                         pbm_of_list_item.padding.inline_start),
                 block: Zero::zero(),
@@ -1131,9 +1145,9 @@ impl IndependentFormattingContext {
             pbm,
             depends_on_block_constraints,
             ..
-        } = self
-            .layout_style()
-            .content_box_sizes_and_padding_border_margin(&containing_block.into());
+        } = self.layout_style().content_box_sizes_and_padding_border_margin(
+            &containing_block.for_in_flow_block_level_child_sizing(self),
+        );
 
         let (margin_block_start, margin_block_end) =
             solve_block_margins_for_in_flow_block_level(&pbm);
@@ -1225,18 +1239,38 @@ impl IndependentFormattingContext {
 
         let justify_self = resolve_justify_self(style, containing_block.style, has_inline_parent);
         let automatic_inline_size = automatic_inline_size(justify_self, Some(self));
+        let is_replaced = self.is_replaced();
         let compute_inline_size = |cache: &mut Cache, stretch_size| {
             if cache.depends_on_stretch_size {
                 update_cache(cache, stretch_size);
             }
             content_box_sizes.inline.resolve(
                 Direction::Inline,
-                automatic_inline_size,
+                sizing::automatic_inline_size_with_aspect_ratio(
+                    automatic_inline_size,
+                    preferred_aspect_ratio,
+                    is_replaced,
+                    cache.tentative_block_size,
+                    stretch_size,
+                ),
                 Au::zero,
                 Some(stretch_size),
                 || get_inline_content_sizes(cache),
                 is_table,
             )
+        };
+
+        let aspect_ratio_block_size = |inline_size| {
+            sizing::block_size_from_aspect_ratio(
+                preferred_aspect_ratio,
+                is_replaced,
+                &content_box_sizes.block,
+                available_block_size,
+                inline_size,
+            )
+        };
+        let containing_block_block_size = |cache: &Cache, aspect_ratio_block_size: Option<Au>| {
+            aspect_ratio_block_size.map_or(cache.tentative_block_size, SizeConstraint::Definite)
         };
 
         let get_lazy_block_size = || {
@@ -1265,6 +1299,7 @@ impl IndependentFormattingContext {
             // compute it with an available inline space of zero. Then, after layout we can
             // compute the block size, and finally place among floats.
             let inline_size = inline_size_with_no_available_space;
+            let aspect_ratio_block_size = aspect_ratio_block_size(inline_size);
             let lazy_block_size = get_lazy_block_size();
             layout = self.layout(
                 layout_context,
@@ -1275,7 +1310,8 @@ impl IndependentFormattingContext {
                         // `cache.tentative_block_size` can only depend on the inline stretch size
                         // for replaced elements, whose layout doesn't use the block size of the
                         // containing block for children.
-                        block: cache.tentative_block_size,
+                        block: containing_block_block_size(&cache, aspect_ratio_block_size),
+                        table_cell: None,
                     },
                     style,
                 },
@@ -1285,7 +1321,11 @@ impl IndependentFormattingContext {
             );
 
             content_size = LogicalVec2 {
-                block: lazy_block_size.resolve(|| layout.content_block_size),
+                block: lazy_block_size.resolve(|| {
+                    layout
+                        .content_block_size
+                        .max(aspect_ratio_block_size.unwrap_or_default())
+                }),
                 inline: layout.content_inline_size_for_table.unwrap_or(inline_size),
             };
 
@@ -1336,6 +1376,7 @@ impl IndependentFormattingContext {
                 let available_inline_size =
                     placement_rect.size.inline - pbm.padding_border_sums.inline;
                 let proposed_inline_size = compute_inline_size(&mut cache, available_inline_size);
+                let aspect_ratio_block_size = aspect_ratio_block_size(proposed_inline_size);
 
                 // Now lay out the block using the inline size we calculated from the placement.
                 // Later we'll check to see if the resulting block size is compatible with the
@@ -1348,7 +1389,8 @@ impl IndependentFormattingContext {
                     &ContainingBlock {
                         size: ContainingBlockSize {
                             inline: proposed_inline_size,
-                            block: cache.tentative_block_size,
+                            block: containing_block_block_size(&cache, aspect_ratio_block_size),
+                            table_cell: None,
                         },
                         style,
                     },
@@ -1368,7 +1410,11 @@ impl IndependentFormattingContext {
                     proposed_inline_size
                 };
                 content_size = LogicalVec2 {
-                    block: lazy_block_size.resolve(|| layout.content_block_size),
+                    block: lazy_block_size.resolve(|| {
+                        layout
+                            .content_block_size
+                            .max(aspect_ratio_block_size.unwrap_or_default())
+                    }),
                     inline: inline_size,
                 };
 
@@ -1512,6 +1558,7 @@ fn solve_containing_block_padding_and_border_for_in_flow_box<'a>(
             size: ContainingBlockSize {
                 inline: containing_block.size.inline,
                 block: containing_block.size.block,
+                table_cell: containing_block.size.table_cell,
             },
             style,
         };
@@ -1533,12 +1580,16 @@ fn solve_containing_block_padding_and_border_for_in_flow_box<'a>(
         };
     }
 
+    let is_replaced = context.is_some_and(|context| context.is_replaced());
     let ContentBoxSizesAndPBM {
         content_box_sizes,
         pbm,
         depends_on_block_constraints,
         ..
-    } = layout_style.content_box_sizes_and_padding_border_margin(&containing_block.into());
+    } = layout_style.content_box_sizes_and_padding_border_margin(&match context {
+        Some(context) => containing_block.for_in_flow_block_level_child_sizing(context),
+        None => containing_block.for_child_sizing(false),
+    });
 
     let pbm_sums = pbm.sums_auto_is_zero(ignore_block_margins_for_stretch);
     let available_inline_size = Au::zero().max(containing_block.size.inline - pbm_sums.inline);
@@ -1579,16 +1630,31 @@ fn solve_containing_block_padding_and_border_for_in_flow_box<'a>(
     // https://drafts.csswg.org/css2/#the-width-property
     // https://drafts.csswg.org/css2/visudet.html#min-max-widths
     let get_inline_content_sizes = || {
-        get_inline_content_sizes(&ConstraintSpace::new(
+        let sizes = get_inline_content_sizes(&ConstraintSpace::new(
             tentative_block_size,
             style,
             preferred_aspect_ratio,
-        ))
+        ));
+        // Boxes that establish an independent formatting context already transfer the
+        // aspect ratio in their content sizes, but a block container doesn't.
+        match preferred_aspect_ratio.filter(|_| !is_replaced) {
+            Some(ratio) => {
+                sizing::content_sizes_with_aspect_ratio(sizes, ratio, tentative_block_size)
+                    .unwrap_or(sizes)
+            },
+            None => sizes,
+        }
     };
     let justify_self = resolve_justify_self(style, containing_block.style, has_inline_parent);
     let inline_size = content_box_sizes.inline.resolve(
         Direction::Inline,
-        automatic_inline_size(justify_self, context),
+        sizing::automatic_inline_size_with_aspect_ratio(
+            automatic_inline_size(justify_self, context),
+            preferred_aspect_ratio,
+            is_replaced,
+            tentative_block_size,
+            available_inline_size,
+        ),
         Au::zero,
         Some(available_inline_size),
         get_inline_content_sizes,
@@ -1598,21 +1664,13 @@ fn solve_containing_block_padding_and_border_for_in_flow_box<'a>(
     // <https://drafts.csswg.org/css-sizing-4/#aspect-ratio>: with an `auto` block size, a
     // non-replaced box takes its block size from the inline size. Its children see that as a
     // definite containing block size.
-    let aspect_ratio_block_size = preferred_aspect_ratio
-        .filter(|_| {
-            content_box_sizes.block.preferred.is_initial() &&
-                context.is_none_or(|context| !context.is_replaced())
-        })
-        .map(|ratio| {
-            let (_, min, max) = content_box_sizes.block.resolve_each_extrinsic(
-                Size::FitContent,
-                Au::zero(),
-                available_block_size,
-            );
-            ratio
-                .compute_dependent_size(Direction::Block, inline_size)
-                .clamp_between_extremums(min, max)
-        });
+    let aspect_ratio_block_size = sizing::block_size_from_aspect_ratio(
+        preferred_aspect_ratio,
+        is_replaced,
+        &content_box_sizes.block,
+        available_block_size,
+        inline_size,
+    );
     let tentative_block_size = match aspect_ratio_block_size {
         Some(block_size) => SizeConstraint::Definite(block_size),
         None => tentative_block_size,
@@ -1622,6 +1680,7 @@ fn solve_containing_block_padding_and_border_for_in_flow_box<'a>(
         size: ContainingBlockSize {
             inline: inline_size,
             block: tentative_block_size,
+            table_cell: None,
         },
         style,
     };
@@ -1731,7 +1790,13 @@ fn automatic_inline_size<T>(
                 .base
                 .base_fragment_info
                 .flags
-                .intersects(FragmentFlags::IS_REPLACED | FragmentFlags::IS_WIDGET) ||
+                // A block-level `<button>` shrinks to fit like a widget
+                // (<https://html.spec.whatwg.org/multipage/#button-layout>).
+                .intersects(
+                    FragmentFlags::IS_REPLACED |
+                        FragmentFlags::IS_WIDGET |
+                        FragmentFlags::IS_BUTTON_ELEMENT,
+                ) ||
                 context.is_table()
         })
     };
@@ -2127,8 +2192,9 @@ impl IndependentFormattingContext {
         let style = self.style();
         let container_writing_mode = containing_block.style.writing_mode;
         let layout_style = self.layout_style();
-        let content_box_sizes_and_pbm =
-            layout_style.content_box_sizes_and_padding_border_margin(&containing_block.into());
+        let content_box_sizes_and_pbm = layout_style.content_box_sizes_and_padding_border_margin(
+            &containing_block.for_child_sizing(self.is_replaced()),
+        );
         let pbm = &content_box_sizes_and_pbm.pbm;
         let margin = pbm.margin.auto_is(Au::zero);
         let pbm_sums = pbm.padding + pbm.border + margin;
@@ -2177,10 +2243,19 @@ impl IndependentFormattingContext {
             is_table,
         );
 
+        let aspect_ratio_block_size = sizing::block_size_from_aspect_ratio(
+            preferred_aspect_ratio,
+            self.is_replaced(),
+            &content_box_sizes_and_pbm.content_box_sizes.block,
+            available_block_size,
+            inline_size,
+        );
         let containing_block_for_children = ContainingBlock {
             size: ContainingBlockSize {
                 inline: inline_size,
-                block: tentative_block_size,
+                block: aspect_ratio_block_size
+                    .map_or(tentative_block_size, SizeConstraint::Definite),
+                table_cell: None,
             },
             style,
         };
@@ -2217,7 +2292,8 @@ impl IndependentFormattingContext {
 
         let content_size = LogicalVec2 {
             inline: content_inline_size_for_table.unwrap_or(inline_size),
-            block: lazy_block_size.resolve(|| content_block_size),
+            block: lazy_block_size
+                .resolve(|| content_block_size.max(aspect_ratio_block_size.unwrap_or_default())),
         }
         .to_physical_size(container_writing_mode);
         let content_rect = PhysicalRect::new(PhysicalPoint::zero(), content_size);

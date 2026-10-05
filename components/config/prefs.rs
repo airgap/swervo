@@ -529,7 +529,7 @@ impl Preferences {
             js_mem_gc_high_frequency_high_limit_mb: 500,
             js_mem_gc_high_frequency_low_limit_mb: 100,
             js_mem_gc_high_frequency_time_limit_ms: 1000,
-            js_mem_gc_incremental_enabled: true,
+            js_mem_gc_incremental_enabled: false,
             js_mem_gc_incremental_slice_ms: 10,
             js_mem_gc_low_frequency_heap_growth: 150,
             js_mem_gc_per_zone_enabled: false,

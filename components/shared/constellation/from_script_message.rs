@@ -492,6 +492,10 @@ pub struct IFrameLoadInfo {
     /// A snapshot of the navigation-related parameters of the target
     /// of this navigation.
     pub target_snapshot_params: TargetSnapshotParams,
+    /// The name of the iframe's nested browsing context, which the new document's `window.name`
+    /// starts with when it is created in another script thread.
+    /// <https://html.spec.whatwg.org/multipage/#browsing-context-names>
+    pub browsing_context_name: String,
 }
 
 /// Specifies the information required to load a URL in an iframe.

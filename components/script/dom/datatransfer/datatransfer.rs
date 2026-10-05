@@ -88,6 +88,13 @@ impl DataTransfer {
         Self::new_with_proto(cx, window, None, data_store)
     }
 
+    /// Set the initial `dropEffect` and `effectAllowed` of the `DataTransfer` of a DND event.
+    /// <https://html.spec.whatwg.org/multipage/#fire-a-dnd-event>
+    pub(crate) fn initialize_effects(&self, drop_effect: DOMString, effect_allowed: DOMString) {
+        *self.drop_effect.borrow_mut() = drop_effect;
+        *self.effect_allowed.borrow_mut() = effect_allowed;
+    }
+
     pub(crate) fn data_store(&self) -> Option<Ref<'_, DragDataStore>> {
         Ref::filter_map(self.data_store.borrow(), |data_store| data_store.as_ref()).ok()
     }
@@ -134,7 +141,7 @@ impl DataTransferMethods<crate::DomTypeHolder> for DataTransfer {
             .is_some_and(|data_store| data_store.mode() == Mode::ReadWrite) &&
             VALID_EFFECTS_ALLOWED.contains(&&*value.str())
         {
-            *self.drop_effect.borrow_mut() = value;
+            *self.effect_allowed.borrow_mut() = value;
         }
     }
 

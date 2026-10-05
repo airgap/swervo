@@ -220,7 +220,13 @@ impl BoxFragment {
         //
         // This applies even if there is no baseline set, so we unconditionally set the value here
         // and ignore anything that is set via [`Self::with_baselines`].
-        if style.establishes_scroll_container(self.base.flags) {
+        //
+        // `<input>` is a scroll container only because the UA sheet clips its text. Chrome ignores
+        // `overflow` for the baseline of its text controls (`ShouldIgnoreOverflowPropertyFor
+        // InlineBlockBaseline`), aligning them on their text instead of their bottom edge.
+        if style.establishes_scroll_container(self.base.flags) &&
+            !self.base.flags.contains(FragmentFlags::IS_INPUT_ELEMENT)
+        {
             let content_rect_size = self.content_rect().size.to_logical(writing_mode);
             let padding = self.padding.to_logical(writing_mode);
             let border = self.border.to_logical(writing_mode);

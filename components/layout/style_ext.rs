@@ -7,6 +7,9 @@ use layout_api::AxesOverflow;
 use malloc_size_of_derive::MallocSizeOf;
 use style::Zero;
 use style::color::AbsoluteColor;
+use style::computed_values::_servo_top_layer::T as ServoTopLayer;
+use style::computed_value_flags::ComputedValueFlags;
+use style::computed_values::overlay::T as Overlay;
 use style::computed_values::direction::T as Direction;
 use style::computed_values::isolation::T as ComputedIsolation;
 use style::computed_values::mix_blend_mode::T as ComputedMixBlendMode;
@@ -25,7 +28,7 @@ use style::values::computed::basic_shape::ClipPath;
 use style::values::computed::image::Image as ComputedImageLayer;
 use style::values::computed::{
     BorderSideWidth, BorderStyle, Color, Inset, ItemPlacement, LengthPercentage, Margin,
-    SelfAlignment,
+    ScrollbarGutter, SelfAlignment,
 };
 use style::values::generics::box_::Perspective;
 use style::values::generics::position::{GenericAspectRatio, PreferredRatio};
@@ -138,7 +141,6 @@ pub(crate) enum DisplayLayoutInternal {
 impl DisplayLayoutInternal {
     /// <https://drafts.csswg.org/css-display-3/#layout-specific-displa>
     pub(crate) fn display_inside(&self) -> DisplayInside {
-        // When we add ruby, the display_inside of ruby must be Flow.
         // TODO: this should be unreachable for everything but
         // table cell and caption, once we have box tree fixups.
         DisplayInside::FlowRoot {
@@ -323,6 +325,8 @@ pub(crate) trait ComputedValuesExt {
         containing_block_writing_mode: WritingMode,
     ) -> LogicalSides<BorderStyleColor>;
     fn physical_margin(&self) -> PhysicalSides<LengthPercentageOrAuto<'_>>;
+    fn scrollbar_gutter(&self) -> PhysicalSides<Au>;
+    fn logical_scrollbar_gutter_sums(&self) -> LogicalVec2<Au>;
     fn margin(
         &self,
         containing_block_writing_mode: WritingMode,
@@ -335,7 +339,9 @@ pub(crate) trait ComputedValuesExt {
     fn effective_overflow(&self, fragment_flags: FragmentFlags) -> AxesOverflow;
     fn used_transform_style(&self, fragment_flags: FragmentFlags) -> ComputedTransformStyle;
     fn establishes_block_formatting_context(&self, fragment_flags: FragmentFlags) -> bool;
+    fn has_layout_or_paint_containment(&self, fragment_flags: FragmentFlags) -> bool;
     fn establishes_stacking_context(&self, fragment_flags: FragmentFlags) -> bool;
+    fn in_top_layer(&self) -> bool;
     fn establishes_scroll_container(&self, fragment_flags: FragmentFlags) -> bool;
     fn establishes_containing_block_for_absolute_descendants(
         &self,
@@ -442,7 +448,15 @@ impl ComputedValuesExt for ComputedValues {
         pbm: &PaddingBorderMargin,
     ) -> LogicalVec2<Size<Au>> {
         match self.get_position().box_sizing {
-            BoxSizing::ContentBox => box_size,
+            // The scrollbar gutter comes out of the content box.
+            // <https://drafts.csswg.org/css-overflow-3/#scrollbar-gutter-property>
+            BoxSizing::ContentBox => {
+                let gutter = self.logical_scrollbar_gutter_sums();
+                box_size.map_inline_and_block_sizes(
+                    |value| value - gutter.inline,
+                    |value| value - gutter.block,
+                )
+            },
             // These may be negative, but will later be clamped by `min-width`/`min-height`
             // which is clamped to zero.
             BoxSizing::BorderBox => box_size.map_inline_and_block_sizes(
@@ -458,7 +472,13 @@ impl ComputedValuesExt for ComputedValues {
         pbm: &PaddingBorderMargin,
     ) -> LogicalVec2<Size<Au>> {
         match self.get_position().box_sizing {
-            BoxSizing::ContentBox => min_box_size,
+            BoxSizing::ContentBox => {
+                let gutter = self.logical_scrollbar_gutter_sums();
+                min_box_size.map_inline_and_block_sizes(
+                    |value| Au::zero().max(value - gutter.inline),
+                    |value| Au::zero().max(value - gutter.block),
+                )
+            },
             // Clamp to zero to make sure the used size components are non-negative
             BoxSizing::BorderBox => min_box_size.map_inline_and_block_sizes(
                 |value| Au::zero().max(value - pbm.padding_border_sums.inline),
@@ -473,7 +493,13 @@ impl ComputedValuesExt for ComputedValues {
         pbm: &PaddingBorderMargin,
     ) -> LogicalVec2<Size<Au>> {
         match self.get_position().box_sizing {
-            BoxSizing::ContentBox => max_box_size,
+            BoxSizing::ContentBox => {
+                let gutter = self.logical_scrollbar_gutter_sums();
+                max_box_size.map_inline_and_block_sizes(
+                    |value| value - gutter.inline,
+                    |value| value - gutter.block,
+                )
+            },
             // This may be negative, but will later be clamped by `min-width`
             // which itself is clamped to zero.
             BoxSizing::BorderBox => max_box_size.map_inline_and_block_sizes(
@@ -492,6 +518,54 @@ impl ComputedValuesExt for ComputedValues {
             &BorderStyleColor::from_border(self.get_border(), &current_color),
             containing_block_writing_mode,
         )
+    }
+
+    /// The space that `scrollbar-gutter` reserves for this box, which layout adds to its border
+    /// widths so that it sits between the border and the padding, outside the scrollport.
+    /// <https://drafts.csswg.org/css-overflow-3/#scrollbar-gutter-property>
+    /// The root element's gutter belongs to the viewport, which doesn't reserve one yet.
+    fn scrollbar_gutter(&self) -> PhysicalSides<Au> {
+        let gutter = self.clone_scrollbar_gutter();
+        if !gutter.contains(ScrollbarGutter::STABLE) {
+            return PhysicalSides::zero();
+        }
+        // Overflow doesn't apply to inline boxes nor to tables and their parts, so they are
+        // never scroll containers.
+        let can_be_scroll_container = match Display::from(self.get_box().display) {
+            Display::GeneratingBox(DisplayGeneratingBox::OutsideInside { outside, inside }) => {
+                match inside {
+                    DisplayInside::Table => false,
+                    DisplayInside::Flow { .. } => outside == DisplayOutside::Block,
+                    DisplayInside::FlowRoot { .. } | DisplayInside::Flex | DisplayInside::Grid => {
+                        true
+                    },
+                }
+            },
+            _ => false,
+        };
+        if self.flags.contains(ComputedValueFlags::IS_ROOT_ELEMENT_STYLE) ||
+            !can_be_scroll_container ||
+            !AxesOverflow::from(self).establishes_scroll_container()
+        {
+            return PhysicalSides::zero();
+        }
+        // The gutter of the scrollbar that scrolls in the block axis sits on the inline-end
+        // edge (the left one in right-to-left text, like in Chrome).
+        let inline_start = match gutter.contains(ScrollbarGutter::BOTH_EDGES) {
+            true => SCROLLBAR_GUTTER_SIZE,
+            false => Au::zero(),
+        };
+        LogicalSides {
+            inline_start,
+            inline_end: SCROLLBAR_GUTTER_SIZE,
+            block_start: Au::zero(),
+            block_end: Au::zero(),
+        }
+        .to_physical(self.writing_mode)
+    }
+
+    fn logical_scrollbar_gutter_sums(&self) -> LogicalVec2<Au> {
+        LogicalSides::from_physical(&self.scrollbar_gutter(), self.writing_mode).sum()
     }
 
     fn physical_margin(&self) -> PhysicalSides<LengthPercentageOrAuto<'_>> {
@@ -521,7 +595,9 @@ impl ComputedValuesExt for ComputedValues {
     }
 
     fn is_inline_box(&self, fragment_flags: FragmentFlags) -> bool {
-        (self.get_box().display.is_inline_flow() &&
+        let display = self.get_box().display;
+        // An inline ruby is laid out as an inline box, see `BlockContainerBuilder::handle_ruby`.
+        ((display.is_inline_flow() || display == stylo::Display::Ruby) &&
             !fragment_flags.intersects(
                 FragmentFlags::IS_REPLACED |
                     FragmentFlags::IS_WIDGET |
@@ -655,6 +731,21 @@ impl ComputedValuesExt for ComputedValues {
             return AxesOverflow::default();
         }
 
+        // From <https://drafts.csswg.org/css-contain-2/#containment-paint>:
+        // > The contents of the element including any ink or scrollable overflow must be clipped
+        // > to the overflow clip edge of the paint containment box, taking corner clipping into
+        // > account.
+        if self.get_box().contain.contains(stylo::Contain::PAINT) &&
+            self.has_layout_or_paint_containment(fragment_flags)
+        {
+            if overflow.x == Overflow::Visible {
+                overflow.x = Overflow::Clip;
+            }
+            if overflow.y == Overflow::Visible {
+                overflow.y = Overflow::Clip;
+            }
+        }
+
         overflow
     }
 
@@ -683,7 +774,7 @@ impl ComputedValuesExt for ComputedValues {
         //    used value of the contain property, such as content-visibility:
         //    hidden.
         //
-        // TODO: Support `mask-border-source` and `contain` (`mask-image` is handled below).
+        // TODO: Support `mask-border-source` (`mask-image` is handled below).
         let effects = self.get_effects();
         let overflow = self.effective_overflow(fragment_flags);
         if !matches!(overflow.x, Overflow::Visible | Overflow::Clip) ||
@@ -698,7 +789,9 @@ impl ComputedValuesExt for ComputedValues {
                 .iter()
                 .any(|image| !matches!(image, ComputedImageLayer::None)) ||
             self.get_box().isolation == ComputedIsolation::Isolate ||
-            effects.mix_blend_mode != ComputedMixBlendMode::Normal
+            effects.mix_blend_mode != ComputedMixBlendMode::Normal ||
+            (self.get_box().contain.contains(stylo::Contain::PAINT) &&
+                self.has_layout_or_paint_containment(fragment_flags))
         {
             return ComputedTransformStyle::Flat;
         }
@@ -735,8 +828,38 @@ impl ComputedValuesExt for ComputedValues {
             return true;
         }
 
-        // TODO: We need to handle CSS Contain here.
-        false
+        // From <https://drafts.csswg.org/css-contain-2/#containment-layout> and
+        // <https://drafts.csswg.org/css-contain-2/#containment-paint>:
+        // > The principal box establishes an independent formatting context.
+        self.has_layout_or_paint_containment(fragment_flags)
+    }
+
+    /// Whether layout or paint containment applies to this box. Both make it a stacking
+    /// context, an independent formatting context and a containing block for all positioned
+    /// descendants. From <https://drafts.csswg.org/css-contain-2/#containment-layout>:
+    /// > If the element does not generate a principal box (as is the case with display values
+    /// > of contents or none), or its principal box is an internal table box other than
+    /// > table-cell, or an internal ruby box, or a non-atomic inline-level box, layout
+    /// > containment has no effect.
+    /// Paint containment has the same exceptions.
+    fn has_layout_or_paint_containment(&self, fragment_flags: FragmentFlags) -> bool {
+        if !self
+            .get_box()
+            .contain
+            .intersects(stylo::Contain::LAYOUT | stylo::Contain::PAINT)
+        {
+            return false;
+        }
+        let is_internal_table_box = matches!(
+            self.get_box().display.inside(),
+            stylo::DisplayInside::TableRowGroup |
+                stylo::DisplayInside::TableColumn |
+                stylo::DisplayInside::TableColumnGroup |
+                stylo::DisplayInside::TableHeaderGroup |
+                stylo::DisplayInside::TableFooterGroup |
+                stylo::DisplayInside::TableRow
+        );
+        !is_internal_table_box && !self.is_inline_box(fragment_flags)
     }
 
     /// Whether or not the `overflow` value of this style establishes a scroll container.
@@ -745,8 +868,23 @@ impl ComputedValuesExt for ComputedValues {
             .establishes_scroll_container()
     }
 
+    /// Whether the element is in the top layer, which the user agent stylesheet marks with
+    /// `overlay: auto` (or the internal `-servo-top-layer` property for the fullscreen element).
+    /// A transition of `overlay` keeps an element in the top layer while it animates out.
+    /// <https://drafts.csswg.org/css-position-4/#overlay>
+    fn in_top_layer(&self) -> bool {
+        self.get_box().clone__servo_top_layer() == ServoTopLayer::Top ||
+            self.get_box().clone_overlay() == Overlay::Auto
+    }
+
     /// Returns true if this fragment establishes a new stacking context and false otherwise.
     fn establishes_stacking_context(&self, fragment_flags: FragmentFlags) -> bool {
+        // From <https://drafts.csswg.org/css-position-4/#top-styling>:
+        // > An element in the top layer ... always forms a stacking context.
+        if self.in_top_layer() {
+            return true;
+        }
+
         // From <https://www.w3.org/TR/css-will-change/#valdef-will-change-custom-ident>:
         // > If any non-initial value of a property would create a stacking context on the element,
         // > specifying that property in will-change must create a stacking context on the element.
@@ -867,8 +1005,9 @@ impl ComputedValuesExt for ComputedValues {
             return true;
         }
 
-        // TODO: We need to handle CSS Contain here.
-        false
+        // From <https://drafts.csswg.org/css-contain-2/#containment-layout>:
+        // > The principal box establishes a stacking context.
+        self.has_layout_or_paint_containment(fragment_flags)
     }
 
     /// Returns true if this style establishes a containing block for absolute
@@ -950,8 +1089,10 @@ impl ComputedValuesExt for ComputedValues {
             return true;
         }
 
-        // TODO: We need to handle CSS Contain here.
-        false
+        // From <https://drafts.csswg.org/css-contain-2/#containment-layout>:
+        // > The principal box establishes an absolute positioning containing block and a fixed
+        // > positioning containing block.
+        self.has_layout_or_paint_containment(fragment_flags)
     }
 
     /// Resolve the preferred aspect ratio according to the given natural aspect
@@ -1297,12 +1438,16 @@ impl LayoutStyle<'_> {
                     resolve(&border.border_right_width, border.border_right_style),
                     resolve(&border.border_bottom_width, border.border_bottom_style),
                     resolve(&border.border_left_width, border.border_left_style),
-                )
+                ) + self.style().scrollbar_gutter()
             },
         };
         LogicalSides::from_physical(&border_width, containing_block_writing_mode)
     }
 }
+
+/// Chrome on Linux draws classic scrollbars this wide. Servo draws no scrollbars, but pages
+/// are tuned against Chrome's layout, so `scrollbar-gutter: stable` reserves the same space.
+const SCROLLBAR_GUTTER_SIZE: Au = Au(15 * app_units::AU_PER_PX);
 
 impl From<stylo::Display> for Display {
     fn from(packed: stylo::Display) -> Self {
@@ -1312,6 +1457,9 @@ impl From<stylo::Display> for Display {
         let outside = match outside {
             stylo::DisplayOutside::Block => DisplayOutside::Block,
             stylo::DisplayOutside::Inline => DisplayOutside::Inline,
+            // The style adjuster leaves `display: ruby-text` only on the children of rubies,
+            // which lay them out themselves, see `BlockContainerBuilder::push_ruby_columns`.
+            stylo::DisplayOutside::InternalRuby => DisplayOutside::Inline,
             stylo::DisplayOutside::TableCaption => {
                 return Display::GeneratingBox(DisplayGeneratingBox::LayoutInternal(
                     DisplayLayoutInternal::TableCaption,
@@ -1354,6 +1502,10 @@ impl From<stylo::Display> for Display {
             stylo::DisplayInside::Flex => DisplayInside::Flex,
             stylo::DisplayInside::Grid => DisplayInside::Grid,
             stylo::DisplayInside::Table => DisplayInside::Table,
+            // The block container builder recognizes a ruby from its stylo display.
+            stylo::DisplayInside::Ruby | stylo::DisplayInside::RubyText => DisplayInside::Flow {
+                is_list_item: false,
+            },
 
             // These should not be values of DisplayInside, but oh well
             stylo::DisplayInside::None => return Display::None,

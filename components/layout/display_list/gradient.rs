@@ -4,12 +4,13 @@
 
 use app_units::Au;
 use euclid::Size2D;
-use style::Zero;
 use style::color::mix::{ColorInterpolationMethod, ColorMixItem, HueInterpolationMethod, mix_many};
 use style::color::{AbsoluteColor, ColorSpace};
 use style::properties::ComputedValues;
 use style::values::computed::image::{EndingShape, Gradient, LineDirection};
-use style::values::computed::{Angle, AngleOrPercentage, Color, LengthPercentage, Position};
+use style::values::computed::{
+    Angle, AngleOrPercentage, Color, Length, LengthPercentage, Position,
+};
 use style::values::generics::color::ColorMixFlags;
 use style::values::generics::image::{
     Circle, ColorStop, Ellipse, GradientFlags, GradientItem, ShapeExtent,
@@ -177,8 +178,7 @@ pub(super) fn build_linear(
         wr::ExtendMode::Clamp
     };
 
-    let mut color_stops =
-        gradient_items_to_color_stops(style, items, Au::from_f32_px(gradient_line_length));
+    let mut color_stops = gradient_items_to_color_stops(style, items, gradient_line_length);
     let stops = create_webrender_stops(&mut color_stops, color_interpolation_method, extend_mode);
 
     WebRenderGradient::Linear(builder.wr().create_gradient(
@@ -283,8 +283,7 @@ pub(super) fn build_radial(
         wr::ExtendMode::Clamp
     };
 
-    let mut color_stops =
-        gradient_items_to_color_stops(style, items, Au::from_f32_px(gradient_line_length));
+    let mut color_stops = gradient_items_to_color_stops(style, items, gradient_line_length);
     let stops = create_webrender_stops(&mut color_stops, color_interpolation_method, extend_mode);
 
     WebRenderGradient::Radial(builder.wr().create_radial_gradient(
@@ -375,7 +374,7 @@ fn conic_gradient_items_to_color_stops(
 fn gradient_items_to_color_stops(
     style: &ComputedValues,
     items: &[GradientItem<Color, LengthPercentage>],
-    gradient_line_length: Au,
+    gradient_line_length: f32,
 ) -> Vec<ColorStop<AbsoluteColor, f32>> {
     // Remove color transititon hints, which are not supported yet.
     // https://drafts.csswg.org/css-images-4/#color-transition-hint
@@ -397,13 +396,14 @@ fn gradient_items_to_color_stops(
                 }),
                 GradientItem::ComplexColorStop { color, position } => Some(ColorStop {
                     color: style.resolve_color(color),
-                    position: Some(if gradient_line_length.is_zero() {
+                    // Stop positions are fractions of the gradient line, far finer than app
+                    // units can represent: rounding them to app units shifts hard stops by
+                    // whole pixels, and repeating gradients multiply that error per period.
+                    position: Some(if gradient_line_length == 0. {
                         0.
                     } else {
-                        position
-                            .to_used_value(gradient_line_length)
-                            .scale_by(1. / gradient_line_length.to_f32_px())
-                            .to_f32_px()
+                        position.resolve(Length::new(gradient_line_length)).px() /
+                            gradient_line_length
                     }),
                 }),
                 // FIXME: approximate like in:

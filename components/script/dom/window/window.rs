@@ -25,7 +25,7 @@ use dom_struct::dom_struct;
 use embedder_traits::user_contents::UserScript;
 use embedder_traits::{
     AlertResponse, ConfirmResponse, EmbedderMsg, JavaScriptEvaluationError, PromptResponse,
-    ScriptToEmbedderChan, SimpleDialogRequest, Theme, UntrustedNodeAddress, ViewportDetails,
+    ScreenMetrics, ScriptToEmbedderChan, SimpleDialogRequest, Theme, UntrustedNodeAddress, ViewportDetails,
     WebDriverJSResult, WebDriverLoadStatus,
 };
 use euclid::{Point2D, Rect, Scale, Size2D, Vector2D};
@@ -86,6 +86,8 @@ use servo_geometry::DeviceIndependentIntRect;
 use servo_url::{ImmutableOrigin, MutableOrigin, ServoUrl};
 use storage_traits::StorageThreads;
 use storage_traits::webstorage_thread::WebStorageType;
+use style::bezier::Bezier;
+use style::computed_values::scroll_behavior::T as ComputedScrollBehavior;
 use style::error_reporting::{ContextualParseError, ParseErrorReporter};
 use style::properties::PropertyId;
 use style::properties::style_structs::Font;
@@ -96,8 +98,9 @@ use style_traits::CSSPixel;
 use stylo_atoms::Atom;
 use time::Duration as TimeDuration;
 use webrender_api::ExternalScrollId;
-use webrender_api::units::{DeviceIntSize, DevicePixel, LayoutPixel, LayoutPoint};
+use webrender_api::units::{DeviceIntSize, DevicePixel, LayoutPixel, LayoutPoint, LayoutVector2D};
 
+use crate::dom::barprop::BarProp;
 use crate::dom::bindings::codegen::Bindings::DocumentBinding::{
     DocumentMethods, DocumentReadyState, NamedPropertyValue,
 };
@@ -111,6 +114,7 @@ use crate::dom::bindings::codegen::Bindings::ImageBitmapBinding::{
 };
 use crate::dom::bindings::codegen::Bindings::MediaQueryListBinding::MediaQueryList_Binding::MediaQueryListMethods;
 use crate::dom::bindings::codegen::Bindings::MessagePortBinding::StructuredSerializeOptions;
+use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use crate::dom::bindings::codegen::Bindings::ReportingObserverBinding::Report;
 use crate::dom::bindings::codegen::Bindings::RequestBinding::{RequestInfo, RequestInit};
 use crate::dom::bindings::codegen::Bindings::VoidFunctionBinding::VoidFunction;
@@ -149,7 +153,7 @@ use crate::dom::css::cssstyledeclaration::{
 use crate::dom::customelementregistry::CustomElementRegistry;
 use crate::dom::document::focus::FocusableArea;
 use crate::dom::document::{
-    AnimationFrameCallback, Document, SameOriginDescendantNavigablesIterator,
+    AnimationFrameCallback, Document, RenderingUpdateReason, SameOriginDescendantNavigablesIterator,
 };
 use crate::dom::element::Element;
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
@@ -182,7 +186,7 @@ use crate::dom::storage::Storage;
 #[cfg(feature = "bluetooth")]
 use crate::dom::testrunner::TestRunner;
 use crate::dom::trustedtypes::trustedtypepolicyfactory::TrustedTypePolicyFactory;
-use crate::dom::types::{ImageBitmap, MouseEvent, SVGSVGElement, UIEvent};
+use crate::dom::types::{HTMLBRElement, ImageBitmap, MouseEvent, SVGSVGElement, Text, UIEvent};
 use crate::dom::useractivation::UserActivationTimestamp;
 use crate::dom::visualviewport::{VisualViewport, VisualViewportChanges};
 #[cfg(feature = "webgpu")]
@@ -273,6 +277,60 @@ struct PendingLayoutImageAncillaryData {
     destination: LayoutImageDestination,
 }
 
+/// A caret position in editable text, as laid out.
+pub(crate) struct LaidOutCaretStop {
+    pub(crate) node: DomRoot<Node>,
+    pub(crate) offset: u32,
+    /// The horizontal position of the caret in the viewport.
+    pub(crate) x: Au,
+    /// Whether a selection made with the mouse can end here, as `user-select` decides.
+    pub(crate) selectable: bool,
+}
+
+/// The caret positions of a line box, left to right, and its vertical extent in the viewport.
+pub(crate) struct LaidOutCaretLine {
+    pub(crate) top: Au,
+    pub(crate) bottom: Au,
+    pub(crate) stops: Vec<LaidOutCaretStop>,
+}
+
+/// A scroll of one scrolling box that animates from `from` to `to` over `duration`.
+/// <https://drafts.csswg.org/cssom-view/#concept-smooth-scroll>
+#[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
+#[derive(JSTraceable, MallocSizeOf)]
+struct SmoothScroll {
+    #[no_trace]
+    scroll_id: ExternalScrollId,
+    element: Option<Dom<Element>>,
+    #[no_trace]
+    from: Vector2D<f32, LayoutPixel>,
+    #[no_trace]
+    to: Vector2D<f32, LayoutPixel>,
+    start_time: Instant,
+    duration: Duration,
+}
+
+impl SmoothScroll {
+    /// Chromium's delta-based duration for programmatic smooth scrolls: one frame at 60Hz per
+    /// square root of the distance in pixels, so long scrolls are faster per pixel. The cap
+    /// keeps scrolls across very long documents from dragging on.
+    fn duration_for_distance(distance: f32) -> Duration {
+        Duration::from_secs_f32((distance.sqrt() / 60.).min(1.))
+    }
+
+    /// The position for `now`, and whether the scroll has reached its destination. The
+    /// progress follows `ease-in-out`, the curve other engines use for programmatic scrolls.
+    fn position_at(&self, now: Instant) -> (Vector2D<f32, LayoutPixel>, bool) {
+        let elapsed = now.saturating_duration_since(self.start_time);
+        if elapsed >= self.duration {
+            return (self.to, true);
+        }
+        let progress = elapsed.as_secs_f64() / self.duration.as_secs_f64();
+        let eased = Bezier::calculate_bezier_output(progress, 1e-6, 0.42, 0., 0.58, 1.) as f32;
+        (self.from.lerp(self.to, eased), false)
+    }
+}
+
 #[dom_struct]
 pub(crate) struct Window {
     globalscope: GlobalScope,
@@ -304,6 +362,13 @@ pub(crate) struct Window {
     #[no_trace]
     navigation_start: Cell<CrossProcessInstant>,
     screen: MutNullableDom<Screen>,
+    /// <https://html.spec.whatwg.org/multipage/#bar-prop-objects>
+    locationbar: MutNullableDom<BarProp>,
+    menubar: MutNullableDom<BarProp>,
+    personalbar: MutNullableDom<BarProp>,
+    scrollbars: MutNullableDom<BarProp>,
+    statusbar: MutNullableDom<BarProp>,
+    toolbar: MutNullableDom<BarProp>,
     session_storage: MutNullableDom<Storage>,
     local_storage: MutNullableDom<Storage>,
     /// <https://cookiestore.spec.whatwg.org/#globals>
@@ -344,6 +409,17 @@ pub(crate) struct Window {
     /// The [`ViewportDetails`] of this [`Window`]'s frame.
     #[no_trace]
     viewport_details: Cell<ViewportDetails>,
+
+    /// What the embedder last reported for `screen.*`, kept until the constellation says the
+    /// screen or window changed. Asking the embedder is a synchronous round trip through the
+    /// embedder's event loop, and pages read these properties in loops.
+    #[no_trace]
+    screen_metrics: Cell<Option<ScreenMetrics>>,
+
+    /// What the embedder last reported as the window rect (`screenX`, `outerWidth`...), cached
+    /// like [`Self::screen_metrics`].
+    #[no_trace]
+    client_window_rect: Cell<Option<DeviceIndependentIntRect>>,
 
     /// A handle for communicating messages to the bluetooth thread.
     #[no_trace]
@@ -412,6 +488,10 @@ pub(crate) struct Window {
     /// trigger a GC, so it waits for a rendering reflow: query reflows run while callers (e.g.
     /// ResizeObserver) hold DOM borrows that tracing would then trip over.
     pending_svg_serialization: DomRefCell<Vec<Dom<SVGSVGElement>>>,
+
+    /// The smooth scrolls of scrolling boxes in this `Window` that are still animating,
+    /// advanced once per rendering update.
+    smooth_scrolls: DomRefCell<Vec<SmoothScroll>>,
 
     /// Directory to store unminified css for this window if unminify-css
     /// opt is enabled.
@@ -487,6 +567,10 @@ pub(crate) struct Window {
     /// <https://html.spec.whatwg.org/multipage/#last-activation-timestamp>
     #[no_trace]
     last_activation_timestamp: Cell<UserActivationTimestamp>,
+
+    /// <https://html.spec.whatwg.org/multipage/#last-history-action-activation-timestamp>
+    #[no_trace]
+    last_history_action_activation_timestamp: Cell<UserActivationTimestamp>,
 
     /// A flag to indicate whether the developer tools has requested
     /// live updates from the window.
@@ -729,7 +813,9 @@ impl Window {
         };
         if matches!(
             response.response,
-            ImageResponse::Loaded(_, _) | ImageResponse::FailedToLoadOrDecode
+            ImageResponse::Loaded(_, _) |
+                ImageResponse::PartiallyDecoded(_) |
+                ImageResponse::FailedToLoadOrDecode
         ) {
             for ancillary_data in nodes.get() {
                 match ancillary_data.destination {
@@ -744,7 +830,7 @@ impl Window {
         }
 
         match response.response {
-            ImageResponse::MetadataLoaded(_) => {},
+            ImageResponse::MetadataLoaded(_) | ImageResponse::PartiallyDecoded(_) => {},
             ImageResponse::Loaded(_, _) | ImageResponse::FailedToLoadOrDecode => {
                 nodes.remove();
             },
@@ -787,7 +873,7 @@ impl Window {
         }
 
         match response.response {
-            ImageResponse::MetadataLoaded(_) => {},
+            ImageResponse::MetadataLoaded(_) | ImageResponse::PartiallyDecoded(_) => {},
             ImageResponse::Loaded(_, _) | ImageResponse::FailedToLoadOrDecode => {
                 callbacks.remove();
             },
@@ -1756,6 +1842,36 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
         self.screen.or_init(|| Screen::new(self, can_gc))
     }
 
+    /// <https://html.spec.whatwg.org/multipage/#dom-window-locationbar>
+    fn Locationbar(&self, can_gc: CanGc) -> DomRoot<BarProp> {
+        self.locationbar.or_init(|| BarProp::new(self, can_gc))
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-window-menubar>
+    fn Menubar(&self, can_gc: CanGc) -> DomRoot<BarProp> {
+        self.menubar.or_init(|| BarProp::new(self, can_gc))
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-window-personalbar>
+    fn Personalbar(&self, can_gc: CanGc) -> DomRoot<BarProp> {
+        self.personalbar.or_init(|| BarProp::new(self, can_gc))
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-window-scrollbars>
+    fn Scrollbars(&self, can_gc: CanGc) -> DomRoot<BarProp> {
+        self.scrollbars.or_init(|| BarProp::new(self, can_gc))
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-window-statusbar>
+    fn Statusbar(&self, can_gc: CanGc) -> DomRoot<BarProp> {
+        self.statusbar.or_init(|| BarProp::new(self, can_gc))
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-window-toolbar>
+    fn Toolbar(&self, can_gc: CanGc) -> DomRoot<BarProp> {
+        self.toolbar.or_init(|| BarProp::new(self, can_gc))
+    }
+
     /// <https://drafts.csswg.org/cssom-view/#dom-window-visualviewport>
     fn GetVisualViewport(&self, can_gc: CanGc) -> Option<DomRoot<VisualViewport>> {
         // > If the associated document is fully active, the visualViewport attribute must return the
@@ -1920,7 +2036,7 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
         // Step 3.1: Parse pseudoElt as a <pseudo-element-selector>, and let type be the result.
         // TODO(#43095): This is quite hacky and it would be better to have a parsing function that
         // is integrated with stylo `PseudoElement` itself. Comparing with stylo, we are now currently
-        // missing `::backdrop`, `::color-swatch`, and `::details-content`.
+        // missing `::color-swatch` and `::details-content`.
         let pseudo = pseudo.map(|mut s| {
             s.make_ascii_lowercase();
             s
@@ -1935,6 +2051,7 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
             Some(ref pseudo) if pseudo == "::selection" => Some(PseudoElement::Selection),
             Some(ref pseudo) if pseudo == "::marker" => Some(PseudoElement::Marker),
             Some(ref pseudo) if pseudo == "::placeholder" => Some(PseudoElement::Placeholder),
+            Some(ref pseudo) if pseudo == "::backdrop" => Some(PseudoElement::Backdrop),
             Some(ref pseudo) if pseudo.starts_with(':') => {
                 // Step 3.2: If type is failure, or is a ::slotted() or ::part()
                 // pseudo-element, let obj be null.
@@ -2015,14 +2132,18 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
         // Step 1.1: Let options be the argument.
         // Step 1.2: Let x be the value of the left dictionary member of options, if
         // present, or the viewport’s current scroll position on the x axis otherwise.
-        let x = options.left.unwrap_or(0.0) as f32;
+        let x = options
+            .left
+            .map_or(self.scroll_offset().x, |left| left as f32);
 
         // Step 1.3: Let y be the value of the top dictionary member of options, if
         // present, or the viewport’s current scroll position on the y axis otherwise.
-        let y = options.top.unwrap_or(0.0) as f32;
+        let y = options
+            .top
+            .map_or(self.scroll_offset().y, |top| top as f32);
 
         // The rest of the specification continues from `Self::scroll`.
-        self.scroll(cx, x, y, options.parent.behavior);
+        self.scroll(cx, x, y, options.parent.behavior, None);
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-window-scroll>
@@ -2030,7 +2151,7 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
         // Step 2: If invoked with two arguments, follow these substeps:
         // Step 2.1 Let options be null converted to a ScrollToOptions dictionary. [WEBIDL]
         // Step 2.2: Let x and y be the arguments, respectively.
-        self.scroll(cx, x as f32, y as f32, ScrollBehavior::Auto);
+        self.scroll(cx, x as f32, y as f32, ScrollBehavior::Auto, None);
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-window-scrollto>
@@ -2069,7 +2190,14 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
         options.top.replace(y + self.ScrollY() as f64);
 
         // Step 5: Act as if the scroll() method was invoked with options as the only argument.
-        self.Scroll(cx, &options)
+        // Unlike `scroll()`, this scroll has a direction, which snapping follows.
+        self.scroll(
+            cx,
+            options.left.unwrap() as f32,
+            options.top.unwrap() as f32,
+            options.parent.behavior,
+            Some(self.scroll_offset()),
+        )
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-window-scrollby>
@@ -2253,6 +2381,12 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
 
     fn IsSecureContext(&self) -> bool {
         self.as_global_scope().is_secure_context()
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-crossoriginisolated>
+    fn CrossOriginIsolated(&self) -> bool {
+        // Cross-origin isolation (COOP + COEP) is not implemented, so no context is isolated.
+        false
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-window-nameditem>
@@ -2453,7 +2587,15 @@ impl Window {
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-window-scroll>
-    pub(crate) fn scroll(&self, cx: &mut JSContext, x: f32, y: f32, behavior: ScrollBehavior) {
+    /// `origin` is where the scroll started if it is directional, as `scrollBy()` is.
+    pub(crate) fn scroll(
+        &self,
+        cx: &mut JSContext,
+        x: f32,
+        y: f32,
+        behavior: ScrollBehavior,
+        origin: Option<LayoutVector2D>,
+    ) {
         // Step 3: Normalize non-finite values for x and y.
         let xfinite = if x.is_finite() { x } else { 0.0 };
         let yfinite = if y.is_finite() { y } else { 0.0 };
@@ -2494,7 +2636,11 @@ impl Window {
         // Step 10: If position is the same as the viewport’s current scroll position, and
         // the viewport does not have an ongoing smooth scroll, abort these steps.
         let scroll_offset = self.scroll_offset();
-        if x == scroll_offset.x && y == scroll_offset.y {
+        let scroll_id = self.pipeline_id().root_scroll_id();
+        if x == scroll_offset.x &&
+            y == scroll_offset.y &&
+            !self.has_ongoing_smooth_scroll(scroll_id)
+        {
             return;
         }
 
@@ -2502,14 +2648,29 @@ impl Window {
         // Step 12: Perform a scroll of the viewport to position, document’s root element
         // as the associated element, if there is one, or null otherwise, and the scroll
         // behavior being the value of the behavior dictionary member of options.
+        let root_element = self.Document().GetDocumentElement();
         self.perform_a_scroll(
             cx,
             x,
             y,
-            self.pipeline_id().root_scroll_id(),
+            scroll_id,
             behavior,
-            None,
+            root_element.as_deref(),
+            origin,
         );
+    }
+
+    pub(crate) fn abort_smooth_scroll(&self, scroll_id: ExternalScrollId) {
+        self.smooth_scrolls
+            .borrow_mut()
+            .retain(|smooth_scroll| smooth_scroll.scroll_id != scroll_id);
+    }
+
+    pub(crate) fn has_ongoing_smooth_scroll(&self, scroll_id: ExternalScrollId) -> bool {
+        self.smooth_scrolls
+            .borrow()
+            .iter()
+            .any(|smooth_scroll| smooth_scroll.scroll_id == scroll_id)
     }
 
     /// <https://drafts.csswg.org/cssom-view/#perform-a-scroll>
@@ -2519,16 +2680,130 @@ impl Window {
         x: f32,
         y: f32,
         scroll_id: ExternalScrollId,
-        _behavior: ScrollBehavior,
+        behavior: ScrollBehavior,
+        element: Option<&Element>,
+        origin: Option<LayoutVector2D>,
+    ) {
+        // Step 1: Abort any ongoing smooth scroll for box.
+        self.abort_smooth_scroll(scroll_id);
+
+        // A programmatic scroll of a snap container ends at a snap position.
+        // <https://drafts.csswg.org/css-scroll-snap-1/#choosing>
+        let (x, y) = match element {
+            Some(element) if element.scroll_snap_type().is_some() => {
+                let scrolling_box = if scroll_id.is_root() {
+                    Some(
+                        self.Document()
+                            .viewport_scrolling_box(ScrollContainerQueryFlags::Inclusive),
+                    )
+                } else {
+                    element.scrolling_box(ScrollContainerQueryFlags::Inclusive)
+                };
+                match scrolling_box {
+                    Some(scrolling_box) => {
+                        let snapped = scrolling_box.snapped_position(Vector2D::new(x, y), origin);
+                        (snapped.x, snapped.y)
+                    },
+                    None => (x, y),
+                }
+            },
+            _ => (x, y),
+        };
+
+        // Step 2: If the user agent honors the scroll-behavior property and one of the
+        // following are true:
+        //  - behavior is "auto" and element is not null and its computed value of the
+        //    scroll-behavior property is smooth
+        //  - behavior is smooth
+        // ...then perform a smooth scroll of box to position. Otherwise, perform an instant
+        // scroll of box to position.
+        let smooth = match behavior {
+            ScrollBehavior::Smooth => true,
+            ScrollBehavior::Auto => element.and_then(Element::style).is_some_and(|style| {
+                style.clone_scroll_behavior() == ComputedScrollBehavior::Smooth
+            }),
+            ScrollBehavior::Instant => false,
+        };
+        if !smooth {
+            self.perform_an_instant_scroll(cx, Vector2D::new(x, y), scroll_id, element);
+            return;
+        }
+
+        // The scroll tree clamps every step, but the duration and easing are computed from the
+        // distance actually travelled, so clamp the destination to the scroll range first.
+        let to = match element {
+            Some(element) if !scroll_id.is_root() => {
+                let scrolling_area = self
+                    .scrolling_area_query(Some(element.upcast()))
+                    .size
+                    .to_f32();
+                let client_size = element.client_rect().size.to_f32();
+                Vector2D::new(
+                    x.clamp(0., (scrolling_area.width - client_size.width).max(0.)),
+                    y.clamp(0., (scrolling_area.height - client_size.height).max(0.)),
+                )
+            },
+            _ => Vector2D::new(x, y),
+        };
+        let from = self.scroll_offset_query_with_external_scroll_id(scroll_id);
+        if from == to {
+            return;
+        }
+        self.smooth_scrolls.borrow_mut().push(SmoothScroll {
+            scroll_id,
+            element: element.map(Dom::from_ref),
+            from,
+            to,
+            start_time: Instant::now(),
+            duration: SmoothScroll::duration_for_distance((to - from).length()),
+        });
+        self.Document()
+            .add_rendering_update_reason(RenderingUpdateReason::SmoothScrollInProgress);
+    }
+
+    /// Moves every ongoing smooth scroll to its position for this frame. Called during
+    /// *update the rendering*, before the scroll steps, so the scroll events of this frame's
+    /// step are dispatched in the same rendering update.
+    pub(crate) fn advance_smooth_scrolls(&self, cx: &mut JSContext) {
+        if self.smooth_scrolls.borrow().is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let steps: Vec<_> = self
+            .smooth_scrolls
+            .borrow()
+            .iter()
+            .map(|smooth_scroll| {
+                let (position, _) = smooth_scroll.position_at(now);
+                (
+                    smooth_scroll.scroll_id,
+                    smooth_scroll.element.as_deref().map(DomRoot::from_ref),
+                    position,
+                )
+            })
+            .collect();
+        self.smooth_scrolls
+            .borrow_mut()
+            .retain(|smooth_scroll| !smooth_scroll.position_at(now).1);
+        for (scroll_id, element, position) in steps {
+            self.perform_an_instant_scroll(cx, position, scroll_id, element.as_deref());
+        }
+        if !self.smooth_scrolls.borrow().is_empty() {
+            self.Document()
+                .add_rendering_update_reason(RenderingUpdateReason::SmoothScrollInProgress);
+        }
+    }
+
+    /// <https://drafts.csswg.org/cssom-view/#concept-instant-scroll>
+    fn perform_an_instant_scroll(
+        &self,
+        cx: &mut JSContext,
+        position: Vector2D<f32, LayoutPixel>,
+        scroll_id: ExternalScrollId,
         element: Option<&Element>,
     ) {
-        // TODO Step 1
-        // TODO(mrobinson, #18709): Add smooth scrolling support to WebRender so that we can
-        // properly process ScrollBehavior here.
-        let (reflow_phases_run, _) = self.reflow(
-            cx,
-            ReflowGoal::UpdateScrollNode(scroll_id, Vector2D::new(x, y)),
-        );
+        let (reflow_phases_run, _) =
+            self.reflow(cx, ReflowGoal::UpdateScrollNode(scroll_id, position));
         if reflow_phases_run.needs_frame() {
             self.paint_api()
                 .generate_frame(vec![self.webview_id().into()]);
@@ -2551,11 +2826,35 @@ impl Window {
     }
 
     fn client_window(&self) -> DeviceIndependentIntRect {
+        if let Some(rect) = self.client_window_rect.get() {
+            return rect;
+        }
         let (sender, receiver) = generic_channel::channel().expect("Failed to create IPC channel!");
 
         self.send_to_embedder(EmbedderMsg::GetWindowRect(self.webview_id(), sender));
 
-        receiver.recv().unwrap_or_default()
+        let rect = receiver.recv().unwrap_or_default();
+        self.client_window_rect.set(Some(rect));
+        rect
+    }
+
+    /// Retrieves [`ScreenMetrics`] from the embedder, or the cached copy.
+    pub(crate) fn screen_metrics(&self) -> ScreenMetrics {
+        if let Some(metrics) = self.screen_metrics.get() {
+            return metrics;
+        }
+        let (sender, receiver) = generic_channel::channel().expect("Failed to create IPC channel!");
+
+        self.send_to_embedder(EmbedderMsg::GetScreenMetrics(self.webview_id(), sender));
+
+        let metrics = receiver.recv().unwrap_or_default();
+        self.screen_metrics.set(Some(metrics));
+        metrics
+    }
+
+    pub(crate) fn invalidate_screen_geometry(&self) {
+        self.screen_metrics.set(None);
+        self.client_window_rect.set(None);
     }
 
     /// Prepares to tick animations and then does a reflow which also advances the
@@ -2609,6 +2908,7 @@ impl Window {
 
         let restyle_reason = document.restyle_reason();
         document.clear_restyle_reasons();
+        let mut dirty_root_element = None;
         let restyle = if restyle_reason.needs_restyle() {
             debug!("Invalidating layout cache due to reflow condition {restyle_reason:?}",);
             // Invalidate any existing cached layout values.
@@ -2618,10 +2918,12 @@ impl Window {
 
             let stylesheets_changed = document.flush_stylesheets_for_reflow();
             let pending_restyles = document.drain_pending_restyles();
-            let dirty_root = document
+            dirty_root_element = document
                 .take_dirty_root()
                 .filter(|_| !stylesheets_changed)
-                .or_else(|| document.GetDocumentElement())
+                .or_else(|| document.GetDocumentElement());
+            let dirty_root = dirty_root_element
+                .as_ref()
                 .map(|root| root.upcast::<Node>().to_trusted_node_address());
 
             Some(ReflowRequestRestyle {
@@ -2655,15 +2957,28 @@ impl Window {
             animations: document.animations().sets.clone(),
             animating_images: document.image_animation_manager().animating_images(),
             highlighted_dom_node: document.highlighted_dom_node().map(|node| node.to_opaque()),
+            document_selection: document.selection_for_layout(),
             document_context,
             rooted_nodes_for_accessibility_integrity_check,
         };
 
-        let Some(reflow_result) = self.layout.borrow_mut().reflow(reflow) else {
+        let reflow_result = self.layout.borrow_mut().reflow(reflow);
+        document.load_font_faces_requested_by_font_matching(cx);
+        let Some(reflow_result) = reflow_result else {
             return Default::default();
         };
 
         debug!("script: layout complete");
+        if reflow_result
+            .reflow_phases_run
+            .contains(ReflowPhasesRun::DeferredLayout)
+        {
+            // Layout left the damage of this restyle below the dirty root for the next reflow.
+            if let Some(dirty_root) = dirty_root_element {
+                document.note_node_with_dirty_descendants(dirty_root.upcast());
+            }
+            document.add_restyle_reason(RestyleReason::LayoutDeferred);
+        }
         if let Some(marker) = marker {
             self.emit_timeline_marker(marker.end());
         }
@@ -2929,9 +3244,7 @@ impl Window {
         area: BoxAreaType,
         exclude_transform_and_inline: bool,
     ) -> Option<Rect<Au, CSSPixel>> {
-        let layout = self.layout.borrow();
-        layout.ensure_stacking_context_tree(self.viewport_details.get());
-        layout.query_box_area(
+        self.layout.borrow().query_box_area(
             node.to_trusted_node_address(),
             area,
             exclude_transform_and_inline,
@@ -2953,6 +3266,17 @@ impl Window {
         self.layout
             .borrow()
             .query_box_areas(node.to_trusted_node_address(), area)
+    }
+
+    pub(crate) fn text_range_rects_query(
+        &self,
+        node: &Node,
+        utf16_range: std::ops::Range<usize>,
+    ) -> CSSPixelRectVec {
+        self.layout_reflow(QueryMsg::BoxAreas);
+        self.layout
+            .borrow()
+            .query_text_range_rects(node.to_trusted_node_address(), utf16_range)
     }
 
     pub(crate) fn client_rect_query(&self, node: &Node) -> Rect<i32, CSSPixel> {
@@ -3011,6 +3335,16 @@ impl Window {
             .unwrap_or_default()
     }
 
+    pub(crate) fn scroll_id_for_element(&self, element: &Element) -> ExternalScrollId {
+        ExternalScrollId(
+            combine_id_with_fragment_type(
+                element.upcast::<Node>().to_opaque().id(),
+                FragmentType::FragmentBody,
+            ),
+            self.pipeline_id().into(),
+        )
+    }
+
     /// <https://drafts.csswg.org/cssom-view/#scroll-an-element>
     // TODO(stevennovaryo): Need to update the scroll API to follow the spec since it is quite outdated.
     pub(crate) fn scroll_an_element(
@@ -3020,19 +3354,14 @@ impl Window {
         x: f32,
         y: f32,
         behavior: ScrollBehavior,
+        origin: Option<LayoutVector2D>,
     ) {
-        let scroll_id = ExternalScrollId(
-            combine_id_with_fragment_type(
-                element.upcast::<Node>().to_opaque().id(),
-                FragmentType::FragmentBody,
-            ),
-            self.pipeline_id().into(),
-        );
+        let scroll_id = self.scroll_id_for_element(element);
 
         // Step 6.
         // > Perform a scroll of box to position, element as the associated element and behavior as
         // > the scroll behavior.
-        self.perform_a_scroll(cx, x, y, scroll_id, behavior, Some(element));
+        self.perform_a_scroll(cx, x, y, scroll_id, behavior, Some(element), origin);
     }
 
     pub(crate) fn resolved_style_query(
@@ -3130,11 +3459,80 @@ impl Window {
         // the space key. There's no nice way to catch this so let's use this for
         // now.
         let point_in_viewport = mouse_event.point_in_viewport()?.map(Au::from_f32_px);
+        self.text_index_query_on_node(node, point_in_viewport)
+    }
 
+    /// The index of the grapheme of the text control `node` closest to the given point.
+    pub(crate) fn text_index_query_on_node(
+        &self,
+        node: &Node,
+        point_in_viewport: Point2D<Au, CSSPixel>,
+    ) -> Option<usize> {
         self.layout_reflow(QueryMsg::TextIndexQuery);
         self.layout
             .borrow()
             .query_text_index(node.to_trusted_node_address(), point_in_viewport)
+    }
+
+    /// The caret positions in the text of `node`, by line. Positions after a line break are
+    /// left out: they are the start of the next line.
+    pub(crate) fn caret_stops_query(&self, node: &Node) -> Vec<LaidOutCaretLine> {
+        self.layout_reflow(QueryMsg::CaretStopsQuery);
+        let lines = self
+            .layout
+            .borrow()
+            .query_caret_stops(node.to_trusted_node_address());
+        lines
+            .into_iter()
+            .filter_map(|line| {
+                let mut stops: Vec<LaidOutCaretStop> = Vec::new();
+                for stop in line.stops {
+                    let node = unsafe { from_untrusted_node_address(stop.node) };
+                    // The text of text controls is in their user agent shadow trees, which
+                    // positions in the document never enter.
+                    if node.is_in_ua_widget() {
+                        continue;
+                    }
+                    let (node, offset) = if node.is::<HTMLBRElement>() {
+                        if stop.offset == 1 {
+                            continue;
+                        }
+                        let parent = node.GetParentNode().expect("Laid out nodes have a parent");
+                        (parent, node.index())
+                    } else {
+                        let follows_line_feed = node.downcast::<Text>().is_some_and(|text| {
+                            stop.offset > 0 &&
+                                text.data().encode_utf16().nth(stop.offset as usize - 1) ==
+                                    Some('\n' as u16)
+                        });
+                        if follows_line_feed {
+                            continue;
+                        }
+                        (node, stop.offset)
+                    };
+                    // Positions at the same place, such as the end of one text node and the start
+                    // of the next, or inside a cluster of zero-width glyphs, are one stop, which
+                    // is selectable if the text on either side is.
+                    if let Some(last) = stops.last_mut() &&
+                        last.x == stop.x
+                    {
+                        last.selectable |= stop.selectable;
+                        continue;
+                    }
+                    stops.push(LaidOutCaretStop {
+                        node,
+                        offset,
+                        x: stop.x,
+                        selectable: stop.selectable,
+                    });
+                }
+                (!stops.is_empty()).then_some(LaidOutCaretLine {
+                    top: line.top,
+                    bottom: line.bottom,
+                    stops,
+                })
+            })
+            .collect()
     }
 
     pub(crate) fn elements_from_point_query(
@@ -3664,8 +4062,12 @@ impl Window {
     /// otherwise make sure a rendering update follows to do it.
     fn serialize_pending_svgs(&self, cx: &mut JSContext, updates_the_rendering: bool) {
         if !updates_the_rendering {
-            for svg in self.pending_svg_serialization.borrow().iter() {
-                svg.upcast::<Node>().dirty(NodeDamage::Other);
+            // Ask for a rendering update without dirtying the `<svg>`s: dirty nodes make every
+            // later geometry query restyle and lay out the whole page again, which turned pages
+            // that read layout in loops (linear.app) into seconds of back-to-back reflows.
+            if !self.pending_svg_serialization.borrow().is_empty() {
+                self.Document()
+                    .add_rendering_update_reason(RenderingUpdateReason::PendingSvgSerialization);
             }
             return;
         }
@@ -3697,6 +4099,40 @@ impl Window {
             UserActivationTimestamp::TimeStamp(current_time) <
                 self.last_activation_timestamp.get() +
                     pref!(dom_transient_activation_duration_ms)
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#history-action-activation>
+    pub(crate) fn has_history_action_activation(&self) -> bool {
+        // > When the last history-action activation timestamp of W is not equal to the last
+        // > activation timestamp of W, then W is said to have history-action activation.
+        self.last_history_action_activation_timestamp.get() != self.last_activation_timestamp.get()
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#consume-history-action-user-activation>
+    pub(crate) fn consume_history_action_user_activation(&self) {
+        // > 1. If W's navigable is null, then return.
+        if self.undiscarded_window_proxy().is_none() {
+            return;
+        }
+        // > 2. Let top be W's navigable's top-level traversable.
+        // TODO: This wouldn't work if top level document is in another ScriptThread.
+        let Some(top_level_document) = self.top_level_document_if_local() else {
+            return;
+        };
+        // > 3. Let navigables be the inclusive descendant navigables of top's active document.
+        // > 4. Let windows be the list of Window objects constructed by taking the active window
+        // >    of each item in navigables.
+        // > 5. For each window in windows, set window's last history-action activation timestamp
+        // >    to window's last activation timestamp.
+        let consume = |window: &Window| {
+            window
+                .last_history_action_activation_timestamp
+                .set(window.last_activation_timestamp.get());
+        };
+        consume(top_level_document.window());
+        for document in SameOriginDescendantNavigablesIterator::new(top_level_document) {
+            consume(document.window());
+        }
     }
 
     pub(crate) fn consume_last_activation_timestamp(&self) {
@@ -3808,6 +4244,12 @@ impl Window {
             performance: Default::default(),
             navigation_start: Cell::new(navigation_start),
             screen: Default::default(),
+            locationbar: Default::default(),
+            menubar: Default::default(),
+            personalbar: Default::default(),
+            scrollbars: Default::default(),
+            statusbar: Default::default(),
+            toolbar: Default::default(),
             session_storage: Default::default(),
             local_storage: Default::default(),
             cookie_store: Default::default(),
@@ -3821,6 +4263,8 @@ impl Window {
             bluetooth_extra_permission_data: BluetoothExtraPermissionData::new(),
             unhandled_resize_event: Default::default(),
             viewport_details: Cell::new(viewport_details),
+            screen_metrics: Default::default(),
+            client_window_rect: Default::default(),
             layout_blocker: Cell::new(LayoutBlocker::WaitingForParse),
             current_state: Cell::new(WindowState::Alive),
             devtools_marker_sender: Default::default(),
@@ -3838,6 +4282,7 @@ impl Window {
             pending_layout_images: Default::default(),
             pending_images_for_rasterization: Default::default(),
             pending_svg_serialization: Default::default(),
+            smooth_scrolls: Default::default(),
             unminified_css_dir: DomRefCell::new(if unminify_css {
                 Some(unminified_path("unminified-css"))
             } else {
@@ -3865,6 +4310,9 @@ impl Window {
             has_changed_visual_viewport_dimension: Default::default(),
             pending_media_query_evaluation: Default::default(),
             last_activation_timestamp: Cell::new(UserActivationTimestamp::PositiveInfinity),
+            last_history_action_activation_timestamp: Cell::new(
+                UserActivationTimestamp::PositiveInfinity,
+            ),
             devtools_wants_updates: Default::default(),
         });
 

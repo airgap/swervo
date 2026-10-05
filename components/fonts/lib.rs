@@ -8,6 +8,7 @@ mod font;
 mod font_context;
 mod font_store;
 mod glyph;
+mod han_kerning;
 #[expect(unsafe_code)]
 pub mod platform; // Public because integration tests need this
 mod shapers;
@@ -22,7 +23,7 @@ pub use font::{
 };
 pub use font_context::{
     CspViolationHandler, FontContext, FontContextWebFontMethods, NetworkTimingHandler,
-    WebFontDocumentContext,
+    UnloadedFontFaceId, WebFontDocumentContext,
 };
 pub use font_store::FontTemplates;
 pub use fonts_traits::*;

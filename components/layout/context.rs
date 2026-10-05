@@ -28,6 +28,9 @@ use style::values::computed::image::{Gradient, Image};
 use style_traits::DevicePixel;
 use webrender_api::units::{DeviceIntSize, DeviceSize};
 
+use crate::cell::WeakRefCell;
+use crate::dom::LayoutBox;
+
 pub(crate) type CachedImageOrError = Result<CachedImage, ResolveImageError>;
 
 pub(crate) struct LayoutContext<'a> {
@@ -60,6 +63,11 @@ pub(crate) struct LayoutContext<'a> {
 
     /// The device dimensions on which this layout is running, in device pixels.
     pub device_size: Size2D<f32, DevicePixel>,
+
+    /// Elements that styling gave a `container-type` during this layout, with the slots that
+    /// hold their boxes. Layout keeps these to measure containers without walking the
+    /// fragment tree, see `LayoutThread::container_slots`.
+    pub styled_containers: Mutex<Vec<(OpaqueNode, WeakRefCell<Option<LayoutBox>>)>>,
 }
 
 impl LayoutContext<'_> {
@@ -234,8 +242,22 @@ impl ImageResolver {
                     resolved_images_cache.insert(url, Ok(image.clone()));
                     Ok(image)
                 },
-                ImageOrMetadataAvailable::MetadataAvailable(..) => {
-                    Result::Err(ResolveImageError::OnlyMetadata)
+                ImageOrMetadataAvailable::MetadataAvailable(_, id) => {
+                    let Some(image) = self.image_cache.get_partially_decoded_image(id) else {
+                        return Result::Err(ResolveImageError::OnlyMetadata);
+                    };
+                    // Paint the part decoded so far, but keep it out of `resolved_images_cache`
+                    // and ask to be notified, so the node is laid out again when the image
+                    // completes.
+                    self.pending_images.lock().push(PendingImage {
+                        state: PendingImageState::PendingResponse,
+                        node: node.into(),
+                        id,
+                        origin: self.origin.clone(),
+                        destination,
+                        is_internal_request,
+                    });
+                    Ok(image)
                 },
             },
             LayoutImageCacheResult::Pending => Result::Err(ResolveImageError::ImagePending),

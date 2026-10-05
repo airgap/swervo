@@ -6,13 +6,13 @@ use std::collections::{HashMap, HashSet};
 use std::default::Default;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use app_units::Au;
 use content_security_policy::Violation;
 use fonts_traits::{
-    CSSFontFaceDescriptors, FontDescriptor, FontIdentifier, FontTemplate, FontTemplateRef,
-    FontTemplateRefMethods, StylesheetWebFontLoadFinishedCallback,
+    CSSFontFaceDescriptors, FontDescriptor, FontIdentifier, FontTemplate, FontTemplateDescriptor,
+    FontTemplateRef, FontTemplateRefMethods, StylesheetWebFontLoadFinishedCallback,
 };
 use log::{debug, trace};
 use malloc_size_of::MallocSizeOf;
@@ -50,7 +50,7 @@ use style::values::computed::font::{
 };
 use url::Url;
 use uuid::Uuid;
-use webrender_api::{FontInstanceFlags, FontInstanceKey, FontKey, FontVariation};
+use webrender_api::{FontInstanceKey, FontInstanceOptions, FontKey, FontVariation};
 
 use crate::font::{Font, FontFamilyDescriptor, FontGroup, FontRef, FontSearchScope};
 use crate::font_store::{CrossThreadFontStore, FontStore};
@@ -64,7 +64,7 @@ pub(crate) struct FontParameters {
     pub(crate) font_key: FontKey,
     pub(crate) pt_size: Au,
     pub(crate) variations: Vec<FontVariation>,
-    pub(crate) flags: FontInstanceFlags,
+    pub(crate) options: FontInstanceOptions,
 }
 
 pub type FontGroupRef = Arc<FontGroup>;
@@ -112,6 +112,26 @@ pub struct FontContext {
     /// Maps from a URL to all the `@font-face` rules that are currently waiting for the load to
     /// finish.
     currently_downloading_fonts: Mutex<HashMap<ServoUrl, Vec<WebFontDownloadState>>>,
+
+    /// `FontFace`s in a document's `FontFaceSet` that script has not loaded. Font faces in the
+    /// document's font source take part in font matching, and are only fetched once matching
+    /// selects them: <https://drafts.csswg.org/css-font-loading/#font-face-set-css> and
+    /// <https://drafts.csswg.org/css-fonts/#font-face-loading>.
+    unloaded_script_faces: RwLock<HashMap<LowercaseFontFamilyName, Vec<UnloadedFontFace>>>,
+
+    /// The unloaded script faces that font matching selected and that script has not started
+    /// loading yet.
+    unloaded_script_face_load_requests: Mutex<HashSet<UnloadedFontFaceId>>,
+}
+
+/// Identifies a `FontFace` registered with [`FontContext::add_unloaded_script_face`].
+#[derive(Clone, Copy, Debug, Eq, Hash, MallocSizeOf, PartialEq)]
+pub struct UnloadedFontFaceId(u64);
+
+#[derive(Clone, Debug, MallocSizeOf)]
+pub(crate) struct UnloadedFontFace {
+    pub(crate) id: UnloadedFontFaceId,
+    pub(crate) descriptor: FontTemplateDescriptor,
 }
 
 /// A callback that will be invoked on the Fetch thread if a web font download
@@ -169,6 +189,8 @@ impl FontContext {
             have_removed_web_fonts: AtomicBool::new(false),
             font_data: RwLock::default(),
             currently_downloading_fonts: Default::default(),
+            unloaded_script_faces: Default::default(),
+            unloaded_script_face_load_requests: Default::default(),
         }
     }
 
@@ -316,6 +338,97 @@ impl FontContext {
             .map(|templates| templates.find_for_descriptor(Some(descriptor_to_match)))
     }
 
+    /// The unloaded script faces of a family that font matching would pick for `descriptor_to_match`.
+    /// They compete with the family's `loaded` templates: a face only matches if no loaded
+    /// template is a closer match.
+    pub(crate) fn matching_unloaded_script_faces(
+        &self,
+        descriptor_to_match: &FontDescriptor,
+        family_descriptor: &FontFamilyDescriptor,
+        loaded: &[FontTemplateRef],
+    ) -> Vec<UnloadedFontFace> {
+        if family_descriptor.scope != FontSearchScope::Any {
+            return Vec::new();
+        }
+        let SingleFontFamily::FamilyName(ref family_name) = family_descriptor.family else {
+            return Vec::new();
+        };
+        let unloaded_script_faces = self.unloaded_script_faces.read();
+        let Some(faces) = unloaded_script_faces.get(&family_name.name.clone().into()) else {
+            return Vec::new();
+        };
+
+        let best_loaded_distance = loaded
+            .iter()
+            .map(|template| template.descriptor_distance(descriptor_to_match))
+            .fold(f32::MAX, f32::min);
+        let best_distance = faces
+            .iter()
+            .map(|face| face.descriptor.distance_from(descriptor_to_match))
+            .fold(f32::MAX, f32::min);
+        if best_distance > best_loaded_distance {
+            return Vec::new();
+        }
+        faces
+            .iter()
+            .filter(|face| face.descriptor.distance_from(descriptor_to_match) == best_distance)
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn request_unloaded_script_face_load(&self, id: UnloadedFontFaceId) {
+        self.unloaded_script_face_load_requests.lock().insert(id);
+    }
+
+    /// Make a `FontFace` that has not been loaded available to font matching. Matching it marks
+    /// it as requested, see [`Self::take_unloaded_script_face_load_request`].
+    pub fn add_unloaded_script_face(
+        &self,
+        descriptors: &CSSFontFaceDescriptors,
+    ) -> UnloadedFontFaceId {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let id = UnloadedFontFaceId(NEXT_ID.fetch_add(1, Ordering::Relaxed));
+        let mut descriptor = FontTemplateDescriptor::default();
+        descriptor.override_values_with_css_font_template_descriptors(descriptors);
+        self.unloaded_script_faces
+            .write()
+            .entry(descriptors.family_name.clone())
+            .or_default()
+            .push(UnloadedFontFace { id, descriptor });
+        self.invalidate_font_groups_after_web_font_load();
+        id
+    }
+
+    pub fn remove_unloaded_script_face(&self, id: UnloadedFontFaceId) {
+        self.unloaded_script_faces.write().retain(|_, faces| {
+            faces.retain(|face| face.id != id);
+            !faces.is_empty()
+        });
+        self.unloaded_script_face_load_requests.lock().remove(&id);
+        self.invalidate_font_groups_after_web_font_load();
+    }
+
+    pub fn has_unloaded_script_face_load_requests(&self) -> bool {
+        !self.unloaded_script_face_load_requests.lock().is_empty()
+    }
+
+    /// Returns true if font matching selected this face since it was added or last taken.
+    pub fn take_unloaded_script_face_load_request(&self, id: UnloadedFontFaceId) -> bool {
+        self.unloaded_script_face_load_requests.lock().remove(&id)
+    }
+
+    /// Whether an `@font-face` rule for this family is still being fetched.
+    pub fn is_loading_stylesheet_web_font(&self, family_name: &LowercaseFontFamilyName) -> bool {
+        self.currently_downloading_fonts
+            .lock()
+            .values()
+            .flatten()
+            .any(|download_state| {
+                download_state.initiator.font_face_rule().is_some() &&
+                    download_state.css_font_face_descriptors.family_name == *family_name
+            })
+    }
+
     /// Try to find matching templates in this [`FontContext`], first looking in the list of web fonts and
     /// falling back to asking the [`super::SystemFontService`] for a matching system font.
     pub fn matching_templates(
@@ -353,12 +466,18 @@ impl FontContext {
         &self,
         font: &Font,
         painter_id: PainterId,
+        stroke_width: Au,
     ) -> FontInstanceKey {
+        let options = FontInstanceOptions {
+            flags: font.webrender_font_instance_flags(),
+            stroke_width: (stroke_width.to_f32_px() * 64.).round() as u32,
+            ..Default::default()
+        };
         match font.template.identifier() {
             FontIdentifier::Local(_) => self.system_font_service_proxy.get_system_font_instance(
                 font.template.identifier(),
                 font.descriptor.pt_size,
-                font.webrender_font_instance_flags(),
+                options,
                 font.variations().to_owned(),
                 painter_id,
             ),
@@ -366,7 +485,7 @@ impl FontContext {
                 .create_web_font_instance(
                     font.template.clone(),
                     font.descriptor.pt_size,
-                    font.webrender_font_instance_flags(),
+                    options,
                     font.variations().to_owned(),
                     painter_id,
                 ),
@@ -377,7 +496,7 @@ impl FontContext {
         &self,
         font_template: FontTemplateRef,
         pt_size: Au,
-        flags: FontInstanceFlags,
+        options: FontInstanceOptions,
         variations: Vec<FontVariation>,
         painter_id: PainterId,
     ) -> FontInstanceKey {
@@ -403,7 +522,7 @@ impl FontContext {
             font_key,
             pt_size,
             variations: variations.clone(),
-            flags,
+            options,
         };
         *self
             .webrender_font_instance_keys
@@ -417,7 +536,7 @@ impl FontContext {
                     font_instance_key,
                     font_key,
                     pt_size.to_f32_px(),
-                    flags,
+                    options,
                     variations,
                 );
                 font_instance_key
@@ -849,7 +968,7 @@ impl FontContext {
         stylesheet: &DocumentStyleSheet,
         device: &Device,
         guard: &SharedRwLockReadGuard,
-    ) {
+    ) -> bool {
         let mut web_fonts = self.web_fonts.write();
 
         // TODO: Walking the stylesheet should not be necessary here. Instead, we can diff
@@ -870,7 +989,7 @@ impl FontContext {
         }
 
         if !removed_any {
-            return;
+            return false;
         };
 
         // Removing this stylesheet modified the available fonts, so invalidate the cache
@@ -879,6 +998,7 @@ impl FontContext {
 
         // Ensure that we clean up any WebRender resources on the next display list update.
         self.have_removed_web_fonts.store(true, Ordering::Relaxed);
+        true
     }
 
     pub fn add_template_to_font_context(

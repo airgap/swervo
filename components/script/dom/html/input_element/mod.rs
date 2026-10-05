@@ -11,6 +11,7 @@ use encoding_rs::Encoding;
 use fonts::{ByteIndex, TextByteRange};
 use html5ever::{LocalName, Prefix, local_name};
 use js::context::JSContext;
+use keyboard_types::{Key, NamedKey};
 use js::jsapi::{ClippedTime, JSObject, RegExpFlag_UnicodeSets, RegExpFlags};
 use js::jsval::UndefinedValue;
 use js::rust::wrappers2::{
@@ -39,6 +40,7 @@ use crate::dom::bindings::codegen::Bindings::EventBinding::EventMethods;
 use crate::dom::bindings::codegen::Bindings::FileListBinding::FileListMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLFormElementBinding::SelectionMode;
 use crate::dom::bindings::codegen::Bindings::HTMLInputElementBinding::HTMLInputElementMethods;
+use crate::dom::bindings::codegen::Bindings::MouseEventBinding::MouseEventMethods;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::{GetRootNodeOptions, NodeMethods};
 use crate::dom::bindings::error::{Error, ErrorResult};
 use crate::dom::bindings::inheritance::Castable;
@@ -61,6 +63,9 @@ use crate::dom::html::htmlelement::HTMLElement;
 use crate::dom::html::htmlfieldsetelement::HTMLFieldSetElement;
 use crate::dom::html::htmlformelement::{
     FormControl, FormDatum, FormDatumValue, FormSubmitterElement, HTMLFormElement, SubmittedFrom,
+};
+use crate::dom::html::popover::{
+    popover_target_action_getter, popovertarget_associated_element, set_popover_target_element,
 };
 use crate::dom::htmlinputelement::radio_input_type::{
     broadcast_radio_checked, perform_radio_group_validation,
@@ -123,9 +128,17 @@ enum ValueMode {
 }
 
 #[derive(Debug, PartialEq)]
-enum StepDirection {
+pub(crate) enum StepDirection {
     Up,
     Down,
+}
+
+/// What stepping does when the element has no allowed value step (`step=any`).
+enum AnyStepBehavior {
+    /// `stepUp()` and `stepDown()` throw.
+    Throw,
+    /// The arrow keys and spin buttons step by the default step, like Chrome.
+    UseDefaultStep,
 }
 
 #[dom_struct]
@@ -448,6 +461,25 @@ impl HTMLInputElement {
             .or_else(|| self.default_maximum())
     }
 
+    /// <https://html.spec.whatwg.org/multipage/#selector-default>: checkboxes and radio buttons
+    /// with a `checked` attribute match `:default`, as does the form's default button.
+    fn update_default_state(&self) {
+        let element = self.upcast::<Element>();
+        let is_default = matches!(
+            *self.input_type(),
+            InputType::Checkbox(_) | InputType::Radio(_)
+        ) && element.has_attribute(&local_name!("checked"));
+        element.set_state(ElementState::DEFAULT, is_default);
+        if let Some(form) = self.form_owner() {
+            form.update_default_button();
+        }
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#have-range-limitations>
+    pub(crate) fn has_range_limitations(&self) -> bool {
+        self.does_value_as_number_apply() && (self.minimum().is_some() || self.maximum().is_some())
+    }
+
     /// when allowed_value_step and minimum both exist, this is the smallest
     /// value >= minimum that lies on an integer step
     fn stepped_minimum(&self) -> Option<f64> {
@@ -577,7 +609,13 @@ impl HTMLInputElement {
     /// <https://html.spec.whatwg.org/multipage/#dom-input-stepup>
     ///
     /// <https://html.spec.whatwg.org/multipage/#dom-input-stepdown>
-    fn step_up_or_down(&self, cx: &mut JSContext, n: i32, dir: StepDirection) -> ErrorResult {
+    fn step_up_or_down(
+        &self,
+        cx: &mut JSContext,
+        n: i32,
+        dir: StepDirection,
+        any_step: AnyStepBehavior,
+    ) -> ErrorResult {
         // Step 1. If the stepDown() and stepUp() methods do not apply, as defined for the
         // input element's type attribute's current state, then throw an "InvalidStateError" DOMException.
         if !self.does_value_as_number_apply() {
@@ -586,7 +624,12 @@ impl HTMLInputElement {
         let step_base = self.step_base();
 
         // Step 2. If the element has no allowed value step, then throw an "InvalidStateError" DOMException.
-        let Some(allowed_value_step) = self.allowed_value_step() else {
+        let Some(allowed_value_step) = self.allowed_value_step().or_else(|| match any_step {
+            AnyStepBehavior::Throw => None,
+            AnyStepBehavior::UseDefaultStep => self
+                .default_step()
+                .map(|default_step| default_step * self.step_scale_factor()),
+        }) else {
             return Err(Error::InvalidState(None));
         };
 
@@ -657,7 +700,7 @@ impl HTMLInputElement {
         if let Some(min) = minimum &&
             value < min
         {
-            value = self.stepped_minimum().unwrap_or(value);
+            value = self.stepped_minimum().unwrap_or(min);
         }
 
         // Step 9. If the element has a maximum, and value is greater than that maximum, then set value to the largest
@@ -666,7 +709,7 @@ impl HTMLInputElement {
         if let Some(max) = maximum &&
             value > max
         {
-            value = self.stepped_maximum().unwrap_or(value);
+            value = self.stepped_maximum().unwrap_or(max);
         }
 
         // Step 10. If either the method invoked was the stepDown() method and value is greater than
@@ -1453,6 +1496,30 @@ impl HTMLInputElementMethods<crate::DomTypeHolder> for HTMLInputElement {
     // https://html.spec.whatwg.org/multipage/#dom-input-usemap
     make_setter!(SetUseMap, "usemap");
 
+    /// <https://html.spec.whatwg.org/multipage/#dom-popovertargetelement>
+    fn GetPopoverTargetElement(&self, cx: &mut JSContext) -> Option<DomRoot<Element>> {
+        popovertarget_associated_element(cx, self.upcast())
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-popovertargetelement>
+    fn SetPopoverTargetElement(&self, cx: &mut JSContext, value: Option<&Element>) {
+        set_popover_target_element(cx, self.upcast(), value);
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-popovertargetaction>
+    fn PopoverTargetAction(&self) -> DOMString {
+        popover_target_action_getter(self.upcast())
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-popovertargetaction>
+    fn SetPopoverTargetAction(&self, cx: &mut JSContext, value: DOMString) {
+        self.upcast::<Element>().set_string_attribute(
+            cx,
+            &local_name!("popovertargetaction"),
+            value,
+        );
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#dom-input-indeterminate>
     fn Indeterminate(&self) -> bool {
         self.upcast::<Element>()
@@ -1565,12 +1632,12 @@ impl HTMLInputElementMethods<crate::DomTypeHolder> for HTMLInputElement {
 
     /// <https://html.spec.whatwg.org/multipage/#dom-input-stepup>
     fn StepUp(&self, cx: &mut JSContext, n: i32) -> ErrorResult {
-        self.step_up_or_down(cx, n, StepDirection::Up)
+        self.step_up_or_down(cx, n, StepDirection::Up, AnyStepBehavior::Throw)
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-input-stepdown>
     fn StepDown(&self, cx: &mut JSContext, n: i32) -> ErrorResult {
-        self.step_up_or_down(cx, n, StepDirection::Down)
+        self.step_up_or_down(cx, n, StepDirection::Down, AnyStepBehavior::Throw)
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-cva-willvalidate>
@@ -2016,8 +2083,25 @@ impl HTMLInputElement {
         }
     }
 
-    fn handle_mouse_event(&self, mouse_event: &MouseEvent) {
+    fn handle_mouse_event(&self, cx: &mut JSContext, mouse_event: &MouseEvent) {
         if mouse_event.upcast::<Event>().DefaultPrevented() {
+            return;
+        }
+
+        if let InputType::Range(ref range_input_type) = *self.input_type() {
+            range_input_type.handle_mouse_event(cx, self, mouse_event);
+            return;
+        }
+
+        // Pressing the primary button on a spin button steps the value, like the arrow keys.
+        if let InputType::Number(ref number_input_type) = *self.input_type() &&
+            mouse_event.upcast::<Event>().type_() == atom!("mousedown") &&
+            mouse_event.Button() == 0 &&
+            let Some(direction) = number_input_type.spin_button_direction(cx, self, mouse_event)
+        {
+            if self.is_mutable() {
+                self.step_from_user_interaction(cx, direction);
+            }
             return;
         }
 
@@ -2034,6 +2118,119 @@ impl HTMLInputElement {
         {
             self.maybe_update_shared_selection();
         }
+    }
+}
+
+impl HTMLInputElement {
+    /// The arrow keys step `<input type=number>` and `<input type=range>`, and Page Up/Down,
+    /// Home and End move a range, as in Chrome. Returns whether the key was consumed.
+    fn handle_stepping_key(&self, cx: &mut JSContext, event: &KeyboardEvent) -> bool {
+        if !event.modifiers().is_empty() || self.upcast::<Element>().disabled_state() {
+            return false;
+        }
+        match *self.input_type() {
+            InputType::Range(_) => self.handle_range_key(cx, event),
+            InputType::Number(_) if !self.ReadOnly() => {
+                let direction = match event.key() {
+                    Key::Named(NamedKey::ArrowUp) => StepDirection::Up,
+                    Key::Named(NamedKey::ArrowDown) => StepDirection::Down,
+                    _ => return false,
+                };
+                self.step_from_user_interaction(cx, direction);
+                true
+            },
+            _ => false,
+        }
+    }
+
+    fn handle_range_key(&self, cx: &mut JSContext, event: &KeyboardEvent) -> bool {
+        let min = self
+            .minimum()
+            .expect("A range input always has a minimum");
+        let max = self
+            .maximum()
+            .expect("A range input always has a maximum");
+        let value_before = self.Value();
+        let value = self
+            .convert_string_to_number(&value_before.str())
+            .expect("A range input's sanitized value is always a number");
+        // Chrome steps a `step=any` range by a hundredth and pages it by a tenth.
+        let step = self
+            .allowed_value_step()
+            .unwrap_or((max - min) / 100.0);
+        let page_step = ((max - min) / 10.0).max(step);
+        let new_value = match event.key() {
+            Key::Named(NamedKey::ArrowUp | NamedKey::ArrowRight) => value + step,
+            Key::Named(NamedKey::ArrowDown | NamedKey::ArrowLeft) => value - step,
+            Key::Named(NamedKey::PageUp) => value + page_step,
+            Key::Named(NamedKey::PageDown) => value - page_step,
+            Key::Named(NamedKey::Home) => min,
+            Key::Named(NamedKey::End) => max,
+            _ => return false,
+        };
+        // The value sanitization algorithm clamps the value and snaps it to a step.
+        self.SetValue(cx, DOMString::from(new_value.to_string()))
+            .expect("Setting the value of a range input can't fail");
+        if self.Value() != value_before {
+            self.queue_user_input_event();
+            self.queue_user_change_event();
+        }
+        true
+    }
+
+    /// Step a number input by one step for an arrow key or a spin button click.
+    fn step_from_user_interaction(&self, cx: &mut JSContext, direction: StepDirection) {
+        let value_before = self.Value();
+        self.step_up_or_down(cx, 1, direction, AnyStepBehavior::UseDefaultStep)
+            .expect("A number input always has a step when the default step is allowed");
+        if self.Value() != value_before {
+            self.queue_user_input_event();
+            self.queue_user_change_event();
+        }
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#common-input-element-events>
+    ///
+    /// > When the user agent changes the element's value on behalf of the user, it must
+    /// > queue an element task on the user interaction task source given the input element
+    /// > to fire an event named input at the input element, with the bubbles and composed
+    /// > attributes initialized to true.
+    pub(crate) fn queue_user_input_event(&self) {
+        let this = Trusted::new(self);
+        self.owner_global()
+            .task_manager()
+            .user_interaction_task_source()
+            .queue(task!(fire_input_event: move |cx| {
+                this.root().upcast::<EventTarget>().fire_event_with_params(
+                    cx,
+                    atom!("input"),
+                    EventBubbles::Bubbles,
+                    EventCancelable::NotCancelable,
+                    EventComposed::Composed,
+                );
+            }));
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#common-input-element-events>
+    ///
+    /// > whenever the user commits a change to the element's value, the user agent must queue
+    /// > an element task on the user interaction task source given the input element to set
+    /// > its user validity to true and fire an event named change at the input element, with
+    /// > the bubbles attribute initialized to true.
+    pub(crate) fn queue_user_change_event(&self) {
+        let this = Trusted::new(self);
+        self.owner_global()
+            .task_manager()
+            .user_interaction_task_source()
+            .queue(task!(fire_change_event: move |cx| {
+                let this = this.root();
+                this.owner_document()
+                    .focus_handler()
+                    .note_change_committed(this.upcast());
+                this.validity_state(cx).set_user_validity(cx, true);
+                this.upcast::<EventTarget>()
+                    .fire_bubbling_event(cx, atom!("change"));
+            }));
     }
 }
 
@@ -2268,6 +2465,13 @@ impl VirtualMethods for HTMLInputElement {
             },
         }
 
+        if matches!(
+            *attr.local_name(),
+            local_name!("checked") | local_name!("type")
+        ) {
+            self.update_default_state();
+        }
+
         self.value_changed(cx);
 
         if could_have_had_embedder_control && !self.may_have_embedder_control() {
@@ -2339,7 +2543,13 @@ impl VirtualMethods for HTMLInputElement {
     /// <https://dom.spec.whatwg.org/#action-versus-occurance>
     fn handle_event(&self, cx: &mut JSContext, event: &Event) {
         if let Some(mouse_event) = event.downcast::<MouseEvent>() {
-            self.handle_mouse_event(mouse_event);
+            self.handle_mouse_event(cx, mouse_event);
+            event.mark_as_handled();
+        } else if event.type_() == atom!("keydown") &&
+            !event.DefaultPrevented() &&
+            let Some(keyevent) = event.downcast::<KeyboardEvent>() &&
+            self.handle_stepping_key(cx, keyevent)
+        {
             event.mark_as_handled();
         } else if event.type_() == atom!("keydown") &&
             !event.DefaultPrevented() &&
@@ -2614,6 +2824,12 @@ impl Activatable for HTMLInputElement {
                 .as_specific()
                 .activation_behavior(cx, self, event, target);
         }
+
+        // <https://html.spec.whatwg.org/multipage/#the-input-element:activation-behaviour>
+        // > 3. Run the popover target attribute activation behavior given element and event's
+        // >    target.
+        self.upcast::<HTMLElement>()
+            .popover_target_attribute_activation_behavior(cx, target);
     }
 }
 

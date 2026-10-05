@@ -12,17 +12,24 @@ use servo_arc::Arc as ServoArc;
 use style::dom::NodeInfo;
 use style::properties::ComputedValues;
 use style::selector_parser::PseudoElement;
+use style::str::char_is_whitespace;
 use style::values::generics::counters::{Content, ContentItem};
 use style::values::specified::Quotes;
+use style::values::specified::box_::Display as StyloDisplay;
 use web_atoms::LocalName;
 
 use crate::context::LayoutContext;
 use crate::dom::{BoxSlot, LayoutBox, NodeExt};
 use crate::flow::inline::SharedInlineStyles;
-use crate::lists::{counter_values, generate_counter_representation, list_item_ordinal};
+use crate::lists::{
+    apply_quote_item, counter_values, generate_counter_representation, list_item_ordinal,
+    quote_depth,
+};
 use crate::quotes::quotes_for_lang;
 use crate::replaced::ReplacedContents;
-use crate::style_ext::{Display, DisplayGeneratingBox, DisplayInside, DisplayOutside};
+use crate::style_ext::{
+    ComputedValuesExt, Display, DisplayGeneratingBox, DisplayInside, DisplayOutside,
+};
 
 /// A data structure used to pass and store related layout information together to
 /// avoid having to repeat the same arguments in argument lists.
@@ -200,11 +207,129 @@ fn traverse_element<'dom>(
             }
         },
         Display::GeneratingBox(display) => {
+            if info.style.in_top_layer() {
+                traverse_backdrop_pseudo_element(&info, context, handler);
+            }
             let contents = Contents::for_element(element, context);
             let display = display.used_value_for_contents(&contents);
             let box_slot = element.box_slot();
             handler.handle_element(&info, display, contents, box_slot);
         },
+    }
+}
+
+/// Every element in the top layer has a `::backdrop` box, which is in the top layer directly
+/// below it. It is built just before the element's box, so it is hoisted and painted first.
+/// <https://drafts.csswg.org/css-position-4/#backdrop>
+fn traverse_backdrop_pseudo_element<'dom>(
+    node_info: &NodeAndStyleInfo<'dom>,
+    context: &LayoutContext,
+    handler: &mut impl TraversalHandler<'dom>,
+) {
+    let Some(backdrop_info) = node_info.with_pseudo_element(context, PseudoElement::Backdrop)
+    else {
+        return;
+    };
+    let Display::GeneratingBox(display) = Display::from(backdrop_info.style.get_box().display)
+    else {
+        return;
+    };
+    let box_slot = backdrop_info.node.box_slot();
+    handler.handle_element(
+        &backdrop_info,
+        display,
+        Contents::for_pseudo_element(Vec::new()),
+        box_slot,
+    );
+}
+
+/// A ruby base and the annotation paired with it, the unit that ruby layout stacks.
+/// <https://drafts.csswg.org/css-ruby/#ruby-pairing>
+pub(crate) struct RubyColumn<'dom> {
+    base: Vec<ServoLayoutNode<'dom>>,
+    annotation: Option<ServoLayoutNode<'dom>>,
+}
+
+/// The contents of a `display: ruby` element, in order.
+pub(crate) enum RubyItem<'dom> {
+    Column(RubyColumn<'dom>),
+    /// White space between two columns, or after the last one, which separates them like a
+    /// space in the surrounding text, as in Chrome.
+    WhiteSpace,
+}
+
+/// Pairs the children of a `display: ruby` element into columns: each `display: ruby-text`
+/// child annotates the content since the previous annotation. This covers the common
+/// `<ruby>base<rt>text</rt>base<rt>text</rt></ruby>` markup but neither ruby text containers
+/// nor nested rubies. `display: none` children such as `<rp>` produce no boxes.
+pub(crate) fn ruby_items<'dom>(
+    ruby_info: &NodeAndStyleInfo<'dom>,
+    context: &LayoutContext,
+) -> Vec<RubyItem<'dom>> {
+    let mut items = Vec::new();
+    let mut base: Vec<ServoLayoutNode<'dom>> = Vec::new();
+    let push_column = |items: &mut Vec<RubyItem<'dom>>,
+                       base: Vec<ServoLayoutNode<'dom>>,
+                       annotation: Option<ServoLayoutNode<'dom>>| {
+        let starts_with_white_space = base.first().is_some_and(|node| {
+            node.is_text_node() && node.text_content().starts_with(char_is_whitespace)
+        });
+        if starts_with_white_space && !items.is_empty() {
+            items.push(RubyItem::WhiteSpace);
+        }
+        items.push(RubyItem::Column(RubyColumn { base, annotation }));
+    };
+    for child in ruby_info.node.flat_tree_children() {
+        if child.is_text_node() {
+            base.push(child);
+            continue;
+        }
+        if !child.is_element() {
+            continue;
+        }
+        let display = child.style(&context.style_context).get_box().display;
+        if display == StyloDisplay::RubyText {
+            push_column(&mut items, std::mem::take(&mut base), Some(child));
+        } else if Display::from(display) != Display::None {
+            base.push(child);
+        }
+    }
+    let base_is_white_space = base
+        .iter()
+        .all(|node| node.is_text_node() && node.text_content().chars().all(char_is_whitespace));
+    if !base_is_white_space {
+        push_column(&mut items, base, None);
+    } else if !base.is_empty() && !items.is_empty() {
+        items.push(RubyItem::WhiteSpace);
+    }
+    items
+}
+
+/// Feeds a ruby column to `handler`: the annotation first, as a block so that it stacks
+/// above the base, and then the base content.
+pub(crate) fn traverse_ruby_column<'dom>(
+    column: &RubyColumn<'dom>,
+    context: &LayoutContext,
+    handler: &mut impl TraversalHandler<'dom>,
+) {
+    if let Some(annotation) = column.annotation {
+        let info = NodeAndStyleInfo::new(annotation, annotation.style(&context.style_context));
+        let contents = Contents::for_element(annotation, context);
+        let display = DisplayGeneratingBox::OutsideInside {
+            outside: DisplayOutside::Block,
+            inside: DisplayInside::Flow {
+                is_list_item: false,
+            },
+        };
+        handler.handle_element(&info, display, contents, annotation.box_slot());
+    }
+    for &node in &column.base {
+        if node.is_text_node() {
+            let info = NodeAndStyleInfo::new(node, node.style(&context.style_context));
+            handler.handle_text(&info, node.text_content());
+        } else {
+            traverse_element(node, context, handler);
+        }
     }
 }
 
@@ -348,6 +473,16 @@ where
     }
 }
 
+fn is_quote_item<I>(item: &ContentItem<I>) -> bool {
+    matches!(
+        item,
+        ContentItem::OpenQuote |
+            ContentItem::CloseQuote |
+            ContentItem::NoOpenQuote |
+            ContentItem::NoCloseQuote
+    )
+}
+
 /// <https://www.w3.org/TR/CSS2/generate.html#propdef-content>
 pub(crate) fn generate_pseudo_element_content(
     pseudo_element_info: &NodeAndStyleInfo,
@@ -356,6 +491,12 @@ pub(crate) fn generate_pseudo_element_content(
     match &pseudo_element_info.style.get_counters().content {
         Content::Items(items) => {
             let mut vec = vec![];
+            let mut current_quote_depth = items
+                .items
+                .iter()
+                .any(is_quote_item)
+                .then(|| quote_depth(context, pseudo_element_info.node))
+                .unwrap_or_default();
             for item in items.items.iter() {
                 match item {
                     ContentItem::String(s) => {
@@ -402,21 +543,29 @@ pub(crate) fn generate_pseudo_element_content(
                             vec.push(PseudoElementContentItem::Replaced(replaced_content));
                         }
                     },
-                    ContentItem::OpenQuote | ContentItem::CloseQuote => {
-                        // TODO(xiaochengh): calculate quote depth
+                    ContentItem::OpenQuote |
+                    ContentItem::CloseQuote |
+                    ContentItem::NoOpenQuote |
+                    ContentItem::NoCloseQuote => {
+                        let Some(depth) = apply_quote_item(item, &mut current_quote_depth) else {
+                            continue;
+                        };
+                        // Levels deeper than the list of pairs reuse its last pair.
                         let maybe_quote = match &pseudo_element_info.style.get_list().quotes {
                             Quotes::QuoteList(quote_list) => {
-                                quote_list.0.first().map(|quote_pair| {
-                                    get_quote_from_pair(
-                                        item,
-                                        &*quote_pair.opening,
-                                        &*quote_pair.closing,
-                                    )
-                                })
+                                quote_list.0.get(depth).or(quote_list.0.last()).map(
+                                    |quote_pair| {
+                                        get_quote_from_pair(
+                                            item,
+                                            &*quote_pair.opening,
+                                            &*quote_pair.closing,
+                                        )
+                                    },
+                                )
                             },
                             Quotes::Auto => {
                                 let lang = &pseudo_element_info.style.get_font()._x_lang;
-                                let quotes = quotes_for_lang(lang.0.as_ref(), 0);
+                                let quotes = quotes_for_lang(lang.0.as_ref(), depth);
                                 Some(get_quote_from_pair(item, &quotes.opening, &quotes.closing))
                             },
                         };
@@ -451,7 +600,6 @@ pub(crate) fn generate_pseudo_element_content(
                             .join(separator);
                         vec.push(PseudoElementContentItem::Text(text));
                     },
-                    ContentItem::NoOpenQuote | ContentItem::NoCloseQuote => {},
                 }
             }
             vec

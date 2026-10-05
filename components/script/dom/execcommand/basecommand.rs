@@ -22,13 +22,15 @@ use crate::dom::execcommand::commands::backcolor::execute_backcolor_command;
 use crate::dom::execcommand::commands::bold::execute_bold_command;
 use crate::dom::execcommand::commands::createlink::execute_createlink_command;
 use crate::dom::execcommand::commands::defaultparagraphseparator::execute_default_paragraph_separator_command;
-use crate::dom::execcommand::commands::delete::execute_delete_command;
+use crate::dom::execcommand::commands::delete::{execute_delete_command, keep_empty_last_line};
 use crate::dom::execcommand::commands::fontname::execute_fontname_command;
 use crate::dom::execcommand::commands::fontsize::{
     execute_fontsize_command, font_size_loosely_equivalent, value_for_fontsize_command,
 };
 use crate::dom::execcommand::commands::forecolor::execute_forecolor_command;
+use crate::dom::execcommand::commands::forwarddelete::execute_forward_delete_command;
 use crate::dom::execcommand::commands::hilitecolor::execute_hilitecolor_command;
+use crate::dom::execcommand::commands::insertlinebreak::execute_insert_line_break_command;
 use crate::dom::execcommand::commands::insertparagraph::execute_insert_paragraph_command;
 use crate::dom::execcommand::commands::inserttext::execute_insert_text_command;
 use crate::dom::execcommand::commands::italic::execute_italic_command;
@@ -696,11 +698,23 @@ impl CommandName {
             CommandName::DefaultParagraphSeparator => {
                 execute_default_paragraph_separator_command(document, value)
             },
-            CommandName::Delete => execute_delete_command(cx, document, selection),
+            CommandName::Delete => {
+                let result = execute_delete_command(cx, document, selection);
+                keep_empty_last_line(cx, document, selection);
+                result
+            },
             CommandName::FontName => execute_fontname_command(cx, document, selection, value),
             CommandName::FontSize => execute_fontsize_command(cx, document, selection, value),
             CommandName::ForeColor => execute_forecolor_command(cx, document, selection, value),
+            CommandName::ForwardDelete => {
+                let result = execute_forward_delete_command(cx, document, selection);
+                keep_empty_last_line(cx, document, selection);
+                result
+            },
             CommandName::HiliteColor => execute_hilitecolor_command(cx, document, selection, value),
+            CommandName::InsertLineBreak => {
+                execute_insert_line_break_command(cx, document, selection)
+            },
             CommandName::InsertParagraph => {
                 execute_insert_paragraph_command(cx, document, selection)
             },

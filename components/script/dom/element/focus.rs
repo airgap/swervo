@@ -12,9 +12,40 @@ use xml5ever::local_name;
 
 use crate::dom::Node;
 use crate::dom::document::focus::FocusableAreaKind;
+use crate::dom::node::NodeTraits;
 use crate::dom::types::{Element, HTMLElement};
 
 impl Element {
+    /// <https://html.spec.whatwg.org/multipage/#inert>
+    pub(crate) fn is_inert(&self) -> bool {
+        let blocking_modal_dialog = self.owner_document().top_layer().blocking_modal_dialog();
+        for ancestor in self.upcast::<Node>().inclusive_ancestors_in_flat_tree() {
+            // From <https://html.spec.whatwg.org/multipage/#the-inert-attribute>:
+            // > The inert attribute is a boolean attribute that indicates, by its presence, that
+            // > the element and all its flat tree descendants which don't otherwise escape
+            // > inertness (such as modal dialogs) are to be made inert by the user agent.
+            if ancestor.is::<HTMLElement>() &&
+                ancestor
+                    .downcast::<Element>()
+                    .is_some_and(|element| element.has_attribute(&local_name!("inert")))
+            {
+                return true;
+            }
+            // > subject can additionally become inert via the inert attribute, but only if
+            // > specified on subject itself (i.e., subject escapes inertness of ancestors).
+            if blocking_modal_dialog
+                .as_deref()
+                .is_some_and(|dialog| &*ancestor == dialog.upcast::<Node>())
+            {
+                return false;
+            }
+        }
+        // > While document is blocked by a modal dialog subject, every node that is connected to
+        // > document, with the exception of the subject element and its flat tree descendants,
+        // > must become inert.
+        blocking_modal_dialog.is_some()
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#focusable-area>
     ///
     /// The list of focusable areas at this point in the specification is both incomplete and leaves
@@ -28,7 +59,11 @@ impl Element {
     pub(crate) fn focusable_area_kind(&self) -> FocusableAreaKind {
         // Do not allow unrendered, disconnected, or disabled nodes to be focusable areas ever.
         let node: &Node = self.upcast();
-        if !node.is_connected() || !self.has_css_layout_box() || self.is_actually_disabled() {
+        if !node.is_connected() ||
+            !self.has_css_layout_box() ||
+            self.is_actually_disabled() ||
+            self.is_inert()
+        {
             return Default::default();
         }
 
@@ -56,7 +91,7 @@ impl Element {
         // > the element is not actually disabled;
         // Note: Checked above
         // > the element is not inert;
-        // TODO: Handle this.
+        // Note: Checked above
         // > the element is either being rendered, delegating its rendering to its children, or
         // > being used as relevant canvas fallback content.
         // Note: Checked above

@@ -5,7 +5,7 @@
 use std::borrow::ToOwned;
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::ops::Deref;
+use std::ops::{Deref, Range};
 use std::sync::{Arc, OnceLock};
 use std::{iter, str};
 
@@ -14,6 +14,7 @@ use bitflags::bitflags;
 use euclid::default::{Point2D, Rect};
 use euclid::num::Zero;
 use fonts_traits::FontDescriptor;
+use icu_locid::LanguageIdentifier;
 use icu_locid::subtags::Language;
 use log::debug;
 use malloc_size_of_derive::MallocSizeOf;
@@ -35,11 +36,15 @@ use style::values::computed::{
     FontFeatureSettings, FontStretch, FontStyle, FontSynthesis, FontVariantEastAsian,
     FontVariantLigatures, FontVariantNumeric, FontWeight,
 };
+use unicode_properties::emoji;
 use unicode_script::Script;
 use webrender_api::{FontInstanceFlags, FontInstanceKey, FontVariation};
 
+use crate::font_context::UnloadedFontFace;
 use crate::platform::font::{FontTable, PlatformFont};
 use crate::platform::font_list::fallback_font_families;
+use crate::han_kerning::HanKerningData;
+use crate::platform::han_generic_font_family;
 use crate::{
     EmojiPresentationPreference, FallbackFontSelectionOptions, FontContext, FontData,
     FontDataAndIndex, FontDataError, FontIdentifier, FontTemplateDescriptor, FontTemplateRef,
@@ -275,7 +280,7 @@ pub struct Font {
 
     shaper: OnceLock<Shaper>,
     cached_shape_data: RwLock<CachedShapeData>,
-    font_instance_key: RwLock<FxHashMap<PainterId, FontInstanceKey>>,
+    font_instance_key: RwLock<FxHashMap<(PainterId, Au), FontInstanceKey>>,
 
     /// If this is a synthesized small caps font, then this font reference is for
     /// the version of the font used to replace lowercase ASCII letters. It's up
@@ -294,6 +299,9 @@ pub struct Font {
     /// FIXME: This should be removed entirely in favor of better caching if necessary.
     /// See <https://github.com/servo/servo/pull/11273#issuecomment-222332873>.
     can_do_fast_shaping: OnceLock<bool>,
+
+    /// How this font's fullwidth punctuation can be set half-width, if it can.
+    han_kerning: OnceLock<Option<HanKerningData>>,
 }
 
 impl std::fmt::Debug for Font {
@@ -358,6 +366,7 @@ impl Font {
             synthesized_small_caps,
             has_color_bitmap_or_colr_table: OnceLock::new(),
             can_do_fast_shaping: OnceLock::new(),
+            han_kerning: OnceLock::new(),
         })
     }
 
@@ -379,11 +388,25 @@ impl Font {
     }
 
     pub fn key(&self, painter_id: PainterId, font_context: &FontContext) -> FontInstanceKey {
+        self.stroked_key(painter_id, font_context, Au::zero())
+    }
+
+    /// The key of an instance of this font whose glyphs are the outlines of a stroke of the given
+    /// width along the glyph outlines, for `-webkit-text-stroke`. A zero width gives the plain
+    /// instance.
+    pub fn stroked_key(
+        &self,
+        painter_id: PainterId,
+        font_context: &FontContext,
+        stroke_width: Au,
+    ) -> FontInstanceKey {
         *self
             .font_instance_key
             .write()
-            .entry(painter_id)
-            .or_insert_with(|| font_context.create_font_instance_key(self, painter_id))
+            .entry((painter_id, stroke_width))
+            .or_insert_with(|| {
+                font_context.create_font_instance_key(self, painter_id, stroke_width)
+            })
     }
 
     /// Return the data for this `Font`. Note that this is currently highly inefficient for system
@@ -447,6 +470,10 @@ pub struct ShapingOptions {
     pub position: FontVariantPosition,
     /// Various flags.
     pub flags: ShapingFlags,
+    /// The byte offsets in the shaped text of the fullwidth punctuation to set half-width, as
+    /// `text-spacing-trim` collapses the spacing of adjacent punctuation. See
+    /// [`Font::trimmed_punctuation`].
+    pub trimmed_punctuation: Vec<usize>,
 }
 
 impl ShapingOptions {
@@ -471,6 +498,7 @@ struct ShapeCacheEntry {
     language: Language,
     font_features: Box<[(Tag, u32)]>,
     flags: ShapingFlags,
+    trimmed_punctuation: Vec<usize>,
 }
 
 impl Font {
@@ -487,6 +515,7 @@ impl Font {
             language: options.language,
             flags: options.flags,
             font_features,
+            trimmed_punctuation: options.trimmed_punctuation.clone(),
         };
 
         if let Some(shaped_text) = self.cached_shape_data.read().shaped_text.get(&lookup_key) {
@@ -510,6 +539,18 @@ impl Font {
         cache.shaped_text.insert(lookup_key, shaped_text.clone());
 
         shaped_text
+    }
+
+    /// The byte offsets, relative to `range.start`, of the fullwidth punctuation in `text[range]`
+    /// that `text-spacing-trim: normal` sets half-width when it is shaped with this font. The
+    /// characters just outside `range` are taken into account as its neighbours.
+    pub fn trimmed_punctuation(&self, text: &str, range: Range<usize>) -> Vec<usize> {
+        if text[range.clone()].is_ascii() {
+            return Vec::new();
+        }
+        self.han_kerning
+            .get_or_init(|| HanKerningData::for_font(self))
+            .map_or_else(Vec::new, |data| data.trimmed_punctuation(text, range))
     }
 
     /// Whether not a particular text and [`ShapingOptions`] combination can use
@@ -701,11 +742,35 @@ pub struct FontGroup {
 
 impl FontGroup {
     pub(crate) fn new(style: &FontStyleStruct, descriptor: FontDescriptor) -> FontGroup {
+        let language = style._x_lang.0.parse::<LanguageIdentifier>().ok();
         let families: SmallVec<[FontGroupFamily; 8]> = style
             .font_family
             .families
             .iter()
-            .map(FontGroupFamily::local_or_web)
+            .flat_map(|family| {
+                let han_family = match (family, &language) {
+                    (SingleFontFamily::Generic(generic), Some(language)) => {
+                        let generic = match style.font_family.is_initial {
+                            true => GenericFontFamily::None,
+                            false => *generic,
+                        };
+                        han_generic_font_family(language, generic)
+                    },
+                    _ => None,
+                };
+                // The CJK font goes first so it renders all the text, as Chrome's replaced
+                // generic does; the generic itself still applies if it is not installed.
+                han_family
+                    .map(|name| {
+                        let family = SingleFontFamily::FamilyName(FamilyName {
+                            name: name.into(),
+                            syntax: FontFamilyNameSyntax::Quoted,
+                        });
+                        FontFamilyDescriptor::new(family, FontSearchScope::Local).into()
+                    })
+                    .into_iter()
+                    .chain(iter::once(FontGroupFamily::local_or_web(family)))
+            })
             .collect();
 
         FontGroup {
@@ -759,13 +824,28 @@ impl FontGroup {
             font.has_glyph_for(options.character)
         };
 
+        // A family the author listed wins over a character's default emoji presentation (icon
+        // fonts map their glyphs to emoji code points); only an explicit variation selector
+        // asks to skip it, as in Chrome. The default presentation still steers system fallback.
+        let has_presentation_selector = next_codepoint.is_some_and(|next| {
+            emoji::is_emoji_presentation_selector(next) || emoji::is_text_presentation_selector(next)
+        });
+        let font_has_glyph_for_listed_family = |font: &FontRef| {
+            if has_presentation_selector {
+                font_has_glyph_and_presentation(font)
+            } else {
+                font.has_glyph_for(options.character)
+            }
+        };
+
         let char_in_template =
             |template: FontTemplateRef| template.char_in_unicode_range(options.character);
 
         if let Some(font) = self.find(
             font_context,
+            options.character,
             &char_in_template,
-            &font_has_glyph_and_presentation,
+            &font_has_glyph_for_listed_family,
         ) {
             return font_or_synthesized_small_caps(font);
         }
@@ -814,7 +894,7 @@ impl FontGroup {
         // > Note: it does not matter whether that font actually has a glyph for the space character.
         let space_in_template = |template: FontTemplateRef| template.char_in_unicode_range(' ');
         let font_predicate = |_: &FontRef| true;
-        self.find(font_context, &space_in_template, &font_predicate)
+        self.find(font_context, ' ', &space_in_template, &font_predicate)
             .or_else(|| {
                 self.find_fallback_using_system_font_list(
                     font_context,
@@ -825,26 +905,31 @@ impl FontGroup {
             })
     }
 
-    /// Attempts to find a font which matches the given `template_predicate` and `font_predicate`.
-    /// This method mutates because we may need to load new font data in the process of finding
-    /// a suitable font.
+    /// Attempts to find a font for `codepoint` which matches the given `template_predicate` and
+    /// `font_predicate`. This method mutates because we may need to load new font data in the
+    /// process of finding a suitable font.
     fn find(
         &self,
         font_context: &FontContext,
+        codepoint: char,
         template_predicate: &impl Fn(FontTemplateRef) -> bool,
         font_predicate: &impl Fn(&FontRef) -> bool,
     ) -> Option<FontRef> {
-        self.families
-            .iter()
-            .flat_map(|family| family.templates(font_context, &self.descriptor))
-            .find_map(|template| {
-                template.font_if_matches(
-                    font_context,
-                    &self.descriptor,
-                    template_predicate,
-                    font_predicate,
-                )
-            })
+        self.families.iter().find_map(|family| {
+            // Every family consulted before a usable font is found would have its matching
+            // faces loaded in a browser that loads fonts on demand, so request the unloaded ones.
+            family.request_unloaded_script_faces(font_context, &self.descriptor, codepoint);
+            family
+                .templates(font_context, &self.descriptor)
+                .find_map(|template| {
+                    template.font_if_matches(
+                        font_context,
+                        &self.descriptor,
+                        template_predicate,
+                        font_predicate,
+                    )
+                })
+        })
     }
 
     /// Attempts to find a suitable fallback font which matches the given `template_predicate` and
@@ -943,6 +1028,7 @@ impl FontGroupFamilyTemplate {
 struct FontGroupFamily {
     family_descriptor: FontFamilyDescriptor,
     members: OnceLock<Vec<FontGroupFamilyTemplate>>,
+    unloaded_script_faces: OnceLock<Vec<UnloadedFontFace>>,
 }
 
 impl From<FontFamilyDescriptor> for FontGroupFamily {
@@ -950,6 +1036,7 @@ impl From<FontFamilyDescriptor> for FontGroupFamily {
         Self {
             family_descriptor,
             members: Default::default(),
+            unloaded_script_faces: Default::default(),
         }
     }
 }
@@ -973,6 +1060,30 @@ impl FontGroupFamily {
                     .collect()
             })
             .iter()
+    }
+
+    fn request_unloaded_script_faces(
+        &self,
+        font_context: &FontContext,
+        font_descriptor: &FontDescriptor,
+        codepoint: char,
+    ) {
+        let faces = self.unloaded_script_faces.get_or_init(|| {
+            let loaded: Vec<FontTemplateRef> = self
+                .templates(font_context, font_descriptor)
+                .map(|member| member.template.clone())
+                .collect();
+            font_context.matching_unloaded_script_faces(
+                font_descriptor,
+                &self.family_descriptor,
+                &loaded,
+            )
+        });
+        for face in faces {
+            if face.descriptor.char_in_unicode_range(codepoint) {
+                font_context.request_unloaded_script_face_load(face.id);
+            }
+        }
     }
 }
 

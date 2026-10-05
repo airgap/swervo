@@ -13,6 +13,7 @@ use style::str::{split_html_space_chars, str_join};
 use stylo_dom::ElementState;
 
 use crate::dom::bindings::codegen::Bindings::CharacterDataBinding::CharacterDataMethods;
+use crate::dom::bindings::codegen::Bindings::EventBinding::EventMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLOptionElementBinding::HTMLOptionElementMethods;
 use crate::dom::bindings::codegen::Bindings::HTMLSelectElementBinding::HTMLSelectElement_Binding::HTMLSelectElementMethods;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
@@ -25,6 +26,7 @@ use crate::dom::characterdata::CharacterData;
 use crate::dom::document::Document;
 use crate::dom::element::attributes::storage::AttrRef;
 use crate::dom::element::{AttributeMutation, CustomElementCreationMode, Element, ElementCreator};
+use crate::dom::event::Event;
 use crate::dom::html::htmlelement::HTMLElement;
 use crate::dom::html::htmlformelement::HTMLFormElement;
 use crate::dom::html::htmloptgroupelement::HTMLOptGroupElement;
@@ -36,7 +38,7 @@ use crate::dom::node::{
     BindContext, ChildrenMutation, CloneChildrenFlag, MoveContext, Node, NodeTraits, UnbindContext,
 };
 use crate::dom::text::Text;
-use crate::dom::types::DocumentFragment;
+use crate::dom::types::{DocumentFragment, MouseEvent};
 use crate::dom::validation::Validatable;
 use crate::dom::validitystate::ValidationFlags;
 use crate::dom::window::Window;
@@ -89,6 +91,9 @@ impl HTMLOptionElement {
 
     pub(crate) fn set_selectedness(&self, selected: bool) {
         self.selectedness.set(selected);
+        // <https://html.spec.whatwg.org/multipage/#selector-checked>
+        self.upcast::<Element>()
+            .set_state(ElementState::CHECKED, selected);
         // Bump the tree version so that any live HTMLCollection (e.g. selectedOptions)
         // rooted at an ancestor invalidates its cached length and cursor.
         self.upcast::<Node>().rev_version();
@@ -390,6 +395,17 @@ impl VirtualMethods for HTMLOptionElement {
         Some(self.upcast::<HTMLElement>() as &dyn VirtualMethods)
     }
 
+    fn handle_event(&self, cx: &mut JSContext, event: &Event) {
+        self.super_type().unwrap().handle_event(cx, event);
+        if event.type_() == atom!("mousedown") &&
+            !event.DefaultPrevented() &&
+            let Some(mouse_event) = event.downcast::<MouseEvent>() &&
+            let Some(select) = self.owner_select_element()
+        {
+            select.handle_option_mouse_down(cx, self, mouse_event);
+        }
+    }
+
     fn attribute_mutated(
         &self,
         cx: &mut js::context::JSContext,
@@ -416,6 +432,10 @@ impl VirtualMethods for HTMLOptionElement {
                 self.update_select_validity(cx);
             },
             local_name!("selected") => {
+                // <https://html.spec.whatwg.org/multipage/#selector-default>
+                self.upcast::<Element>()
+                    .set_state(ElementState::DEFAULT, !mutation.is_removal());
+
                 let mut selectedness_changed = false;
                 match mutation {
                     AttributeMutation::Set(..) => {

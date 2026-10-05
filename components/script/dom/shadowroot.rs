@@ -34,7 +34,6 @@ use crate::dom::bindings::codegen::Bindings::ShadowRootBinding::{
 use crate::dom::bindings::codegen::UnionTypes::{
     TrustedHTMLOrNullIsEmptyString, TrustedHTMLOrString,
 };
-use crate::dom::bindings::frozenarray::CachedFrozenArray;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::root::{Dom, DomRoot, LayoutDom, MutNullableDom};
@@ -45,7 +44,7 @@ use crate::dom::customelementregistry::CustomElementRegistry;
 use crate::dom::document::Document;
 use crate::dom::documentfragment::DocumentFragment;
 use crate::dom::documentorshadowroot::{
-    DocumentOrShadowRoot, ServoStylesheetInDocument, StylesheetSource,
+    AdoptedStyleSheets, DocumentOrShadowRoot, ServoStylesheetInDocument, StylesheetSource,
 };
 use crate::dom::element::Element;
 use crate::dom::html::htmlslotelement::HTMLSlotElement;
@@ -59,7 +58,6 @@ use crate::dom::node::{
 use crate::dom::sanitizer::Sanitizer;
 use crate::dom::trustedtypes::trustedhtml::TrustedHTML;
 use crate::dom::types::EventTarget;
-use crate::dom::window::Window;
 use crate::script_runtime::CanGc;
 use crate::stylesheet_set::StylesheetSetRef;
 
@@ -76,12 +74,10 @@ pub(crate) struct ShadowRoot {
     /// The [`DocumentFragment`] that this [`ShadowRoot`] inherits from.
     document_fragment: DocumentFragment,
     document_or_shadow_root: DocumentOrShadowRoot,
-    document: Dom<Document>,
     /// List of author styles associated with nodes in this shadow tree.
     #[custom_trace]
     author_styles: DomRefCell<AuthorStyles<ServoStylesheetInDocument>>,
     stylesheet_list: MutNullableDom<StyleSheetList>,
-    window: Dom<Window>,
 
     /// <https://dom.spec.whatwg.org/#dom-shadowroot-mode>
     mode: ShadowRootMode,
@@ -110,11 +106,7 @@ pub(crate) struct ShadowRoot {
 
     /// The constructed stylesheet that is adopted by this [ShadowRoot].
     /// <https://drafts.csswg.org/cssom/#dom-documentorshadowroot-adoptedstylesheets>
-    adopted_stylesheets: DomRefCell<Vec<Dom<CSSStyleSheet>>>,
-
-    /// Cached frozen array of [`Self::adopted_stylesheets`]
-    #[ignore_malloc_size_of = "mozjs"]
-    adopted_stylesheets_frozen_types: CachedFrozenArray,
+    adopted_stylesheets: AdoptedStyleSheets,
 
     details_name_groups: DomRefCell<Option<DetailsNameGroups>>,
 }
@@ -139,11 +131,9 @@ impl ShadowRoot {
 
         ShadowRoot {
             document_fragment,
-            document_or_shadow_root: DocumentOrShadowRoot::new(document.window()),
-            document: Dom::from_ref(document),
+            document_or_shadow_root: DocumentOrShadowRoot::new(),
             author_styles: DomRefCell::new(AuthorStyles::new()),
             stylesheet_list: MutNullableDom::new(None),
-            window: Dom::from_ref(document.window()),
             mode,
             slot_assignment_mode,
             clonable,
@@ -153,8 +143,7 @@ impl ShadowRoot {
             declarative: Cell::new(false),
             serializable: Cell::new(false),
             delegates_focus: Cell::new(false),
-            adopted_stylesheets: Default::default(),
-            adopted_stylesheets_frozen_types: CachedFrozenArray::new(),
+            adopted_stylesheets: AdoptedStyleSheets::new(),
             details_name_groups: Default::default(),
         }
     }
@@ -182,12 +171,22 @@ impl ShadowRoot {
         )
     }
 
-    pub(crate) fn owner_doc(&self) -> &Document {
-        &self.document
+    pub(crate) fn adopted_stylesheets(&self) -> &AdoptedStyleSheets {
+        &self.adopted_stylesheets
     }
 
     pub(crate) fn stylesheet_count(&self) -> usize {
         self.author_styles.borrow().stylesheets.len()
+    }
+
+    /// Owned sheets are kept ahead of constructed ones, so they form a prefix of the set.
+    pub(crate) fn owned_stylesheet_count(&self) -> usize {
+        self.author_styles
+            .borrow()
+            .stylesheets
+            .iter()
+            .take_while(|sheet| !sheet.owner.is_constructed())
+            .count()
     }
 
     pub(crate) fn stylesheet_at(&self, index: usize) -> Option<DomRoot<CSSStyleSheet>> {
@@ -210,34 +209,38 @@ impl ShadowRoot {
         owner_node: &Element,
         sheet: Arc<Stylesheet>,
     ) {
-        let stylesheets = &mut self.author_styles.borrow_mut().stylesheets;
+        {
+            let stylesheets = &mut self.author_styles.borrow_mut().stylesheets;
 
-        // FIXME(stevennovaryo): This is almost identical with the one in Document::add_stylesheet.
-        let insertion_point = stylesheets
-            .iter()
-            .find(|sheet_in_shadow| {
-                match &sheet_in_shadow.owner {
-                    StylesheetSource::Element(other_node) => {
-                        owner_node.upcast::<Node>().is_before(other_node.upcast())
-                    },
-                    // Non-constructed stylesheet should be ordered before the
-                    // constructed ones.
-                    StylesheetSource::Constructed(_) => true,
-                }
-            })
-            .cloned();
+            // FIXME(stevennovaryo): This is almost identical with the one in Document::add_stylesheet.
+            let insertion_point = stylesheets
+                .iter()
+                .find(|sheet_in_shadow| {
+                    match &sheet_in_shadow.owner {
+                        StylesheetSource::Element(other_node) => {
+                            owner_node.upcast::<Node>().is_before(other_node.upcast())
+                        },
+                        // Non-constructed stylesheet should be ordered before the
+                        // constructed ones.
+                        StylesheetSource::Constructed(_) => true,
+                    }
+                })
+                .cloned();
 
-        if self.document.has_browsing_context() {
-            self.document.load_web_fonts_from_stylesheet(cx, &sheet);
+            let document = self.owner_document();
+            if document.has_browsing_context() {
+                document.load_web_fonts_from_stylesheet(cx, &sheet);
+            }
+
+            DocumentOrShadowRoot::add_stylesheet(
+                StylesheetSource::Element(Dom::from_ref(owner_node)),
+                StylesheetSetRef::Author(stylesheets),
+                sheet,
+                insertion_point,
+                document.style_shared_author_lock(),
+            );
         }
-
-        DocumentOrShadowRoot::add_stylesheet(
-            StylesheetSource::Element(Dom::from_ref(owner_node)),
-            StylesheetSetRef::Author(stylesheets),
-            sheet,
-            insertion_point,
-            self.document.style_shared_author_lock(),
-        );
+        self.invalidate_stylesheets();
     }
 
     /// Append a constructed stylesheet to the back of shadow root stylesheet set.
@@ -249,22 +252,24 @@ impl ShadowRoot {
     ) {
         debug_assert!(cssom_stylesheet.is_constructed());
 
-        let stylesheets = &mut self.author_styles.borrow_mut().stylesheets;
-        let sheet = cssom_stylesheet.style_stylesheet().clone();
+        {
+            let stylesheets = &mut self.author_styles.borrow_mut().stylesheets;
+            let sheet = cssom_stylesheet.style_stylesheet().clone();
 
-        let insertion_point = stylesheets.iter().last().cloned();
+            let document = self.owner_document();
+            if document.has_browsing_context() {
+                document.load_web_fonts_from_stylesheet(cx, &sheet);
+            }
 
-        if self.document.has_browsing_context() {
-            self.document.load_web_fonts_from_stylesheet(cx, &sheet);
+            DocumentOrShadowRoot::add_stylesheet(
+                StylesheetSource::Constructed(Dom::from_ref(cssom_stylesheet)),
+                StylesheetSetRef::Author(stylesheets),
+                sheet,
+                None,
+                document.style_shared_author_lock(),
+            );
         }
-
-        DocumentOrShadowRoot::add_stylesheet(
-            StylesheetSource::Constructed(Dom::from_ref(cssom_stylesheet)),
-            StylesheetSetRef::Author(stylesheets),
-            sheet,
-            insertion_point,
-            self.document.style_shared_author_lock(),
-        );
+        self.invalidate_stylesheets();
     }
 
     /// Remove a stylesheet owned by `owner` from the list of shadow root sheets.
@@ -274,18 +279,25 @@ impl ShadowRoot {
             owner,
             s,
             StylesheetSetRef::Author(&mut self.author_styles.borrow_mut().stylesheets),
-        )
+        );
+        self.invalidate_stylesheets();
     }
 
+    /// Layout flushes shadow root stylesheets only after the document is told one of them
+    /// changed, and restyles a shadow tree only when its host is marked, so every change to this
+    /// shadow root's stylesheet set must come through here. Otherwise a sheet added after the
+    /// shadow tree was first styled (a later `<style>`, or `adoptedStyleSheets` set after a
+    /// layout) never applies.
     pub(crate) fn invalidate_stylesheets(&self) {
-        self.document.invalidate_shadow_roots_stylesheets();
+        let document = self.owner_document();
+        document.invalidate_shadow_roots_stylesheets();
         self.author_styles.borrow_mut().stylesheets.force_dirty();
         // Mark the host element dirty so a reflow will be performed.
         self.Host().upcast::<Node>().dirty(NodeDamage::Style);
 
         // Also mark the host element with `RestyleHint::restyle_subtree` so a reflow
         // can traverse into the shadow tree.
-        let mut restyle = self.document.ensure_pending_restyle(&self.Host());
+        let mut restyle = document.ensure_pending_restyle(&self.Host());
         restyle.hint.insert(RestyleHint::restyle_subtree());
     }
 
@@ -404,7 +416,7 @@ impl ShadowRootMethods<crate::DomTypeHolder> for ShadowRoot {
             x,
             y,
             None,
-            self.document.has_browsing_context(),
+            self.owner_document().has_browsing_context(),
         ) {
             Some(e) => {
                 let retargeted_node = e.upcast::<EventTarget>().retarget(self.upcast());
@@ -426,7 +438,7 @@ impl ShadowRootMethods<crate::DomTypeHolder> for ShadowRoot {
                 x,
                 y,
                 None,
-                self.document.has_browsing_context(),
+                self.owner_document().has_browsing_context(),
             )
             .iter()
         {
@@ -470,7 +482,7 @@ impl ShadowRootMethods<crate::DomTypeHolder> for ShadowRoot {
         self.stylesheet_list.or_init(|| {
             StyleSheetList::new(
                 cx,
-                &self.window,
+                &self.owner_window(),
                 StyleSheetListOwner::ShadowRoot(Dom::from_ref(self)),
             )
         })
@@ -584,42 +596,27 @@ impl ShadowRootMethods<crate::DomTypeHolder> for ShadowRoot {
 
     /// <https://drafts.csswg.org/cssom/#dom-documentorshadowroot-adoptedstylesheets>
     fn AdoptedStyleSheets(&self, cx: &mut JSContext, retval: MutableHandleValue) {
-        self.adopted_stylesheets_frozen_types.get_or_init(
+        self.adopted_stylesheets.get(
             cx,
-            || {
-                self.adopted_stylesheets
-                    .borrow()
-                    .clone()
-                    .iter()
-                    .map(|sheet| sheet.as_rooted())
-                    .collect()
-            },
+            &StyleSheetListOwner::ShadowRoot(Dom::from_ref(self)),
             retval,
         );
     }
 
     /// <https://drafts.csswg.org/cssom/#dom-documentorshadowroot-adoptedstylesheets>
     fn SetAdoptedStyleSheets(&self, cx: &mut JSContext, val: HandleValue) -> ErrorResult {
-        let result = DocumentOrShadowRoot::set_adopted_stylesheet_from_jsval(
+        self.adopted_stylesheets.set(
             cx,
-            self.adopted_stylesheets.borrow_mut().as_mut(),
-            val,
             &StyleSheetListOwner::ShadowRoot(Dom::from_ref(self)),
-        );
-
-        // If update is successful, clear the FrozenArray cache.
-        if result.is_ok() {
-            self.adopted_stylesheets_frozen_types.clear();
-        }
-
-        result
+            val,
+        )
     }
 
     /// <https://fullscreen.spec.whatwg.org/#dom-document-fullscreenelement>
     fn GetFullscreenElement(&self) -> Option<DomRoot<Element>> {
         DocumentOrShadowRoot::get_fullscreen_element(
             self.upcast::<Node>(),
-            self.document.fullscreen_element(),
+            self.owner_document().fullscreen_element(),
         )
     }
 }

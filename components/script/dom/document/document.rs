@@ -13,6 +13,7 @@ use std::str::FromStr;
 use std::sync::{Arc as StdArc, LazyLock, Mutex};
 use std::time::Duration;
 
+use app_units::Au;
 use bitflags::bitflags;
 use chrono::Local;
 use content_security_policy::sandboxing_directive::SandboxingFlagSet;
@@ -25,6 +26,7 @@ use embedder_traits::{
     AllowOrDeny, AnimationState, CustomHandlersAutomationMode, EmbedderMsg, Image, LoadStatus,
 };
 use encoding_rs::{Encoding, UTF_8};
+use euclid::{Point2D, Rect, Size2D};
 use html5ever::{LocalName, Namespace, QualName, local_name, ns};
 use hyper_serde::Serde;
 use indexmap::IndexSet;
@@ -32,8 +34,8 @@ use js::context::{JSContext, NoGC};
 use js::realm::CurrentRealm;
 use js::rust::{HandleObject, HandleValue, MutableHandleValue};
 use layout_api::{
-    PendingRestyle, ReflowGoal, ReflowPhasesRun, ReflowStatistics, RestyleReason,
-    ScrollContainerQueryFlags, TrustedNodeAddress,
+    DocumentSelection, PendingRestyle, ReflowGoal, ReflowPhasesRun, ReflowStatistics,
+    RestyleReason, ScrollContainerQueryFlags, TrustedNodeAddress,
 };
 use metrics::{InteractiveFlag, InteractiveWindow, ProgressiveWebMetrics};
 use net_traits::CookieSource::NonHTTP;
@@ -55,6 +57,7 @@ use script_bindings::interfaces::DocumentHelpers;
 use script_bindings::reflector::reflect_dom_object_with_proto_and_cx;
 use script_bindings::trace::CustomTraceable;
 use script_traits::{DocumentActivity, ProgressiveWebMetricType};
+use selectors::parser::SelectorList;
 use servo_arc::Arc;
 use servo_base::cross_process_instant::CrossProcessInstant;
 use servo_base::generic_channel::GenericSend;
@@ -64,19 +67,22 @@ use servo_config::pref;
 use servo_constellation_traits::{NavigationHistoryBehavior, ScriptToConstellationMessage};
 use servo_media::{ClientContextId, ServoMedia};
 use servo_url::{ImmutableOrigin, MutableOrigin, ServoUrl};
+use style::Zero;
 use style::attr::AttrValue;
 use style::context::QuirksMode;
 use style::dom::OpaqueNode;
 use style::invalidation::element::restyle_hints::RestyleHint;
-use style::selector_parser::Snapshot;
+use style::selector_parser::{SelectorImpl, SelectorParser, Snapshot};
 use style::shared_lock::{SharedRwLock, SharedRwLockReadGuard};
 use style::str::{split_html_space_chars, str_join};
 use style::stylesheet_set::DocumentStylesheetSet;
-use style::stylesheets::{Origin, OriginSet, Stylesheet};
+use style::stylesheets::{Origin, OriginSet, Stylesheet, UrlExtraData};
 use style::stylist::Stylist;
+use style_traits::CSSPixel;
 use stylo_atoms::Atom;
 use time::Duration as TimeDuration;
 use url::{Host, Position};
+use webrender_api::units::LayoutVector2D;
 
 use crate::animations::Animations;
 use crate::document_loader::{DocumentLoader, LoadType};
@@ -86,7 +92,8 @@ use crate::dom::beforeunloadevent::BeforeUnloadEvent;
 use crate::dom::bindings::callback::ExceptionHandling;
 use crate::dom::bindings::codegen::Bindings::BeforeUnloadEventBinding::BeforeUnloadEvent_Binding::BeforeUnloadEventMethods;
 use crate::dom::bindings::codegen::Bindings::DocumentBinding::{
-    DocumentMethods, DocumentReadyState, DocumentVisibilityState, NamedPropertyValue,
+    CaretPositionFromPointOptions, DocumentMethods, DocumentReadyState, DocumentVisibilityState,
+    NamedPropertyValue,
 };
 use crate::dom::bindings::codegen::Bindings::ElementBinding::ScrollLogicalPosition;
 use crate::dom::bindings::codegen::Bindings::EventBinding::Event_Binding::EventMethods;
@@ -112,7 +119,6 @@ use crate::dom::bindings::domname::{
     self, is_valid_attribute_local_name, is_valid_element_local_name, namespace_from_domstring,
 };
 use crate::dom::bindings::error::{Error, ErrorInfo, ErrorResult, Fallible};
-use crate::dom::bindings::frozenarray::CachedFrozenArray;
 use crate::dom::bindings::inheritance::{Castable, ElementTypeId, HTMLElementTypeId, NodeTypeId};
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::refcounted::Trusted;
@@ -122,7 +128,9 @@ use crate::dom::bindings::str::{DOMString, USVString};
 use crate::dom::bindings::trace::{HashMapTracedValues, NoTrace};
 use crate::dom::bindings::weakref::DOMTracker;
 use crate::dom::bindings::xmlname::matches_name_production;
+use crate::dom::caretposition::CaretPosition;
 use crate::dom::cdatasection::CDATASection;
+use crate::dom::characterdata::CharacterData;
 use crate::dom::comment::Comment;
 use crate::dom::compositionevent::CompositionEvent;
 use crate::dom::css::cssstylesheet::CSSStyleSheet;
@@ -134,16 +142,18 @@ use crate::dom::customelementregistry::{
 use crate::dom::customevent::CustomEvent;
 use crate::dom::document::accessibility_data::AccessibilityData;
 use crate::dom::document::focus::{DocumentFocusHandler, FocusableArea};
+use crate::dom::document::top_layer::DocumentTopLayer;
 use crate::dom::document::tree_ordered_index_map::TreeOrderedIndexMap;
 use crate::dom::document_embedder_controls::DocumentEmbedderControls;
 use crate::dom::document_event_handler::DocumentEventHandler;
 use crate::dom::documentfragment::DocumentFragment;
 use crate::dom::documentorshadowroot::{
-    DocumentOrShadowRoot, ServoStylesheetInDocument, StylesheetSource,
+    AdoptedStyleSheets, DocumentOrShadowRoot, ServoStylesheetInDocument, StylesheetSource,
 };
 use crate::dom::documenttimeline::DocumentTimeline;
 use crate::dom::documenttype::DocumentType;
 use crate::dom::domimplementation::DOMImplementation;
+use crate::dom::dragevent::DragEvent;
 use crate::dom::element::attributes::storage::AttrRef;
 use crate::dom::element::{CustomElementCreationMode, Element, ElementCreator};
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
@@ -157,6 +167,7 @@ use crate::dom::history::History;
 use crate::dom::html::htmlallcollection::HTMLAllCollection;
 use crate::dom::html::htmlanchorelement::HTMLAnchorElement;
 use crate::dom::html::htmlareaelement::HTMLAreaElement;
+use crate::dom::html::htmlbrelement::HTMLBRElement;
 use crate::dom::html::htmlbaseelement::HTMLBaseElement;
 use crate::dom::html::htmlcollection::{CollectionFilter, HTMLCollection};
 use crate::dom::html::htmlelement::HTMLElement;
@@ -166,7 +177,10 @@ use crate::dom::html::htmlheadelement::HTMLHeadElement;
 use crate::dom::html::htmlhtmlelement::HTMLHtmlElement;
 use crate::dom::html::htmliframeelement::HTMLIFrameElement;
 use crate::dom::html::htmlimageelement::HTMLImageElement;
+use crate::dom::html::htmlmediaelement::HTMLMediaElement;
+use crate::dom::html::htmlinputelement::HTMLInputElement;
 use crate::dom::html::htmlscriptelement::{HTMLScriptElement, ScriptResult};
+use crate::dom::html::htmltextareaelement::HTMLTextAreaElement;
 use crate::dom::html::htmltitleelement::HTMLTitleElement;
 use crate::dom::htmldetailselement::DetailsNameGroups;
 use crate::dom::intersectionobserver::IntersectionObserver;
@@ -190,10 +204,12 @@ use crate::dom::range::Range;
 use crate::dom::resizeobserver::{ResizeObservationDepth, ResizeObserver};
 use crate::dom::sanitizer::Sanitizer;
 use crate::dom::scrolling_box::{ScrollAxisState, ScrollingBox};
-use crate::dom::selection::Selection;
+use crate::dom::selection::{Selection, caret_stops_around, closest_caret_stop};
 use crate::dom::servoparser::ServoParser;
 use crate::dom::shadowroot::ShadowRoot;
 use crate::dom::storageevent::StorageEvent;
+use crate::dom::svg::svgsvgelement::SVGSVGElement;
+use crate::dom::svg::svguseelement::{ExternalSvgDocument, fetch_external_svg_document};
 use crate::dom::text::Text;
 use crate::dom::touchevent::TouchEvent as DomTouchEvent;
 use crate::dom::touchlist::TouchList;
@@ -325,6 +341,28 @@ impl PendingScrollEvent {
     }
 }
 
+/// A scroll event target whose scrolling box scrolled recently and whose scroll has not
+/// completed yet.
+#[derive(JSTraceable, MallocSizeOf)]
+#[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
+struct ScrollAwaitingCompletion {
+    target: Dom<EventTarget>,
+    /// The scroll position before the user started this scroll, if the user scrolled the box
+    /// directly. Snapping after such a scroll goes in the direction the user scrolled.
+    #[no_trace]
+    user_scroll_origin: Option<LayoutVector2D>,
+}
+
+/// The snap targets a snap container last snapped to on each axis.
+/// <https://drafts.csswg.org/css-scroll-snap-1/#re-snap>
+#[derive(JSTraceable, MallocSizeOf)]
+#[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
+struct SnapTargets {
+    container: Dom<Node>,
+    x: Option<Dom<Element>>,
+    y: Option<Dom<Element>>,
+}
+
 /// Reasons why a [`Document`] might need a rendering update that is otherwise
 /// untracked via other [`Document`] properties.
 #[derive(Clone, Copy, Debug, Default, JSTraceable, MallocSizeOf)]
@@ -342,6 +380,14 @@ bitflags! {
         /// one more rendering update possibility after this happens, so that any potential screenshot
         /// reflects the up-to-date contents.
         const FontReadyPromiseFulfilled = 1 << 2;
+        /// A smooth scroll is animating and needs to advance in the next rendering update.
+        const SmoothScrollInProgress = 1 << 3;
+        /// A scrolling box scrolled during the last rendering update. Another rendering update
+        /// is needed to notice that it stopped, at which point `scrollend` fires.
+        const ScrollInProgress = 1 << 4;
+        /// Layout queued inline `<svg>`s for serialization during a query reflow, which can't
+        /// serialize them, so a rendering update has to follow to do it.
+        const PendingSvgSerialization = 1 << 5;
     }
 }
 
@@ -398,6 +444,8 @@ pub(crate) struct Document {
     event_handler: DocumentEventHandler,
     /// A helper used to process and store data related to focus handling.
     focus_handler: DocumentFocusHandler,
+    /// The top layer and the popover, dialog and close watcher state that feeds it.
+    top_layer: DocumentTopLayer,
     /// A helper to handle showing and hiding user interface controls in the embedding layer.
     embedder_controls: DocumentEmbedderControls,
     id_map: TreeOrderedIndexMap,
@@ -471,6 +519,11 @@ pub(crate) struct Document {
     /// Information on elements needing restyle to ship over to layout when the
     /// time comes.
     pending_restyles: DomRefCell<FxHashMap<Dom<Element>, NoTrace<PendingRestyle>>>,
+    /// Selector strings parsed for `querySelector()`, `matches()` and `closest()`. Scripts
+    /// call these in loops with the same few strings, and parsing dominated those calls.
+    #[ignore_malloc_size_of = "defined in selectors"]
+    #[no_trace]
+    selector_cache: DomRefCell<FxHashMap<String, SelectorList<SelectorImpl>>>,
     /// A collection of reasons that the [`Document`] needs to be restyled at the next
     /// opportunity for a reflow. If this is empty, then the [`Document`] does not need to
     /// be restyled.
@@ -508,6 +561,20 @@ pub(crate) struct Document {
     /// It is safe to use FxBuildHasher here as Atoms are in the string_cache
     form_id_listener_map:
         DomRefCell<HashMapTracedValues<Atom, HashSet<Dom<Element>>, FxBuildHasher>>,
+    /// Map from ID to the inline `<svg>` roots whose cached serialization looked that ID up
+    /// (successfully or not) to inline a `<use href>` or `url(#id)` target living outside
+    /// their own subtree. Those serializations are stale as soon as an element with the ID
+    /// enters or leaves the document, or the target's subtree mutates.
+    svg_id_reference_listeners:
+        DomRefCell<HashMapTracedValues<Atom, HashSet<Dom<SVGSVGElement>>, FxBuildHasher>>,
+    /// Set while an svg subtree is being serialized: the temporary clones it inserts and
+    /// removes register IDs and mutate svg subtrees, which must not invalidate other svgs
+    /// (each re-serialization would then invalidate the others, forever).
+    svg_serialization_in_progress: Cell<bool>,
+    /// External documents referenced by `<use href="file.svg#id">`, keyed by URL without
+    /// fragment, fetched once per document.
+    /// <https://svgwg.org/svg2-draft/struct.html#UseElementHrefAttribute>
+    external_svg_documents: DomRefCell<HashMapTracedValues<ServoUrl, ExternalSvgDocument>>,
     #[no_trace]
     interactive_time: DomRefCell<ProgressiveWebMetrics>,
     #[no_trace]
@@ -527,6 +594,10 @@ pub(crate) struct Document {
     /// List of responsive images
     responsive_images: DomRefCell<Vec<Dom<HTMLImageElement>>>,
 
+    /// The connected `<video>` elements, whose frame renderers learn after each rendering
+    /// update whether they paint.
+    video_elements: DomRefCell<Vec<Dom<HTMLMediaElement>>>,
+
     /// [`NavigationTiming`] information for this [`Document`].
     #[no_trace]
     navigation_timing: NavigationTiming,
@@ -542,6 +613,8 @@ pub(crate) struct Document {
     delayed_tasks: DomRefCell<Vec<Box<dyn NonSendTaskBox>>>,
     /// <https://html.spec.whatwg.org/multipage/#completely-loaded>
     completely_loaded: Cell<bool>,
+    /// Whether the window's userscripts have been queued for this document.
+    userscripts_loaded: Cell<bool>,
     /// Set of shadow roots connected to the document tree.
     shadow_roots: DomRefCell<HashSet<Dom<ShadowRoot>>>,
     /// Whether any of the shadow roots need the stylesheets flushed.
@@ -609,18 +682,22 @@ pub(crate) struct Document {
     /// The lifetime of an intersection observer is specified at
     /// <https://github.com/w3c/IntersectionObserver/issues/525>.
     intersection_observers: DomRefCell<Vec<Dom<IntersectionObserver>>>,
+    /// <https://html.spec.whatwg.org/multipage/#lazy-load-intersection-observer>
+    lazy_load_intersection_observer: MutNullableDom<IntersectionObserver>,
     /// The node that is currently highlighted by the devtools
     highlighted_dom_node: MutNullableDom<Node>,
     /// The constructed stylesheet that is adopted by this [Document].
     /// <https://drafts.csswg.org/cssom/#dom-documentorshadowroot-adoptedstylesheets>
-    adopted_stylesheets: DomRefCell<Vec<Dom<CSSStyleSheet>>>,
-    /// Cached frozen array of [`Self::adopted_stylesheets`]
-    #[ignore_malloc_size_of = "mozjs"]
-    adopted_stylesheets_frozen_types: CachedFrozenArray,
+    adopted_stylesheets: AdoptedStyleSheets,
     /// <https://drafts.csswg.org/cssom-view/#document-pending-scroll-events>
     /// > Each Document has an associated list of pending scroll events, which stores
     /// > pairs of (EventTarget, DOMString), initially empty.
     pending_scroll_events: DomRefCell<Vec<PendingScrollEvent>>,
+    /// Scroll event targets whose scrolling box scrolled during the last rendering update and
+    /// whose scroll is not yet considered completed.
+    scrolls_awaiting_completion: DomRefCell<Vec<ScrollAwaitingCompletion>>,
+    /// The snap targets of the snap containers in this document that are snapped.
+    snap_targets: DomRefCell<Vec<SnapTargets>>,
     /// Other reasons that a rendering update might be required for this [`Document`].
     rendering_update_reasons: Cell<RenderingUpdateReason>,
     /// Whether or not this [`Document`] is waiting on canvas image updates. If it is
@@ -885,6 +962,18 @@ impl Document {
             .set(Some(new_dirty_root.downcast::<Element>().unwrap()));
     }
 
+    /// Like [`Self::note_node_with_dirty_descendants`], for a node below which stylo's
+    /// relative selector invalidator has already set `HAS_DIRTY_DESCENDANTS`, down to the
+    /// elements it restyled. That flag on `node` would otherwise end the walk before it marks
+    /// the ancestors and moves the dirty root.
+    pub(crate) fn note_node_with_invalidated_descendants(&self, node: &Node) {
+        node.set_flag(NodeFlags::HAS_DIRTY_DESCENDANTS, false);
+        self.note_node_with_dirty_descendants(node);
+        if node.is::<Element>() {
+            node.set_flag(NodeFlags::HAS_DIRTY_DESCENDANTS, true);
+        }
+    }
+
     pub(crate) fn take_dirty_root(&self) -> Option<DomRoot<Element>> {
         self.dirty_root.take()
     }
@@ -1030,6 +1119,8 @@ impl Document {
 
     pub(crate) fn set_url(&self, url: ServoUrl) {
         *self.url.borrow_mut() = url;
+        // Parsing depends on the URL (chrome-only selectors).
+        self.selector_cache.borrow_mut().clear();
     }
 
     pub(crate) fn about_base_url(&self) -> Option<ServoUrl> {
@@ -1104,6 +1195,29 @@ impl Document {
         condition
     }
 
+    /// Parses `selectors` the way `querySelector()` does, reusing an earlier parse of the
+    /// same string.
+    pub(crate) fn parse_selector_list(
+        &self,
+        selectors: &str,
+    ) -> Fallible<SelectorList<SelectorImpl>> {
+        if let Some(list) = self.selector_cache.borrow().get(selectors) {
+            return Ok(list.clone());
+        }
+        let list = SelectorParser::parse_author_origin_no_namespace(
+            selectors,
+            &UrlExtraData(self.url().get_arc()),
+        )
+        .map_err(|_| Error::Syntax(None))?;
+        let mut cache = self.selector_cache.borrow_mut();
+        // Bounded like Blink's SelectorQueryCache, for pages that build a new string per call.
+        if cache.len() >= 256 {
+            cache.clear();
+        }
+        cache.insert(selectors.to_owned(), list.clone());
+        Ok(list)
+    }
+
     /// Returns the first `base` element in the DOM that has an `href` attribute.
     pub(crate) fn base_element(&self) -> Option<DomRoot<HTMLBaseElement>> {
         self.base_element.get()
@@ -1176,12 +1290,112 @@ impl Document {
     pub(crate) fn unregister_element_id(&self, cx: &mut JSContext, id: &Atom) {
         self.id_map.remove(id);
         self.reset_form_owner_for_listeners(cx, id);
+        self.invalidate_svgs_referencing_id(id);
     }
 
     /// Associate an element present in this document with the provided id.
     pub(crate) fn register_element_id(&self, cx: &mut JSContext, element: &Element, id: &Atom) {
         self.id_map.add(id, element);
         self.reset_form_owner_for_listeners(cx, id);
+        self.invalidate_svgs_referencing_id(id);
+    }
+
+    pub(crate) fn register_svg_id_reference_listener(&self, id: Atom, svg: &SVGSVGElement) {
+        self.svg_id_reference_listeners
+            .borrow_mut()
+            .entry(id)
+            .or_default()
+            .insert(Dom::from_ref(svg));
+    }
+
+    pub(crate) fn unregister_svg_id_reference_listener(&self, id: &Atom, svg: &SVGSVGElement) {
+        let mut map = self.svg_id_reference_listeners.borrow_mut();
+        if let Some(listeners) = map.get_mut(id) {
+            listeners.remove(&Dom::from_ref(svg));
+            if listeners.is_empty() {
+                map.remove(id);
+            }
+        }
+    }
+
+    pub(crate) fn has_svg_id_reference_listeners(&self) -> bool {
+        !self.svg_id_reference_listeners.borrow().is_empty()
+    }
+
+    /// Invalidate the serialization of every svg that resolved `id` from outside its subtree.
+    pub(crate) fn invalidate_svgs_referencing_id(&self, id: &Atom) {
+        if self.svg_serialization_in_progress.get() {
+            return;
+        }
+        let listeners: Vec<DomRoot<SVGSVGElement>> = match self
+            .svg_id_reference_listeners
+            .borrow()
+            .get(id)
+        {
+            Some(listeners) => listeners.iter().map(|svg| svg.as_rooted()).collect(),
+            None => return,
+        };
+        for svg in listeners {
+            svg.invalidate_cached_serialized_subtree_and_rasterization_result();
+        }
+    }
+
+    pub(crate) fn set_svg_serialization_in_progress(&self, in_progress: bool) {
+        self.svg_serialization_in_progress.set(in_progress);
+    }
+
+    /// The parsed external document at `url` (no fragment) for `<use>`, or `None` while it
+    /// is loading or after it failed. The first request starts the fetch; `requester` is
+    /// invalidated when a pending fetch completes so its next serialization inlines the target.
+    pub(crate) fn external_svg_document(
+        &self,
+        url: ServoUrl,
+        requester: &SVGSVGElement,
+    ) -> Option<DomRoot<Document>> {
+        let mut documents = self.external_svg_documents.borrow_mut();
+        match documents.entry(url.clone()) {
+            Occupied(mut entry) => match entry.get_mut() {
+                ExternalSvgDocument::Loaded(document) => Some(document.as_rooted()),
+                ExternalSvgDocument::Pending(requesters) => {
+                    requesters.insert(Dom::from_ref(requester));
+                    None
+                },
+                ExternalSvgDocument::Failed => None,
+            },
+            Vacant(entry) => {
+                entry.insert(ExternalSvgDocument::Pending(HashSet::from([Dom::from_ref(
+                    requester,
+                )])));
+                drop(documents);
+                fetch_external_svg_document(self, url);
+                None
+            },
+        }
+    }
+
+    /// Record the outcome of an external `<use>` document fetch and invalidate the svgs that
+    /// were waiting for it.
+    pub(crate) fn finish_external_svg_document(
+        &self,
+        url: ServoUrl,
+        document: Option<DomRoot<Document>>,
+    ) {
+        let result = match document {
+            Some(document) => ExternalSvgDocument::Loaded(Dom::from_ref(&*document)),
+            None => ExternalSvgDocument::Failed,
+        };
+        let previous = self
+            .external_svg_documents
+            .borrow_mut()
+            .insert(url, result);
+        let Some(ExternalSvgDocument::Pending(requesters)) = previous else {
+            unreachable!("external svg document finished without a pending fetch");
+        };
+        let requesters: Vec<DomRoot<SVGSVGElement>> =
+            requesters.iter().map(|svg| svg.as_rooted()).collect();
+        for svg in requesters {
+            svg.invalidate_cached_serialized_subtree_and_rasterization_result();
+        }
     }
 
     /// Remove any existing association between the provided name and any elements in this document.
@@ -1298,7 +1512,8 @@ impl Document {
             //
             // FIXME(stshine): this should be the origin of the stacking context space,
             // which may differ under the influence of writing mode.
-            self.window.scroll(cx, 0.0, 0.0, ScrollBehavior::Instant);
+            self.window
+                .scroll(cx, 0.0, 0.0, ScrollBehavior::Instant, None);
             // Step 2.3. Return.
             return;
         }
@@ -1464,34 +1679,79 @@ impl Document {
     pub(crate) fn run_the_scroll_steps(&self, cx: &mut JSContext) {
         // Step 1: For each scrolling box `box` that was scrolled:
         //
-        // Note: Since scrolling is currently synchronous (no scroll animations /
-        // smooth scrolling), we consider any box event target that had a scroll
-        // event to be a box that scrolled. Once scrolling is asynchronous this
-        // should reflect scrolling targets which have finished their scroll
-        // animation.
-        let boxes_that_were_scrolled: Vec<_> = self
+        // Note: `scrollend` marks the completion of a scroll. A box counts as having
+        // completed its scroll once a rendering update passes in which it did not scroll
+        // at all, so a smooth scroll or a stream of user scroll input yields one
+        // `scrollend` at its end instead of one per frame.
+        let scrolled_in_this_update: Vec<DomRoot<EventTarget>> = self
             .pending_scroll_events
             .borrow()
             .iter()
-            .filter_map(|pending_event| {
-                if &*pending_event.event == "scroll" {
-                    Some(pending_event.target.as_rooted())
-                } else {
-                    None
-                }
-            })
+            .filter(|pending_event| &*pending_event.event == "scroll")
+            .map(|pending_event| pending_event.target.as_rooted())
             .collect();
+        let completed_scrolls: Vec<(DomRoot<EventTarget>, Option<LayoutVector2D>)> = {
+            let mut awaiting_completion = self.scrolls_awaiting_completion.borrow_mut();
+            let still_scrolling = |awaiting: &ScrollAwaitingCompletion| {
+                scrolled_in_this_update
+                    .iter()
+                    .any(|scrolled| **scrolled == *awaiting.target) ||
+                    self.scroll_target_has_ongoing_smooth_scroll(&awaiting.target)
+            };
+            let completed = awaiting_completion
+                .iter()
+                .filter(|awaiting| !still_scrolling(awaiting))
+                .map(|awaiting| {
+                    (
+                        DomRoot::from_ref(&*awaiting.target),
+                        awaiting.user_scroll_origin,
+                    )
+                })
+                .collect();
+            awaiting_completion.retain(still_scrolling);
+            for target in &scrolled_in_this_update {
+                if !awaiting_completion
+                    .iter()
+                    .any(|awaiting| *awaiting.target == **target)
+                {
+                    awaiting_completion.push(ScrollAwaitingCompletion {
+                        target: Dom::from_ref(&**target),
+                        user_scroll_origin: None,
+                    });
+                }
+            }
+            completed
+        };
 
-        for target in boxes_that_were_scrolled.into_iter() {
+        for (target, user_scroll_origin) in completed_scrolls.into_iter() {
+            // A user scroll of a snap container that came to rest between snap positions
+            // continues to the next snap position in the direction the user scrolled, and
+            // completes once it gets there.
+            if let Some(user_scroll_origin) = user_scroll_origin &&
+                let Some(scrolling_box) = self.snap_container_for_scroll_target(&target)
+            {
+                let position = scrolling_box.scroll_position();
+                let snapped = scrolling_box.snapped_position(position, Some(user_scroll_origin));
+                if snapped != position {
+                    scrolling_box.scroll_to(cx, snapped, ScrollBehavior::Smooth);
+                    self.scrolls_awaiting_completion
+                        .borrow_mut()
+                        .push(ScrollAwaitingCompletion {
+                            target: target.as_traced(),
+                            user_scroll_origin: None,
+                        });
+                    continue;
+                }
+            }
+
             // Step 1.1: If box belongs to a viewport, let doc be the viewport’s associated
             // Document and target be the viewport. If box belongs to a VisualViewport,
             // let doc be the VisualViewport’s associated document and target be the
             // VisualViewport. Otherwise, box belongs to an element and let doc be the
             // element’s node document and target be the element.
-            let Some(element) = target.downcast::<Element>() else {
-                continue;
-            };
-            let document = element.owner_document();
+            //
+            // Note: Every target here queued its scroll event in this Document's list, so
+            // this Document is doc.
 
             // Step 1.2: If box belongs to a snap container, snapcontainer, run the
             // update scrollsnapchange targets steps for snapcontainer.
@@ -1499,7 +1759,7 @@ impl Document {
 
             // Step 1.3: If (target, "scrollend") is already in doc’s pending scroll
             // events, abort these steps.
-            let mut pending_scroll_events = document.pending_scroll_events.borrow_mut();
+            let mut pending_scroll_events = self.pending_scroll_events.borrow_mut();
             let event = "scrollend".into();
             if pending_scroll_events
                 .iter()
@@ -1513,6 +1773,10 @@ impl Document {
                 target: target.as_traced(),
                 event: "scrollend".into(),
             });
+        }
+
+        if !self.scrolls_awaiting_completion.borrow().is_empty() {
+            self.add_rendering_update_reason(RenderingUpdateReason::ScrollInProgress);
         }
 
         // Step 2: For each item (target, type) in doc’s pending scroll events, in
@@ -1540,6 +1804,110 @@ impl Document {
 
         // Step 3. Empty doc’s pending scroll events.
         // Note: This is done above.
+    }
+
+    /// Records where a scroll the user is making started from, before its scroll event is
+    /// queued, so that snapping can follow the direction of the scroll once it completes.
+    pub(crate) fn note_user_scroll_origin(&self, target: &EventTarget, origin: LayoutVector2D) {
+        let mut awaiting_completion = self.scrolls_awaiting_completion.borrow_mut();
+        match awaiting_completion
+            .iter_mut()
+            .find(|awaiting| *awaiting.target == *target)
+        {
+            Some(awaiting) => {
+                awaiting.user_scroll_origin.get_or_insert(origin);
+            },
+            None => awaiting_completion.push(ScrollAwaitingCompletion {
+                target: Dom::from_ref(target),
+                user_scroll_origin: Some(origin),
+            }),
+        }
+    }
+
+    fn scroll_target_has_ongoing_smooth_scroll(&self, target: &EventTarget) -> bool {
+        let window = self.window();
+        if target.is::<Document>() {
+            return window.has_ongoing_smooth_scroll(window.pipeline_id().root_scroll_id());
+        }
+        target.downcast::<Element>().is_some_and(|element| {
+            window.has_ongoing_smooth_scroll(window.scroll_id_for_element(element))
+        })
+    }
+
+    /// The scrolling box behind a scroll event target, if it is a snap container.
+    fn snap_container_for_scroll_target(&self, target: &EventTarget) -> Option<ScrollingBox> {
+        if target.is::<Document>() {
+            let scrolling_box = self.viewport_scrolling_box(ScrollContainerQueryFlags::Inclusive);
+            return scrolling_box.is_snap_container().then_some(scrolling_box);
+        }
+        target
+            .downcast::<Element>()
+            .filter(|element| element.scroll_snap_type().is_some())?
+            .scrolling_box(ScrollContainerQueryFlags::Inclusive)
+    }
+
+    /// Remembers the snap targets the scrolling box of `container` snapped to on each axis,
+    /// forgetting them when it snapped to none.
+    pub(crate) fn set_snap_targets(
+        &self,
+        container: &Node,
+        x: Option<&Element>,
+        y: Option<&Element>,
+    ) {
+        let mut snap_targets = self.snap_targets.borrow_mut();
+        snap_targets.retain(|snap_targets| *snap_targets.container != *container);
+        if x.is_some() || y.is_some() {
+            snap_targets.push(SnapTargets {
+                container: Dom::from_ref(container),
+                x: x.map(Dom::from_ref),
+                y: y.map(Dom::from_ref),
+            });
+        }
+    }
+
+    /// Keeps every snap container that is not being scrolled snapped to the snap targets it
+    /// last snapped to, whose positions may have moved since with layout changes or resizes.
+    /// <https://drafts.csswg.org/css-scroll-snap-1/#re-snap>
+    pub(crate) fn resnap_snap_containers(&self, cx: &mut JSContext) {
+        let snapped_containers: Vec<_> = self
+            .snap_targets
+            .borrow()
+            .iter()
+            .map(|snap_targets| {
+                (
+                    snap_targets.container.as_rooted(),
+                    snap_targets.x.as_ref().map(|x| x.as_rooted()),
+                    snap_targets.y.as_ref().map(|y| y.as_rooted()),
+                )
+            })
+            .collect();
+        for (container, x, y) in snapped_containers {
+            let target = container.upcast::<EventTarget>();
+            let is_scrolling = self
+                .scrolls_awaiting_completion
+                .borrow()
+                .iter()
+                .any(|awaiting| *awaiting.target == *target) ||
+                self.pending_scroll_events
+                    .borrow()
+                    .iter()
+                    .any(|pending_event| *pending_event.target == *target) ||
+                self.scroll_target_has_ongoing_smooth_scroll(target);
+            if is_scrolling {
+                continue;
+            }
+            let Some(scrolling_box) = self.snap_container_for_scroll_target(target) else {
+                self.set_snap_targets(&container, None, None);
+                continue;
+            };
+            let position = scrolling_box.scroll_position();
+            let resnapped = scrolling_box.resnap_position(x.as_deref(), y.as_deref());
+            // Sub-pixel differences are rounding of the snap area positions.
+            let difference = (resnapped - position).abs();
+            if difference.x > 0.5 || difference.y > 0.5 {
+                scrolling_box.scroll_to(cx, resnapped, ScrollBehavior::Instant);
+            }
+        }
     }
 
     /// <https://drafts.csswg.org/cssom-view/#scrolling-events>
@@ -3009,6 +3377,16 @@ impl Document {
         }
     }
 
+    pub(crate) fn register_video_element(&self, video: &HTMLMediaElement) {
+        self.video_elements.borrow_mut().push(Dom::from_ref(video));
+    }
+
+    pub(crate) fn unregister_video_element(&self, video: &HTMLMediaElement) {
+        self.video_elements
+            .borrow_mut()
+            .retain(|element| **element != *video);
+    }
+
     pub(crate) fn register_media_controls(&self, id: &str, controls: &ShadowRoot) {
         let did_have_these_media_controls = self
             .media_controls
@@ -3127,6 +3505,9 @@ impl Document {
 
         let (reflow_phases, statistics) = self.window().reflow(cx, ReflowGoal::UpdateTheRendering);
         let phases = phases.union(reflow_phases);
+        for video in self.video_elements.borrow().iter() {
+            video.update_whether_frames_are_painted();
+        }
 
         self.window().paint_api().update_epoch(
             self.webview_id(),
@@ -3255,6 +3636,9 @@ impl Document {
     pub(crate) fn deliver_resize_loop_error_notification(&self, cx: &mut JSContext) {
         let error_info: ErrorInfo = crate::dom::bindings::error::ErrorInfo {
             message: "ResizeObserver loop completed with undelivered notifications.".to_string(),
+            // Chrome attributes the error to the document so `onerror` handlers that filter
+            // on filename see the page URL.
+            filename: self.url().to_string(),
             ..Default::default()
         };
         self.window
@@ -3330,6 +3714,36 @@ impl Document {
         self.intersection_observers
             .borrow_mut()
             .retain(|observer| *observer != intersection_observer)
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#start-intersection-observing-a-lazy-loading-element>
+    pub(crate) fn start_intersection_observing_a_lazy_loading_element(
+        &self,
+        cx: &mut JSContext,
+        element: &Element,
+    ) {
+        // Step 1. Let doc be element's node document.
+        debug_assert!(*element.owner_document() == *self);
+        // Step 2. If doc's lazy load intersection observer is null, set it to a new
+        // IntersectionObserver instance, initialized as follows: ...
+        let observer = self.lazy_load_intersection_observer.or_init(|| {
+            IntersectionObserver::new_lazy_load_observer(cx, &self.window)
+        });
+        // Step 3. Call doc's lazy load intersection observer's observe method with element as
+        // the argument.
+        observer.observe_target_element(element);
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#stop-intersection-observing-a-lazy-loading-element>
+    pub(crate) fn stop_intersection_observing_a_lazy_loading_element(&self, element: &Element) {
+        // Step 1. Let doc be element's node document.
+        // Step 2. Assert: doc's lazy load intersection observer is not null.
+        // Step 3. Call doc's lazy load intersection observer's unobserve method with element as
+        // the argument.
+        self.lazy_load_intersection_observer
+            .get()
+            .expect("an element awaiting lazy load is observed by its document")
+            .unobserve_target_element(element);
     }
 
     /// <https://w3c.github.io/IntersectionObserver/#update-intersection-observations-algo>
@@ -3608,6 +4022,10 @@ impl<'dom> LayoutDom<'dom, Document> {
     pub(crate) fn elements_with_id(self, id: &Atom) -> &[LayoutDom<'dom, Element>] {
         self.unsafe_get().id_map.get_all_for_layout(id)
     }
+
+    pub(crate) fn top_layer_elements(self) -> &'dom [LayoutDom<'dom, Element>] {
+        self.unsafe_get().top_layer.elements_for_layout()
+    }
 }
 
 // https://html.spec.whatwg.org/multipage/#is-a-registrable-domain-suffix-of-or-is-equal-to
@@ -3739,7 +4157,7 @@ impl Document {
 
         Document {
             node: Node::new_document_node(),
-            document_or_shadow_root: DocumentOrShadowRoot::new(window),
+            document_or_shadow_root: DocumentOrShadowRoot::new(),
             window: Dom::from_ref(window),
             has_browsing_context,
             implementation: Default::default(),
@@ -3751,6 +4169,7 @@ impl Document {
             quirks_mode: Cell::new(QuirksMode::NoQuirks),
             event_handler: DocumentEventHandler::new(window),
             focus_handler: DocumentFocusHandler::new(window, has_focus),
+            top_layer: Default::default(),
             embedder_controls: DocumentEmbedderControls::new(window),
             id_map: TreeOrderedIndexMap::id(),
             name_map: TreeOrderedIndexMap::name(),
@@ -3792,6 +4211,7 @@ impl Document {
             target_base_element: Default::default(),
             appropriate_template_contents_owner_document: Default::default(),
             pending_restyles: DomRefCell::new(FxHashMap::default()),
+            selector_cache: Default::default(),
             needs_restyle: Cell::new(RestyleReason::DOMChanged),
             origin: DomRefCell::new(origin),
             referrer,
@@ -3803,6 +4223,9 @@ impl Document {
             spurious_animation_frames: Cell::new(0),
             fullscreen_element: MutNullableDom::new(None),
             form_id_listener_map: Default::default(),
+            svg_id_reference_listeners: Default::default(),
+            svg_serialization_in_progress: Cell::new(false),
+            external_svg_documents: Default::default(),
             interactive_time: DomRefCell::new(interactive_time),
             tti_window: DomRefCell::new(InteractiveWindow::default()),
             canceller,
@@ -3812,9 +4235,11 @@ impl Document {
             active_parser_was_aborted: Cell::new(false),
             fired_unload: Cell::new(false),
             responsive_images: Default::default(),
+            video_elements: Default::default(),
             navigation_timing: Default::default(),
             resource_fetch_timing: RefCell::new(None),
             completely_loaded: Cell::new(false),
+            userscripts_loaded: Cell::new(false),
             script_and_layout_blockers: Cell::new(0),
             delayed_tasks: Default::default(),
             shadow_roots: DomRefCell::new(HashSet::new()),
@@ -3845,10 +4270,12 @@ impl Document {
             has_trustworthy_ancestor_origin: Cell::new(has_trustworthy_ancestor_origin),
             intersection_observer_task_queued: Cell::new(false),
             intersection_observers: Default::default(),
+            lazy_load_intersection_observer: Default::default(),
             highlighted_dom_node: Default::default(),
-            adopted_stylesheets: Default::default(),
-            adopted_stylesheets_frozen_types: CachedFrozenArray::new(),
+            adopted_stylesheets: AdoptedStyleSheets::new(),
             pending_scroll_events: Default::default(),
+            scrolls_awaiting_completion: Default::default(),
+            snap_targets: Default::default(),
             rendering_update_reasons: Default::default(),
             waiting_on_canvas_image_updates: Cell::new(false),
             root_removal_noted: Cell::new(true),
@@ -3907,6 +4334,10 @@ impl Document {
         &self.focus_handler
     }
 
+    pub(crate) fn top_layer(&self) -> &DocumentTopLayer {
+        &self.top_layer
+    }
+
     /// Get the [`Document`]'s [`DocumentEmbedderControls`].
     pub(crate) fn embedder_controls(&self) -> &DocumentEmbedderControls {
         &self.embedder_controls
@@ -3954,6 +4385,12 @@ impl Document {
             let task = self.delayed_tasks.borrow_mut().remove(0);
             task.run_box(cx);
         }
+    }
+
+    /// Record that userscripts have been queued for this document, returning whether they
+    /// already had been.
+    pub(crate) fn mark_userscripts_loaded(&self) -> bool {
+        self.userscripts_loaded.replace(true)
     }
 
     /// Enqueue a task to run as soon as any JS and layout blockers are removed.
@@ -4329,7 +4766,6 @@ impl Document {
         // I'm getting rid of the whole hashtable soon anyway, since all it does
         // right now is populate the element restyle data in layout, and we
         // could in theory do it in the DOM I think.
-        el.invalidate_relative_selector_anchors();
         let mut entry = self.ensure_pending_restyle(el);
         if entry.snapshot.is_none() {
             entry.snapshot = Some(Snapshot::new());
@@ -4478,8 +4914,21 @@ impl Document {
         self.shadow_roots_styles_changed.set(false);
     }
 
+    pub(crate) fn adopted_stylesheets(&self) -> &AdoptedStyleSheets {
+        &self.adopted_stylesheets
+    }
+
     pub(crate) fn stylesheet_count(&self) -> usize {
         self.stylesheets.borrow().len()
+    }
+
+    /// Owned sheets are kept ahead of constructed ones, so they form a prefix of the set.
+    pub(crate) fn owned_stylesheet_count(&self) -> usize {
+        self.stylesheets
+            .borrow()
+            .iter()
+            .take_while(|(sheet, _origin)| !sheet.owner.is_constructed())
+            .count()
     }
 
     pub(crate) fn stylesheet_at(&self, index: usize) -> Option<DomRoot<CSSStyleSheet>> {
@@ -4552,27 +5001,24 @@ impl Document {
         let stylesheets = &mut *self.stylesheets.borrow_mut();
         let sheet = cssom_stylesheet.style_stylesheet().clone();
 
-        let insertion_point = stylesheets
-            .iter()
-            .last()
-            .map(|(sheet, _origin)| sheet)
-            .cloned();
-
         if self.has_browsing_context() {
-            self.add_stylesheet_to_stylist(
-                cx,
-                sheet.clone(),
-                insertion_point.as_ref().map(|s| s.sheet.clone()),
-            );
+            self.add_stylesheet_to_stylist(cx, sheet.clone(), None);
         }
 
         DocumentOrShadowRoot::add_stylesheet(
             StylesheetSource::Constructed(Dom::from_ref(cssom_stylesheet)),
             StylesheetSetRef::Document(stylesheets),
             sheet,
-            insertion_point,
+            None,
             self.style_shared_author_lock(),
         );
+    }
+
+    /// Start loading the `FontFace`s that layout's font matching selected.
+    pub(crate) fn load_font_faces_requested_by_font_matching(&self, cx: &mut JSContext) {
+        if let Some(font_face_set) = self.fonts.get() {
+            font_face_set.load_faces_requested_by_font_matching(cx);
+        }
     }
 
     fn switch_font_face_set_to_loading_if_needed(&self, cx: &mut JSContext) {
@@ -4612,10 +5058,15 @@ impl Document {
     /// Remove a stylesheet owned by `owner` from the list of document sheets.
     #[cfg_attr(crown, expect(crown::unrooted_must_root))] // Owner needs to be rooted already necessarily.
     pub(crate) fn remove_stylesheet(&self, owner: StylesheetSource, stylesheet: &Arc<Stylesheet>) {
-        if self.has_browsing_context() {
+        // Text laid out with a removed web font still refers to it, and its WebRender
+        // resources are freed after the next display list, so all text has to be laid out
+        // again first, as when a web font loads.
+        if self.has_browsing_context() &&
             self.window
                 .layout_mut()
-                .remove_stylesheet(stylesheet.clone());
+                .remove_stylesheet(stylesheet.clone())
+        {
+            self.dirty_all_nodes();
         }
 
         DocumentOrShadowRoot::remove_stylesheet(
@@ -4906,6 +5357,118 @@ impl Document {
 
     pub(crate) fn highlighted_dom_node(&self) -> Option<DomRoot<Node>> {
         self.highlighted_dom_node.get()
+    }
+
+    /// The steps of <https://drafts.csswg.org/cssom-view/#dom-document-caretpositionfrompoint>
+    /// that find the caret position at (`x`, `y`) in the viewport, with the caret in the
+    /// viewport when it is in laid out text.
+    fn caret_position_from_point(
+        &self,
+        x: Finite<f64>,
+        y: Finite<f64>,
+    ) -> Option<(DomRoot<Node>, u32, Option<Rect<Au, CSSPixel>>)> {
+        // Step 1. If there is no viewport associated with the document, return null.
+        // Step 2. If either argument is negative, x is greater than the viewport width
+        // excluding the size of a rendered scroll bar (if any), or y is greater than the
+        // viewport height excluding the size of a rendered scroll bar (if any) return null.
+        // Step 3. If at the coordinates x,y in the viewport no text insertion point indicator
+        // would have been inserted when applying the transfer and drop steps, return null.
+        let element = self.ElementFromPoint(x, y)?;
+        let node = element.upcast::<Node>();
+        let point = Point2D::new(Au::from_f64_px(*x), Au::from_f64_px(*y));
+
+        // Step 4. If at the coordinates x,y in the viewport a text input box is present, return
+        // a caret position with its properties set as follows: the offset node is the text
+        // input box and the offset is the offset into its text.
+        if element.is::<HTMLInputElement>() || element.is::<HTMLTextAreaElement>() {
+            let offset = self.window.text_index_query_on_node(node, point).unwrap_or(0);
+            return Some((DomRoot::from_ref(node), offset as u32, None));
+        }
+
+        // Step 5. Otherwise, return a caret position where the caret range is collapsed at the
+        // insertion point of the text insertion point indicator, here the closest caret position
+        // in laid out text.
+        let lines = caret_stops_around(&self.window, node, false);
+        let Some((line, stop)) = closest_caret_stop(&lines, point) else {
+            return Some((DomRoot::from_ref(node), 0, None));
+        };
+        let client_rect = Rect::new(
+            Point2D::new(stop.x, line.top),
+            Size2D::new(Au::zero(), line.bottom - line.top),
+        );
+        Some((stop.node.clone(), stop.offset, Some(client_rect)))
+    }
+
+    /// The selection that layout paints: the caret of a selection collapsed in the focused
+    /// editing host, or the selected text.
+    pub(crate) fn selection_for_layout(&self) -> Option<DocumentSelection> {
+        let range = self.selection.get()?.active_range()?;
+
+        if range.collapsed() {
+            let focused_area = self.focus_handler().focused_area();
+            let editing_host = range.start_container().editing_host_of()?;
+            if *editing_host != *focused_area.element()?.upcast::<Node>() {
+                return None;
+            }
+            let (node, offset) =
+                caret_position_in_laid_out_text(&range.start_container(), range.start_offset())?;
+            return Some(DocumentSelection {
+                caret: Some((node.to_opaque(), offset)),
+                selected_text: Vec::new(),
+                end_node: None,
+            });
+        }
+
+        let (start, start_offset) = (range.start_container(), range.start_offset());
+        let (end, end_offset) = (range.end_container(), range.end_offset());
+        // The node at a boundary point in tree order: the character data node it is in, or the
+        // first node after it.
+        let document_node = self.upcast::<Node>();
+        let node_at = |container: &Node, offset: u32| {
+            if container.is::<CharacterData>() {
+                return Some(DomRoot::from_ref(container));
+            }
+            container.children().nth(offset as usize).or_else(|| {
+                container
+                    .following_nodes(document_node, ShadowIncluding::No)
+                    .next_skipping_children()
+            })
+        };
+        let end_node = node_at(&end, end_offset);
+        let mut selected_text = Vec::new();
+        let mut node = node_at(&start, start_offset);
+        while let Some(current) = node {
+            let is_end = end_node.as_ref() == Some(&current);
+            if is_end && *current != *end {
+                break;
+            }
+            // A `<br>` is selected to paint its line break as selected.
+            let length = if current.is::<Text>() {
+                Some(current.len())
+            } else if current.is::<HTMLBRElement>() {
+                Some(1)
+            } else {
+                None
+            };
+            if let Some(length) = length {
+                let selected_start = if current == start { start_offset } else { 0 };
+                let selected_end = if is_end { end_offset } else { length };
+                if selected_start < selected_end {
+                    selected_text.push((current.to_opaque(), selected_start..selected_end));
+                }
+            }
+            if is_end {
+                break;
+            }
+            node = current
+                .following_nodes(document_node, ShadowIncluding::No)
+                .next();
+        }
+        Some(DocumentSelection {
+            caret: None,
+            selected_text,
+            end_node: Some(end.to_opaque()),
+        })
     }
 
     pub(crate) fn custom_element_reaction_stack(&self) -> Rc<CustomElementReactionStack> {
@@ -5705,7 +6268,11 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
                 self.window.upcast(),
             ))),
             // FIXME(#25136): devicemotionevent, deviceorientationevent
-            // FIXME(#7529): dragevent
+            "dragevent" => Ok(DomRoot::upcast(DragEvent::new_uninitialized(
+                cx,
+                &self.window,
+                None,
+            ))),
             "events" | "event" | "htmlevents" | "svgevents" => {
                 Ok(Event::new_uninitialized(cx, self.window.upcast()))
             },
@@ -6348,6 +6915,42 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
         )
     }
 
+    /// <https://drafts.csswg.org/cssom-view/#dom-document-caretpositionfrompoint>
+    fn CaretPositionFromPoint(
+        &self,
+        cx: &mut JSContext,
+        x: Finite<f64>,
+        y: Finite<f64>,
+        _options: &CaretPositionFromPointOptions,
+    ) -> Option<DomRoot<CaretPosition>> {
+        // TODO: Positions in the shadow trees of `options.shadowRoots` are not returned.
+        let (node, offset, client_rect) = self.caret_position_from_point(x, y)?;
+        Some(CaretPosition::new(
+            cx,
+            &self.window,
+            &node,
+            offset,
+            client_rect,
+        ))
+    }
+
+    /// <https://developer.mozilla.org/en-US/docs/Web/API/Document/caretRangeFromPoint>, which
+    /// WebKit and Blink implement: the caret position at the point as a collapsed range.
+    fn CaretRangeFromPoint(
+        &self,
+        cx: &mut JSContext,
+        x: Finite<f64>,
+        y: Finite<f64>,
+    ) -> Option<DomRoot<Range>> {
+        let (mut node, mut offset, _) = self.caret_position_from_point(x, y)?;
+        // Like in other browsers, the range does not go into a text control but is before it.
+        if node.is::<HTMLInputElement>() || node.is::<HTMLTextAreaElement>() {
+            offset = node.index();
+            node = node.GetParentNode().expect("Hit elements have a parent");
+        }
+        Some(Range::new(cx, self, &node, offset, &node, offset))
+    }
+
     /// <https://drafts.csswg.org/cssom-view/#dom-document-scrollingelement>
     fn GetScrollingElement(&self) -> Option<DomRoot<Element>> {
         // Step 1. If the Document is in quirks mode, follow these steps:
@@ -6723,35 +7326,17 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
 
     /// <https://drafts.csswg.org/cssom/#dom-documentorshadowroot-adoptedstylesheets>
     fn AdoptedStyleSheets(&self, cx: &mut JSContext, retval: MutableHandleValue) {
-        self.adopted_stylesheets_frozen_types.get_or_init(
+        self.adopted_stylesheets.get(
             cx,
-            || {
-                self.adopted_stylesheets
-                    .borrow()
-                    .clone()
-                    .iter()
-                    .map(|sheet| sheet.as_rooted())
-                    .collect()
-            },
+            &StyleSheetListOwner::Document(Dom::from_ref(self)),
             retval,
         );
     }
 
     /// <https://drafts.csswg.org/cssom/#dom-documentorshadowroot-adoptedstylesheets>
     fn SetAdoptedStyleSheets(&self, cx: &mut JSContext, val: HandleValue) -> ErrorResult {
-        let result = DocumentOrShadowRoot::set_adopted_stylesheet_from_jsval(
-            cx,
-            self.adopted_stylesheets.borrow_mut().as_mut(),
-            val,
-            &StyleSheetListOwner::Document(Dom::from_ref(self)),
-        );
-
-        // If update is successful, clear the FrozenArray cache.
-        if result.is_ok() {
-            self.adopted_stylesheets_frozen_types.clear()
-        }
-
-        result
+        self.adopted_stylesheets
+            .set(cx, &StyleSheetListOwner::Document(Dom::from_ref(self)), val)
     }
 
     fn Timeline(&self) -> DomRoot<DocumentTimeline> {
@@ -6963,5 +7548,44 @@ impl Iterator for SameOriginDescendantNavigablesIterator {
             };
         }
         None
+    }
+}
+
+/// Where layout paints the caret of a selection collapsed at (`node`, `offset`): a position in
+/// a text node, or before (0) or after (1) a `<br>`. A position between elements becomes the
+/// nearest such position, preferring the end of text before it.
+fn caret_position_in_laid_out_text(node: &Node, offset: u32) -> Option<(DomRoot<Node>, u32)> {
+    let mut node = DomRoot::from_ref(node);
+    let mut offset = offset;
+    loop {
+        if node.is::<Text>() {
+            return Some((node, offset));
+        }
+        let before = offset
+            .checked_sub(1)
+            .and_then(|index| node.children().nth(index as usize));
+        let after = node.children().nth(offset as usize);
+        match (before, after) {
+            (Some(before), _) if before.is::<Text>() => {
+                let length = before.len();
+                return Some((before, length));
+            },
+            (_, Some(after)) if after.is::<Text>() || after.is::<HTMLBRElement>() => {
+                return Some((after, 0));
+            },
+            // After a final `<br>` there is no further line; its start is the caret position.
+            (Some(before), None) if before.is::<HTMLBRElement>() => return Some((before, 0)),
+            // Layout gives an empty editing host a line for its caret.
+            (None, None) if offset == 0 => return Some((node, 0)),
+            (_, Some(after)) if after.is::<Element>() => {
+                node = after;
+                offset = 0;
+            },
+            (Some(before), _) if before.is::<Element>() => {
+                offset = before.len();
+                node = before;
+            },
+            _ => return None,
+        }
     }
 }

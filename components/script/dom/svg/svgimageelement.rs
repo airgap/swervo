@@ -18,7 +18,6 @@ use net_traits::request::{CredentialsMode, Destination, RequestBuilder, RequestI
 use net_traits::{
     CoreResourceThread, FetchMetadata, FetchResponseMsg, NetworkError, ResourceFetchTiming,
 };
-use pixels::Snapshot;
 use script_bindings::cell::DomRefCell;
 use servo_url::ServoUrl;
 use style::attr::AttrValue;
@@ -103,11 +102,6 @@ impl SVGImageElement {
 
     pub(crate) fn image_data(&self) -> Option<Image> {
         self.image.borrow().clone()
-    }
-
-    /// The decoded raster for the current href, if fetched (copy).
-    pub(crate) fn get_raster_image_data(&self) -> Option<Snapshot> {
-        Some(self.image_data()?.as_raster_image()?.as_snapshot())
     }
 
     fn generation_id(&self) -> u32 {
@@ -210,7 +204,7 @@ impl SVGImageElement {
                 self.invalidate_enclosing_svg_serializations();
                 self.queue_simple_event("load");
             },
-            ImageResponse::MetadataLoaded(..) => {},
+            ImageResponse::MetadataLoaded(..) | ImageResponse::PartiallyDecoded(_) => {},
             ImageResponse::FailedToLoadOrDecode => {
                 *self.image.borrow_mut() = None;
                 self.queue_simple_event("error");

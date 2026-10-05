@@ -11,7 +11,9 @@ use style::properties::ComputedValues;
 use style::properties::longhands::list_style_position::computed_value::T as ListStylePosition;
 use style::selector_parser::PseudoElement;
 use style::str::char_is_whitespace;
-use style::values::specified::box_::DisplayOutside as StyloDisplayOutside;
+use style::values::specified::box_::{
+    DisplayInside as StyloDisplayInside, DisplayOutside as StyloDisplayOutside,
+};
 
 use super::OutsideMarker;
 use super::inline::construct::InlineFormattingContextBuilder;
@@ -22,7 +24,8 @@ use crate::cell::ArcRefCell;
 use crate::context::LayoutContext;
 use crate::dom::{BoxSlot, LayoutBox, NodeExt};
 use crate::dom_traversal::{
-    Contents, NodeAndStyleInfo, NonReplacedContents, PseudoElementContentItem, TraversalHandler,
+    Contents, NodeAndStyleInfo, NonReplacedContents, PseudoElementContentItem, RubyItem,
+    TraversalHandler, ruby_items, traverse_ruby_column,
 };
 use crate::flow::float::FloatBox;
 use crate::flow::same_formatting_context_block::SameFormattingContextBlock;
@@ -30,7 +33,7 @@ use crate::flow::{BlockContainer, BlockFormattingContext, BlockLevelBox};
 use crate::formatting_contexts::{
     IndependentFormattingContext, IndependentFormattingContextContents,
 };
-use crate::fragment_tree::FragmentFlags;
+use crate::fragment_tree::{BaseFragmentInfo, FragmentFlags};
 use crate::layout_box_base::LayoutBoxBase;
 use crate::positioned::AbsolutelyPositionedBox;
 use crate::style_ext::{ComputedValuesExt, DisplayGeneratingBox, DisplayInside, DisplayOutside};
@@ -226,7 +229,16 @@ impl BlockContainer {
             }
         }
 
-        contents.traverse(context, info, &mut builder);
+        match contents {
+            // A blockified ruby is a block box around the ruby's columns.
+            // <https://drafts.csswg.org/css-ruby/#block-ruby>
+            NonReplacedContents::OfElement
+                if info.style.get_box().display.inside() == StyloDisplayInside::Ruby =>
+            {
+                builder.push_ruby_columns(info)
+            },
+            contents => contents.traverse(context, info, &mut builder),
+        }
         builder.finish()
     }
 }
@@ -280,6 +292,17 @@ impl<'dom, 'style> BlockContainerBuilder<'dom, 'style> {
         debug_assert!(!self.currently_processing_inline_box());
 
         self.finish_anonymous_table_if_needed();
+
+        if self.block_level_boxes.is_empty() &&
+            self.inline_formatting_context_builder
+                .as_ref()
+                .is_none_or(|builder| builder.is_empty) &&
+            self.info.node.is_editing_host()
+        {
+            let info = self.info;
+            self.ensure_inline_formatting_context_builder()
+                .hold_line_for_empty_editing_host(info);
+        }
 
         if let Some(inline_formatting_context) = self.finish_ongoing_inline_formatting_context() {
             // There are two options here. This block was composed of both one or more inline formatting contexts
@@ -520,6 +543,15 @@ impl<'dom> BlockContainerBuilder<'dom, '_> {
     ) {
         let context = self.context;
         let old_layout_box = box_slot.take_layout_box();
+        if info.style.get_box().display.inside() == StyloDisplayInside::Ruby &&
+            matches!(
+                contents,
+                Contents::NonReplaced(NonReplacedContents::OfElement)
+            )
+        {
+            self.handle_ruby(info, box_slot, old_layout_box);
+            return;
+        }
         let (is_list_item, non_replaced_contents) = match (display_inside, contents) {
             (
                 DisplayInside::Flow { is_list_item },
@@ -575,6 +607,71 @@ impl<'dom> BlockContainerBuilder<'dom, '_> {
             .as_mut()
             .expect("Should be building an InlineFormattingContext")
             .end_inline_box();
+    }
+
+    /// Lays out an inline `display: ruby` element as an inline box holding one atomic inline
+    /// per ruby column, with the annotation stacked over its base. The column is as wide as
+    /// the wider of the two and centers both, and its baseline is the base's. Inline layout
+    /// lets the annotation overflow the line box upwards. This is how Chrome lays out the
+    /// common cases of <https://drafts.csswg.org/css-ruby/#ruby-layout>, except that Chrome
+    /// also grows a line whose annotations do not fit in the space above it.
+    fn handle_ruby(
+        &mut self,
+        info: &NodeAndStyleInfo<'dom>,
+        box_slot: BoxSlot<'dom>,
+        old_layout_box: Option<LayoutBox>,
+    ) {
+        let context = self.context;
+        let inline_item = self
+            .ensure_inline_formatting_context_builder()
+            .start_inline_box(
+                || ArcRefCell::new(InlineBox::new(info, context)),
+                old_layout_box,
+            );
+        box_slot.set(LayoutBox::InlineLevel(inline_item));
+        self.push_ruby_columns(info);
+        self.inline_formatting_context_builder
+            .as_mut()
+            .expect("Should be building an InlineFormattingContext")
+            .end_inline_box();
+    }
+
+    /// Pushes one atomic inline per column of the ruby `info`, with the annotation stacked
+    /// over the base, see [`Self::handle_ruby`].
+    fn push_ruby_columns(&mut self, info: &NodeAndStyleInfo<'dom>) {
+        let context = self.context;
+        let column_info = info
+            .with_pseudo_element(context, PseudoElement::ServoRubyColumn)
+            .expect("Should never fail to create ruby column info");
+        for item in ruby_items(info, context) {
+            let column = match item {
+                RubyItem::Column(column) => column,
+                RubyItem::WhiteSpace => {
+                    // The space stands for white space between columns, not for text of
+                    // a node, so it has no offset into one.
+                    self.ensure_inline_formatting_context_builder()
+                        .push_text(" ".into(), info);
+                    continue;
+                },
+            };
+            // Each column gets its own slot, which must exist before the column's anonymous
+            // base block, nested under it, asks for one.
+            let column_box_slot = column_info.node.box_slot();
+            let mut builder =
+                BlockContainerBuilder::new(context, &column_info, self.propagated_data);
+            traverse_ruby_column(&column, context, &mut builder);
+            let column_box = ArcRefCell::new(IndependentFormattingContext::new(
+                LayoutBoxBase::new(BaseFragmentInfo::anonymous(), column_info.style.clone()),
+                IndependentFormattingContextContents::Flow(
+                    BlockFormattingContext::from_block_container(builder.finish()),
+                ),
+                self.propagated_data,
+            ));
+            let column_item = self
+                .ensure_inline_formatting_context_builder()
+                .push_atomic(|| column_box, None);
+            column_box_slot.set(LayoutBox::InlineLevel(column_item));
+        }
     }
 
     fn handle_block_level_element(

@@ -1309,8 +1309,15 @@ fn invoke(
             atom!("animationstart") => atom!("webkitAnimationStart"),
             atom!("transitionend") => atom!("webkitTransitionEnd"),
             atom!("transitionrun") => atom!("webkitTransitionRun"),
+            // Not in the DOM standard: Blink and WebKit hand trusted wheel events to
+            // `mousewheel` listeners the same way, and pages that do not detect Gecko only
+            // listen for `mousewheel` (Google Maps zooms that way).
+            ref event_type if &**event_type == "wheel" => Atom::from("mousewheel"),
             _ => return,
         };
+        // `listeners` only holds those for the original type (inner invoke's type check is
+        // done up front by `get_listeners_for`), so look up the legacy type's own.
+        let legacy_listeners = segment.invocation_target.get_listeners_for(&legacy_type);
         *event.type_.borrow_mut() = legacy_type;
 
         // Step 9.3 Inner invoke with event, listeners, phase, invocationTargetInShadowTree,
@@ -1318,7 +1325,7 @@ fn invoke(
         inner_invoke(
             cx,
             event,
-            &listeners,
+            &legacy_listeners,
             phase,
             invocation_target_in_shadow_tree,
             timeline_window,

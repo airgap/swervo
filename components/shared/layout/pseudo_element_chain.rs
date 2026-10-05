@@ -31,15 +31,20 @@ impl PseudoElementChain {
         self.secondary.or(self.primary)
     }
 
-    /// Return a possibly nested [`PseudoElementChain`]. Currently only `::before` and
-    /// `::after` only support nesting. If the primary [`PseudoElement`] on the chain is
-    /// not `::before` or `::after` a single element chain is returned for the given
+    /// Return a possibly nested [`PseudoElementChain`]. Currently only `::before`,
+    /// `::after` and ruby columns support nesting, the latter so that the anonymous block
+    /// around a ruby base inherits from its column. If the primary [`PseudoElement`] on the
+    /// chain is none of those a single element chain is returned for the given
     /// [`PseudoElement`].
     pub fn with_pseudo(&self, pseudo_element: PseudoElement) -> Self {
         match self.primary {
-            Some(primary) if primary.is_before_or_after() => Self {
-                primary: self.primary,
-                secondary: Some(pseudo_element),
+            Some(primary)
+                if primary.is_before_or_after() || primary == PseudoElement::ServoRubyColumn =>
+            {
+                Self {
+                    primary: self.primary,
+                    secondary: Some(pseudo_element),
+                }
             },
             _ => {
                 assert!(self.secondary.is_none());

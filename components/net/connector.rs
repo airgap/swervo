@@ -10,9 +10,9 @@ use std::{fmt, io};
 
 use futures::task::{Context, Poll};
 use futures::{Future, TryFutureExt};
-use http::uri::{Authority, Uri as Destination};
+use http::uri::{Authority, Scheme, Uri as Destination};
 use http_body_util::combinators::BoxBody;
-use hyper::body::Bytes;
+use hyper::body::{Body, Bytes, Frame, Incoming, SizeHint};
 use hyper::rt::Executor;
 use hyper_rustls::{HttpsConnector as HyperRustlsHttpsConnector, MaybeHttpsStream};
 use hyper_util::client::legacy::Client;
@@ -30,6 +30,7 @@ use rustls::{ClientConfig, ProtocolVersion};
 use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 use servo_config::pref;
 use tokio::net::TcpStream;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tower::Service;
 
 use crate::async_runtime::spawn_task;
@@ -672,4 +673,82 @@ pub fn create_http_client(tls_config: TlsConfig) -> ServoClient {
     Client::builder(TokioExecutor {})
         .http1_title_case_headers(true)
         .build(InstrumentedConnector::from(connector))
+}
+
+/// Chrome's cap on concurrent HTTP/1.1 connections to one host
+/// (`kDefaultMaxSocketsPerGroup`); further requests queue until a connection frees up.
+/// hyper's pool has no such cap, so a page that fans out a hundred module requests opens a
+/// hundred sockets, which small servers drop on the floor once their accept backlog fills.
+const MAX_HTTP1_REQUESTS_PER_HOST: usize = 6;
+
+/// Limits in-flight HTTP/1.1 requests (and therefore connections) per scheme and authority,
+/// the same key hyper pools connections under.
+#[derive(Default)]
+pub struct HostConnectionLimiter {
+    hosts: Mutex<HashMap<(Scheme, Authority), Arc<Semaphore>>>,
+}
+
+impl HostConnectionLimiter {
+    fn semaphore(&self, uri: &Destination) -> Option<Arc<Semaphore>> {
+        let key = (uri.scheme()?.clone(), uri.authority()?.clone());
+        Some(
+            self.hosts
+                .lock()
+                .entry(key)
+                .or_insert_with(|| Arc::new(Semaphore::new(MAX_HTTP1_REQUESTS_PER_HOST)))
+                .clone(),
+        )
+    }
+
+    /// Waits for a free slot on the request's host. Returns `None` once the host has been seen
+    /// speaking HTTP/2, whose single connection multiplexes every request and so needs no cap.
+    pub async fn acquire(&self, uri: &Destination) -> Option<OwnedSemaphorePermit> {
+        // A closed semaphore marks a multiplexed host, see `note_multiplexed`; closing it also
+        // releases every request already queued on it.
+        self.semaphore(uri)?.acquire_owned().await.ok()
+    }
+
+    pub fn note_multiplexed(&self, uri: &Destination) {
+        if let Some(semaphore) = self.semaphore(uri) {
+            semaphore.close();
+        }
+    }
+}
+
+/// A response body that holds its host's connection slot until the body has been read to the end
+/// (or dropped), which is when hyper hands the connection back to the pool for the next request.
+pub struct LimitedBody {
+    inner: Incoming,
+    permit: Option<OwnedSemaphorePermit>,
+}
+
+impl LimitedBody {
+    pub fn new(inner: Incoming, permit: Option<OwnedSemaphorePermit>) -> Self {
+        Self { inner, permit }
+    }
+}
+
+impl Body for LimitedBody {
+    type Data = Bytes;
+    type Error = hyper::Error;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, hyper::Error>>> {
+        let this = self.get_mut();
+        let result = std::pin::Pin::new(&mut this.inner).poll_frame(cx);
+        if matches!(result, Poll::Ready(None) | Poll::Ready(Some(Err(_)))) {
+            this.permit = None;
+        }
+        result
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
 }

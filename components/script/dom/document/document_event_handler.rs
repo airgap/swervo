@@ -14,12 +14,13 @@ use embedder_traits::{
     Cursor, EditingActionEvent, EmbedderMsg, ImeEvent, InputEvent, InputEventId, InputEventOutcome,
     InputEventResult, KeyboardEvent as EmbedderKeyboardEvent, MouseButton, MouseButtonAction,
     MouseButtonEvent, MouseLeftViewportEvent, TouchEvent as EmbedderTouchEvent, TouchEventType,
-    TouchId, TouchPointerType, UntrustedNodeAddress, WheelEvent as EmbedderWheelEvent,
+    TouchId, TouchPointerType, UntrustedNodeAddress, WheelEvent as EmbedderWheelEvent, WheelMode,
 };
 #[cfg(feature = "gamepad")]
 use embedder_traits::{
     GamepadEvent as EmbedderGamepadEvent, GamepadSupportedHapticEffects, GamepadUpdateType,
 };
+use app_units::Au;
 use euclid::{Point2D, Vector2D};
 use js::context::JSContext;
 use keyboard_types::{Code, Key, KeyState, Modifiers, NamedKey};
@@ -32,6 +33,8 @@ use script_bindings::codegen::GenericBindings::EventBinding::EventMethods;
 use script_bindings::codegen::GenericBindings::HTMLElementBinding::HTMLElementMethods;
 use script_bindings::codegen::GenericBindings::HTMLLabelElementBinding::HTMLLabelElementMethods;
 use script_bindings::codegen::GenericBindings::KeyboardEventBinding::KeyboardEventMethods;
+use script_bindings::codegen::GenericBindings::NodeBinding::NodeMethods;
+use script_bindings::codegen::GenericBindings::SelectionBinding::SelectionMethods;
 use script_bindings::codegen::GenericBindings::ShadowRootBinding::ShadowRootMethods;
 use script_bindings::codegen::GenericBindings::TouchBinding::TouchMethods;
 use script_bindings::codegen::GenericBindings::WindowBinding::{ScrollBehavior, WindowMethods};
@@ -47,6 +50,7 @@ use servo_constellation_traits::{KeyboardScroll, ScriptToConstellationMessage};
 use style::Atom;
 use style_traits::CSSPixel;
 use webrender_api::ExternalScrollId;
+use webrender_api::units::LayoutVector2D;
 
 use crate::dom::execcommand::basecommand::CommandName;
 #[cfg(feature = "gamepad")]
@@ -57,7 +61,9 @@ use crate::dom::bindings::root::MutNullableDom;
 use crate::dom::bindings::trace::NoTrace;
 use crate::dom::clipboardevent::ClipboardEventType;
 use crate::dom::document::FireMouseEventType;
+use crate::dom::document::drag_and_drop::{DragAndDrop, PointerState};
 use crate::dom::document::focus::FocusableArea;
+use crate::dom::document::top_layer::LightDismissEventType;
 use crate::dom::event::{EventBubbles, EventCancelable, EventComposed, EventFlags};
 #[cfg(feature = "gamepad")]
 use crate::dom::gamepad::gamepad::{Gamepad, contains_user_gesture};
@@ -70,10 +76,12 @@ use crate::dom::keyboardevent::KeyboardEvent;
 use crate::dom::node::{self, Node, NodeTraits};
 use crate::dom::pointerevent::{PointerEvent, PointerId};
 use crate::dom::scrolling_box::{ScrollAxisState, ScrollRequirement, ScrollingBoxAxis};
+use crate::dom::selection::{CaretMovement, PointerSelection, can_start_selection};
 use crate::dom::types::{
     ClipboardEvent, CompositionEvent, DataTransfer, Element, Event, EventTarget, GlobalScope,
-    HTMLAnchorElement, HTMLElement, HTMLLabelElement, MouseEvent, Touch, TouchEvent, TouchList,
-    WheelEvent, Window,
+    HTMLAnchorElement, HTMLButtonElement, HTMLElement, HTMLInputElement,
+    HTMLLabelElement, HTMLSelectElement, HTMLTextAreaElement, MouseEvent, Touch, TouchEvent,
+    TouchList, WheelEvent, Window,
 };
 use crate::drag_data_store::{DragDataStore, Kind, Mode};
 use crate::realms::enter_auto_realm;
@@ -207,6 +215,17 @@ pub(crate) struct DocumentEventHandler {
     /// Map from pointer ID to the actual/current pointer capture target.
     /// Updated during process_pending_pointer_capture when events are dispatched.
     pointer_capture_target: DomRefCell<FxHashMap<i32, Dom<Element>>>,
+    /// A native widget being dragged with the primary button (the thumb of an
+    /// `<input type=range>`). Like Chrome's mouse-capturing node, it receives the mouse
+    /// and pointer move and up events until the button is released, so the drag keeps
+    /// tracking when the cursor leaves the widget. Unlike `setPointerCapture`, this does
+    /// not fire `gotpointercapture`/`lostpointercapture`.
+    widget_mouse_capture_target: MutNullableDom<Element>,
+    /// <https://html.spec.whatwg.org/multipage/#drag-and-drop-processing-model>
+    drag_and_drop: DragAndDrop,
+    /// Whether the primary button was pressed to select and moving the mouse extends the
+    /// selection.
+    selecting_with_mouse: Cell<bool>,
 }
 
 impl DocumentEventHandler {
@@ -233,7 +252,15 @@ impl DocumentEventHandler {
             access_key_handlers: Default::default(),
             pending_pointer_capture: Default::default(),
             pointer_capture_target: Default::default(),
+            widget_mouse_capture_target: Default::default(),
+            drag_and_drop: DragAndDrop::new(),
+            selecting_with_mouse: Cell::new(false),
         }
+    }
+
+    /// Route mouse moves and the next mouseup to `element` until the button is released.
+    pub(crate) fn set_widget_mouse_capture(&self, element: &Element) {
+        self.widget_mouse_capture_target.set(Some(element));
     }
 
     /// Note a pending input event, to be processed at the next `update_the_rendering` task.
@@ -440,6 +467,11 @@ impl DocumentEventHandler {
         input_event: &ConstellationInputEvent,
         mouse_leave_event: &MouseLeftViewportEvent,
     ) {
+        if self.drag_and_drop.is_dragging() {
+            self.drag_and_drop.pointer_left_viewport(cx, &self.window);
+            return;
+        }
+
         if let Some(current_hover_target) = self.current_hover_target.get() {
             let current_hover_target = current_hover_target.upcast::<Node>();
             for element in current_hover_target
@@ -454,29 +486,10 @@ impl DocumentEventHandler {
                 .get()
                 .and_then(|point| self.window.hit_test_from_point_in_viewport(point))
             {
-                let mouse_out_event = MouseEvent::new_for_platform_motion_event(
+                self.fire_hover_boundary_events(
                     cx,
-                    &self.window,
-                    FireMouseEventType::Out,
-                    &hit_test_result,
-                    input_event,
-                );
-
-                // Fire pointerout before mouseout
-                mouse_out_event
-                    .to_pointer_hover_event(cx, "pointerout")
-                    .upcast::<Event>()
-                    .fire(cx, current_hover_target.upcast());
-
-                mouse_out_event
-                    .upcast::<Event>()
-                    .fire(cx, current_hover_target.upcast());
-
-                self.handle_mouse_enter_leave_event(
-                    cx,
-                    DomRoot::from_ref(current_hover_target),
+                    Some(current_hover_target),
                     None,
-                    FireMouseEventType::Leave,
                     &hit_test_result,
                     input_event,
                 );
@@ -502,70 +515,124 @@ impl DocumentEventHandler {
         self.most_recent_mousemove_point.set(None);
     }
 
-    fn handle_mouse_enter_leave_event(
+    /// Fires the boundary events for the pointer moving from `old_target` to `new_target`, where
+    /// `None` is outside of this document. As in Chrome, every pointer boundary event fires before
+    /// the compatibility mouse events, and each group fires out, leave, over, then enter:
+    /// <https://w3c.github.io/pointerevents/#mapping-for-devices-that-support-hover>
+    fn fire_hover_boundary_events(
         &self,
         cx: &mut JSContext,
-        event_target: DomRoot<Node>,
-        related_target: Option<DomRoot<Node>>,
-        event_type: FireMouseEventType,
+        old_target: Option<&Node>,
+        new_target: Option<&Node>,
         hit_test_result: &HitTestResult,
         input_event: &ConstellationInputEvent,
     ) {
-        assert!(matches!(
-            event_type,
-            FireMouseEventType::Enter | FireMouseEventType::Leave
-        ));
+        let common_ancestor = old_target
+            .zip(new_target)
+            .and_then(|(old_target, new_target)| old_target.common_ancestor_in_flat_tree(new_target));
 
-        let common_ancestor = match related_target.as_ref() {
-            Some(related_target) => event_target
-                .common_ancestor_in_flat_tree(related_target)
-                .unwrap_or_else(|| DomRoot::from_ref(&*event_target)),
-            None => DomRoot::from_ref(&*event_target),
-        };
-
-        // We need to create a target chain in case the event target shares
-        // its boundaries with its ancestors.
-        let mut targets = vec![];
-        let mut current = Some(event_target);
-        while let Some(node) = current {
-            if node == common_ancestor {
-                break;
+        // Without a related target in this tree (the pointer came from or went to outside the
+        // document), the target and all of its ancestors up to and including the document are
+        // entered or left, as in Chrome.
+        let boundary_chain = |target: Option<&Node>| {
+            let mut nodes = vec![];
+            let mut current = target.map(DomRoot::from_ref);
+            while let Some(node) = current {
+                if common_ancestor.as_ref() == Some(&node) {
+                    break;
+                }
+                current = node.parent_in_flat_tree();
+                nodes.push(node);
             }
-            current = node.parent_in_flat_tree();
-            targets.push(node);
-        }
-
-        // The order for dispatching mouseenter/pointerenter events starts from the topmost
-        // common ancestor of the event target and the related target.
-        if event_type == FireMouseEventType::Enter {
-            targets = targets.into_iter().rev().collect();
-        }
-
-        let pointer_event_name = match event_type {
-            FireMouseEventType::Enter => "pointerenter",
-            FireMouseEventType::Leave => "pointerleave",
-            _ => unreachable!(),
+            nodes
         };
+        let left_nodes = boundary_chain(old_target);
+        // mouseenter/pointerenter dispatch starts from the topmost entered ancestor.
+        let mut entered_nodes = boundary_chain(new_target);
+        entered_nodes.reverse();
 
-        for target in targets {
-            let mouse_event = MouseEvent::new_for_platform_motion_event(
-                cx,
-                &self.window,
-                event_type,
-                hit_test_result,
-                input_event,
-            );
-            mouse_event
-                .upcast::<Event>()
-                .set_related_target(related_target.as_ref().map(|target| target.upcast()));
+        for as_pointer_event in [true, false] {
+            if let Some(old_target) = old_target {
+                self.fire_hover_boundary_event(
+                    cx,
+                    FireMouseEventType::Out,
+                    as_pointer_event,
+                    old_target,
+                    new_target,
+                    hit_test_result,
+                    input_event,
+                );
+                for node in &left_nodes {
+                    self.fire_hover_boundary_event(
+                        cx,
+                        FireMouseEventType::Leave,
+                        as_pointer_event,
+                        node,
+                        new_target,
+                        hit_test_result,
+                        input_event,
+                    );
+                }
+            }
+            if let Some(new_target) = new_target {
+                self.fire_hover_boundary_event(
+                    cx,
+                    FireMouseEventType::Over,
+                    as_pointer_event,
+                    new_target,
+                    old_target,
+                    hit_test_result,
+                    input_event,
+                );
+                for node in &entered_nodes {
+                    self.fire_hover_boundary_event(
+                        cx,
+                        FireMouseEventType::Enter,
+                        as_pointer_event,
+                        node,
+                        old_target,
+                        hit_test_result,
+                        input_event,
+                    );
+                }
+            }
+        }
+    }
 
-            // Fire pointer event before mouse event
+    #[allow(clippy::too_many_arguments)]
+    fn fire_hover_boundary_event(
+        &self,
+        cx: &mut JSContext,
+        event_type: FireMouseEventType,
+        as_pointer_event: bool,
+        target: &Node,
+        related_target: Option<&Node>,
+        hit_test_result: &HitTestResult,
+        input_event: &ConstellationInputEvent,
+    ) {
+        let mouse_event = MouseEvent::new_for_platform_motion_event(
+            cx,
+            &self.window,
+            event_type,
+            hit_test_result,
+            input_event,
+        );
+        mouse_event
+            .upcast::<Event>()
+            .set_related_target(related_target.map(|target| target.upcast()));
+        if as_pointer_event {
+            let pointer_event_name = match event_type {
+                FireMouseEventType::Over => "pointerover",
+                FireMouseEventType::Out => "pointerout",
+                FireMouseEventType::Enter => "pointerenter",
+                FireMouseEventType::Leave => "pointerleave",
+                _ => unreachable!(),
+            };
             mouse_event
                 .to_pointer_hover_event(cx, pointer_event_name)
                 .upcast::<Event>()
                 .fire(cx, target.upcast());
-
-            // Fire mouse event
+        } else {
             mouse_event.upcast::<Event>().fire(cx, target.upcast());
         }
     }
@@ -597,6 +664,31 @@ impl DocumentEventHandler {
             return;
         }
 
+        // While dragging, the pointer drives the drag-and-drop processing model instead of
+        // firing mouse and pointer events, as in other browsers.
+        if self.drag_and_drop.is_dragging() {
+            let Some(target) = hit_test_result
+                .node
+                .inclusive_ancestors(ShadowIncluding::Yes)
+                .find_map(DomRoot::downcast::<Element>)
+            else {
+                return;
+            };
+            if input_event.pressed_mouse_buttons & 1 == 0 {
+                // The primary button was released where this document did not see it, such as
+                // outside the viewport.
+                self.end_drag_for_primary_button_release(cx);
+                return;
+            }
+            self.drag_and_drop.pointer_moved(
+                cx,
+                &self.window,
+                &target.inclusive_ancestor_element_in_non_ua_shadow_root(),
+                PointerState::new(&hit_test_result, input_event),
+            );
+            return;
+        }
+
         // Update the cursor when the mouse moves, if it has changed.
         self.set_cursor(Some(hit_test_result.cursor));
 
@@ -617,7 +709,6 @@ impl DocumentEventHandler {
         // Here we know the target has changed, so we must update the state,
         // dispatch mouseout to the previous one, mouseover to the new one.
         if target_has_changed {
-            // Dispatch pointerout/mouseout and pointerleave/mouseleave to previous target.
             if let Some(old_target) = self.current_hover_target.get() {
                 let old_target_is_ancestor_of_new_target = old_target
                     .upcast::<Node>()
@@ -634,45 +725,8 @@ impl DocumentEventHandler {
                         element.set_hover_state(false);
                     }
                 }
-
-                if !capture_is_active {
-                    let mouse_out_event = MouseEvent::new_for_platform_motion_event(
-                        cx,
-                        &self.window,
-                        FireMouseEventType::Out,
-                        &hit_test_result,
-                        input_event,
-                    );
-                    mouse_out_event
-                        .upcast::<Event>()
-                        .set_related_target(Some(new_target.upcast()));
-
-                    // Fire pointerout before mouseout
-                    mouse_out_event
-                        .to_pointer_hover_event(cx, "pointerout")
-                        .upcast::<Event>()
-                        .fire(cx, old_target.upcast());
-
-                    mouse_out_event
-                        .upcast::<Event>()
-                        .fire(cx, old_target.upcast());
-
-                    if !old_target_is_ancestor_of_new_target {
-                        let event_target = DomRoot::from_ref(old_target.upcast::<Node>());
-                        let moving_into = Some(DomRoot::from_ref(new_target.upcast::<Node>()));
-                        self.handle_mouse_enter_leave_event(
-                            cx,
-                            event_target,
-                            moving_into,
-                            FireMouseEventType::Leave,
-                            &hit_test_result,
-                            input_event,
-                        );
-                    }
-                }
             }
 
-            // Dispatch pointerover/mouseover and pointerenter/mouseenter to new target.
             for element in new_target
                 .upcast::<Node>()
                 .inclusive_ancestors(ShadowIncluding::Yes)
@@ -682,35 +736,10 @@ impl DocumentEventHandler {
             }
 
             if !capture_is_active {
-                let mouse_over_event = MouseEvent::new_for_platform_motion_event(
+                self.fire_hover_boundary_events(
                     cx,
-                    &self.window,
-                    FireMouseEventType::Over,
-                    &hit_test_result,
-                    input_event,
-                );
-                mouse_over_event
-                    .upcast::<Event>()
-                    .set_related_target(old_hover_target.as_ref().map(|target| target.upcast()));
-
-                // Fire pointerover before mouseover
-                mouse_over_event
-                    .to_pointer_hover_event(cx, "pointerover")
-                    .upcast::<Event>()
-                    .dispatch(cx, new_target.upcast(), false);
-
-                mouse_over_event
-                    .upcast::<Event>()
-                    .dispatch(cx, new_target.upcast(), false);
-
-                let moving_from = old_hover_target
-                    .map(|old_target| DomRoot::from_ref(old_target.upcast::<Node>()));
-                let event_target = DomRoot::from_ref(new_target.upcast::<Node>());
-                self.handle_mouse_enter_leave_event(
-                    cx,
-                    event_target,
-                    moving_from,
-                    FireMouseEventType::Enter,
+                    old_hover_target.as_ref().map(|old_target| old_target.upcast::<Node>()),
+                    Some(new_target.upcast()),
                     &hit_test_result,
                     input_event,
                 );
@@ -733,6 +762,7 @@ impl DocumentEventHandler {
         // already fired above use the actual hit-test target.
         let pointer_target = self
             .get_pointer_capture_target(pointer_id)
+            .or_else(|| self.widget_mouse_capture_target.get())
             .map(DomRoot::upcast::<EventTarget>)
             .unwrap_or_else(|| DomRoot::from_ref(new_target.upcast::<EventTarget>()));
 
@@ -750,7 +780,56 @@ impl DocumentEventHandler {
         // Send mousemove event. Routed to the capture target when capture is active.
         mouse_event.upcast::<Event>().fire(cx, &pointer_target);
 
+        // Moving the mouse with the primary button pressed extends the selection to it.
+        if self.selecting_with_mouse.get() {
+            if input_event.pressed_mouse_buttons & 1 == 0 {
+                self.selecting_with_mouse.set(false);
+            } else if let Some(point) = mouse_event.point_in_viewport() &&
+                let Some(selection) = self.window.Document().GetSelection(cx)
+            {
+                selection.select_at_point(
+                    cx,
+                    &hit_test_result.node,
+                    point.map(Au::from_f32_px),
+                    PointerSelection::Character,
+                    true,
+                );
+            }
+        }
+
         self.update_current_hover_target_and_status(Some(new_target));
+
+        if self
+            .drag_and_drop
+            .maybe_start_drag(cx, &self.window, &hit_test_result, input_event)
+        {
+            // <https://w3c.github.io/pointerevents/#the-pointercancel-event>
+            // > The user agent MUST fire a pointer event named pointercancel when ... the
+            // > user agent has determined that a pointer is unlikely to continue to produce
+            // > events, e.g. because a drag-and-drop operation has started.
+            let cancel_event = MouseEvent::new(
+                cx,
+                &self.window,
+                Atom::from("pointercancel"),
+                EventBubbles::Bubbles,
+                EventCancelable::NotCancelable,
+                Some(&self.window),
+                0,
+                hit_test_result.point_in_frame.to_i32(),
+                hit_test_result.point_in_frame.to_i32(),
+                hit_test_result
+                    .point_relative_to_initial_containing_block
+                    .to_i32(),
+                input_event.active_keyboard_modifiers,
+                0,
+                0,
+                None,
+                None,
+            )
+            .to_pointer_event(cx, Atom::from("pointercancel"));
+            cancel_event.upcast::<Event>().fire(cx, &pointer_target);
+            self.implicit_release_pointer_capture(cx, pointer_id, "mouse", true);
+        }
     }
 
     fn update_current_hover_target_and_status(&self, new_hover_target: Option<DomRoot<Element>>) {
@@ -861,6 +940,15 @@ impl DocumentEventHandler {
         event: MouseButtonEvent,
         input_event: &ConstellationInputEvent,
     ) {
+        // A drag swallows the button events that happen during it, including the release that
+        // drops, so neither mouseup nor click fire for the press that started the drag.
+        if self.drag_and_drop.is_dragging() {
+            if event.button == MouseButton::Left && event.action == MouseButtonAction::Up {
+                self.end_drag_for_primary_button_release(cx);
+            }
+            return;
+        }
+
         // Ignore all incoming events without a hit test.
         let Some(hit_test_result) = self.window.hit_test_from_input_event(input_event) else {
             return;
@@ -905,9 +993,8 @@ impl DocumentEventHandler {
         }
 
         // https://w3c.github.io/uievents/#hit-test
-        // Prevent mouse event if element is disabled.
-        // TODO: also inert.
-        if element.is_actually_disabled() {
+        // Prevent mouse event if element is disabled or inert.
+        if element.is_actually_disabled() || element.is_inert() {
             return;
         }
 
@@ -979,6 +1066,18 @@ impl DocumentEventHandler {
                 self.mouse_buttons_down.set(mouse_buttons_down + 1);
 
                 pointer_event.upcast::<Event>().fire(cx, &pointer_target);
+                // <https://html.spec.whatwg.org/multipage/#run-light-dismiss-activities> for
+                // pointerdown and pointerup closes popovers and dialogs clicked outside of.
+                if mouse_buttons_down == 0 &&
+                    let Some(target) = pointer_target.downcast::<Node>()
+                {
+                    document.top_layer().run_light_dismiss_activities(
+                        cx,
+                        &mouse_event,
+                        LightDismissEventType::PointerDown,
+                        target,
+                    );
+                }
 
                 // Process pending pointer capture after firing event, but skip if we just
                 // released a disconnected capture to avoid immediately re-capturing.
@@ -992,6 +1091,15 @@ impl DocumentEventHandler {
                     .upcast::<Event>()
                     .dispatch(cx, node.upcast(), false);
 
+                // Canceling mousedown prevents a drag from starting, as in other browsers.
+                if event.button == MouseButton::Left && result {
+                    self.drag_and_drop.note_primary_button_down(
+                        node,
+                        &hit_test_result,
+                        input_event,
+                    );
+                }
+
                 // Step 8. If result is true and target is a focusable area
                 // that is click focusable, then Run the focusing steps at target.
                 if result {
@@ -1001,6 +1109,20 @@ impl DocumentEventHandler {
                     document
                         .focus_handler()
                         .focus(cx, node.find_click_focusable_area());
+
+                    if event.button == MouseButton::Left &&
+                        let Some(point) = mouse_event.point_in_viewport()
+                    {
+                        self.select_for_primary_button_press(
+                            cx,
+                            &hit_test_result.node,
+                            point.map(Au::from_f32_px),
+                            self.click_counting_info.borrow().count + 1,
+                            input_event
+                                .active_keyboard_modifiers
+                                .contains(Modifiers::SHIFT),
+                        );
+                    }
                 }
 
                 // Step 9. If mbutton is the secondary mouse button, then
@@ -1011,6 +1133,11 @@ impl DocumentEventHandler {
             },
             // https://w3c.github.io/pointerevents/#dfn-handle-native-mouse-up
             MouseButtonAction::Up => {
+                if event.button == MouseButton::Left {
+                    self.drag_and_drop.clear_drag_candidate();
+                    self.selecting_with_mouse.set(false);
+                }
+
                 // Step 6. Dispatch pointerup event.
                 let mouse_buttons_down = self.mouse_buttons_down.get();
                 let pointer_event_name = if mouse_buttons_down == 1 {
@@ -1036,13 +1163,30 @@ impl DocumentEventHandler {
                 let released_disconnected =
                     self.release_disconnected_pointer_capture(cx, pointer_id, "mouse", true);
 
+                let widget_capture_target = if mouse_buttons_down == 1 {
+                    self.widget_mouse_capture_target.take()
+                } else {
+                    self.widget_mouse_capture_target.get()
+                };
+
                 // Get the current capture target (before any state changes)
                 let pointer_target = self
                     .get_pointer_capture_target(pointer_id)
+                    .or_else(|| widget_capture_target.clone())
                     .map(DomRoot::upcast::<EventTarget>)
                     .unwrap_or_else(|| DomRoot::from_ref(node.upcast::<EventTarget>()));
 
                 pointer_event.upcast::<Event>().fire(cx, &pointer_target);
+                if mouse_buttons_down == 1 &&
+                    let Some(target) = pointer_target.downcast::<Node>()
+                {
+                    document.top_layer().run_light_dismiss_activities(
+                        cx,
+                        &mouse_event,
+                        LightDismissEventType::PointerUp,
+                        target,
+                    );
+                }
 
                 // Decrement button count after firing event, so setPointerCapture/releasePointerCapture
                 // work during the pointerup handler (pointer is still "active").
@@ -1062,9 +1206,12 @@ impl DocumentEventHandler {
                 }
 
                 // Step 7. dispatch event at target.
+                let mouse_up_target = widget_capture_target
+                    .as_deref()
+                    .map_or(node, |element| element.upcast::<Node>());
                 mouse_event
                     .upcast::<Event>()
-                    .dispatch(cx, node.upcast(), false);
+                    .dispatch(cx, mouse_up_target.upcast(), false);
 
                 // Click counts should still work for other buttons even though they
                 // do not trigger "click" and "dblclick" events, so we increment
@@ -1082,6 +1229,71 @@ impl DocumentEventHandler {
                 );
             },
         }
+    }
+
+    /// Drop at the end of a drag and reset the button state that the swallowed mouseup would
+    /// have reset.
+    fn end_drag_for_primary_button_release(&self, cx: &mut JSContext) {
+        self.drag_and_drop.pointer_released(cx, &self.window);
+        self.mouse_buttons_down
+            .set(self.mouse_buttons_down.get().saturating_sub(1));
+        self.last_mouse_button_down_point.set(None);
+        self.unset_active_element();
+    }
+
+    /// Changes the selection for a press of the primary button like other browsers: text controls
+    /// keep their own selection, buttons, draggable elements and `user-select: none` content are
+    /// pressed or dragged rather than selected from, and anywhere else the press selects, by
+    /// characters, words or paragraphs depending on the click count, and starts selecting with
+    /// the mouse.
+    fn select_for_primary_button_press(
+        &self,
+        cx: &mut JSContext,
+        hit_node: &Node,
+        point: Point2D<Au, CSSPixel>,
+        click_count: usize,
+        shift: bool,
+    ) {
+        let Some(selection) = self.window.Document().GetSelection(cx) else {
+            return;
+        };
+        for ancestor in hit_node.inclusive_ancestors(ShadowIncluding::Yes) {
+            if ancestor.is::<HTMLInputElement>() || ancestor.is::<HTMLTextAreaElement>() {
+                // The selection of the document moves to the text control.
+                let parent = ancestor.GetParentNode().expect("Hit elements have a parent");
+                selection
+                    .Collapse(cx, Some(&parent), ancestor.index())
+                    .expect("The position of a child is a valid boundary point");
+                return;
+            }
+            // Draggable elements, such as links and images, are dragged instead.
+            let is_draggable = ancestor
+                .downcast::<HTMLElement>()
+                .is_some_and(|element| element.Draggable());
+            if is_draggable ||
+                ancestor.is::<HTMLButtonElement>() ||
+                ancestor.is::<HTMLSelectElement>()
+            {
+                return;
+            }
+        }
+        if !can_start_selection(hit_node) {
+            return;
+        }
+
+        let granularity = match click_count {
+            1 => PointerSelection::Character,
+            2 => PointerSelection::Word,
+            _ => PointerSelection::Paragraph,
+        };
+        selection.select_at_point(
+            cx,
+            hit_node,
+            point,
+            granularity,
+            shift && granularity == PointerSelection::Character,
+        );
+        self.selecting_with_mouse.set(true);
     }
 
     /// <https://w3c.github.io/pointerevents/#handle-native-mouse-click>
@@ -1519,6 +1731,17 @@ impl DocumentEventHandler {
         cx: &mut JSContext,
         keyboard_event: EmbedderKeyboardEvent,
     ) -> InputEventResult {
+        // Like the platform drag sessions other browsers run, a drag takes the keyboard:
+        // Escape cancels it and no key reaches the page.
+        if self.drag_and_drop.is_dragging() {
+            if keyboard_event.event.state == KeyState::Down &&
+                keyboard_event.event.key == Key::Named(NamedKey::Escape)
+            {
+                self.drag_and_drop.cancel(cx, &self.window);
+            }
+            return InputEventResult::default();
+        }
+
         let target = &self.target_for_events_following_focus();
         let keyevent = KeyboardEvent::new_with_platform_keyboard_event(
             cx,
@@ -1536,6 +1759,18 @@ impl DocumentEventHandler {
         let mut flags = event.flags();
         if flags.contains(EventFlags::Canceled) {
             return flags.into();
+        }
+
+        // <https://html.spec.whatwg.org/multipage/#close-requests>: an Escape keydown that the
+        // page did not cancel is a close request, which closes the topmost modal dialog or auto
+        // popover.
+        if keyboard_event.event.state == KeyState::Down &&
+            keyboard_event.event.key == Key::Named(NamedKey::Escape)
+        {
+            self.window
+                .Document()
+                .top_layer()
+                .process_close_watchers(cx);
         }
 
         // <https://w3c.github.io/clipboard-apis/#clipboard-actions>: the platform's cut, copy and
@@ -1652,18 +1887,19 @@ impl DocumentEventHandler {
             hit_test_result.point_in_frame
         );
 
-        let event_type = "wheel".into();
+        let event_type: Atom = "wheel".into();
+        // Listeners for the legacy `mousewheel` type receive trusted wheel events too (see
+        // `invoke` in event.rs), so they can cancel them as well.
+        let legacy_event_type: Atom = "mousewheel".into();
+        let has_non_passive_listener = |target: &EventTarget| {
+            target.has_non_passive_listener(&event_type) ||
+                target.has_non_passive_listener(&legacy_event_type)
+        };
 
         let cancelable = EventCancelable::from(
-            self.window
-                .upcast::<EventTarget>()
-                .has_non_passive_listener(&event_type) ||
+            has_non_passive_listener(self.window.upcast::<EventTarget>()) ||
                 node.inclusive_ancestors(ShadowIncluding::Yes)
-                    .any(|target| {
-                        target
-                            .upcast::<EventTarget>()
-                            .has_non_passive_listener(&event_type)
-                    }),
+                    .any(|target| has_non_passive_listener(target.upcast::<EventTarget>())),
         );
         // https://w3c.github.io/uievents/#event-wheelevents
         let dom_event = WheelEvent::new(
@@ -1692,6 +1928,17 @@ impl DocumentEventHandler {
             Finite::wrap(-event.delta.y),
             Finite::wrap(-event.delta.z),
             event.delta.mode as u32,
+        );
+        // Blink reports 120 per wheel tick in `wheelDelta`, positive when scrolling up or left
+        // like the embedder's deltas. Embedders deliver a tick as one line, or as 120 pixels,
+        // which is how far Chrome on Linux scrolls per tick.
+        let wheel_delta_per_unit = match event.delta.mode {
+            WheelMode::DeltaPixel => 1.0,
+            WheelMode::DeltaLine | WheelMode::DeltaPage => 120.0,
+        };
+        dom_event.set_wheel_delta(
+            (event.delta.x * wheel_delta_per_unit) as i32,
+            (event.delta.y * wheel_delta_per_unit) as i32,
         );
 
         let dom_event = dom_event.upcast::<Event>();
@@ -2123,10 +2370,20 @@ impl DocumentEventHandler {
     /// Handle a scroll event triggered by user interactions from the embedder.
     /// <https://drafts.csswg.org/cssom-view/#scrolling-events>
     #[expect(unsafe_code)]
-    pub(crate) fn handle_embedder_scroll_event(&self, scrolled_node: ExternalScrollId) {
+    pub(crate) fn handle_embedder_scroll_event(
+        &self,
+        scrolled_node: ExternalScrollId,
+        previous_offset: Option<LayoutVector2D>,
+    ) {
+        // The user scrolling a box takes over from any smooth scroll script started on it.
+        self.window.abort_smooth_scroll(scrolled_node);
+
         // If it is a viewport scroll.
         let document = self.window.Document();
         if scrolled_node.is_root() {
+            if let Some(previous_offset) = previous_offset {
+                document.note_user_scroll_origin(document.upcast(), previous_offset);
+            }
             document.handle_viewport_scroll_event();
         } else {
             // Otherwise, check whether it is for a relevant element within the document. For a `::before` or `::after`
@@ -2143,6 +2400,9 @@ impl DocumentEventHandler {
                 return;
             };
 
+            if let Some(previous_offset) = previous_offset {
+                document.note_user_scroll_origin(element.upcast(), previous_offset);
+            }
             element.handle_scroll_event();
         }
     }
@@ -2196,6 +2456,16 @@ impl DocumentEventHandler {
             return;
         }
 
+        if node.editing_host_of().is_some() {
+            if self.maybe_move_caret_for_key(cx, event) {
+                return;
+            }
+            // A space typed into an editing host is text, not a request to scroll.
+            if matches!(event.key(), Key::Character(string) if &string == " ") {
+                return;
+            }
+        }
+
         let mut is_space = false;
         let scroll = match event.key() {
             Key::Named(NamedKey::ArrowDown) => KeyboardScroll::Down,
@@ -2236,6 +2506,39 @@ impl DocumentEventHandler {
         self.do_keyboard_scroll(cx, scroll);
     }
 
+    /// Moves the caret of an editing host for the arrow, Home and End keys, extending the
+    /// selection with Shift, as `Selection.modify()` does. Returns whether the key moved it.
+    fn maybe_move_caret_for_key(&self, cx: &mut JSContext, event: &KeyboardEvent) -> bool {
+        let modifiers = event.modifiers();
+        if modifiers.intersects(Modifiers::ALT | Modifiers::META) {
+            return false;
+        }
+        let control = modifiers.contains(Modifiers::CONTROL);
+        let (forward, movement) = match event.key() {
+            Key::Named(NamedKey::ArrowLeft) if control => (false, CaretMovement::Word),
+            Key::Named(NamedKey::ArrowLeft) => (false, CaretMovement::Character),
+            Key::Named(NamedKey::ArrowRight) if control => (true, CaretMovement::Word),
+            Key::Named(NamedKey::ArrowRight) => (true, CaretMovement::Character),
+            Key::Named(NamedKey::ArrowUp) => (false, CaretMovement::Line),
+            Key::Named(NamedKey::ArrowDown) => (true, CaretMovement::Line),
+            Key::Named(NamedKey::Home) if control => (false, CaretMovement::DocumentBoundary),
+            Key::Named(NamedKey::Home) => (false, CaretMovement::LineBoundary),
+            Key::Named(NamedKey::End) if control => (true, CaretMovement::DocumentBoundary),
+            Key::Named(NamedKey::End) => (true, CaretMovement::LineBoundary),
+            _ => return false,
+        };
+        let Some(selection) = self.window.Document().GetSelection(cx) else {
+            return false;
+        };
+        selection.modify_in_editable_content(
+            cx,
+            modifiers.contains(Modifiers::SHIFT),
+            forward,
+            movement,
+        );
+        true
+    }
+
     pub(crate) fn do_keyboard_scroll(&self, cx: &mut JSContext, scroll: KeyboardScroll) {
         let scroll_axis = match scroll {
             KeyboardScroll::Left | KeyboardScroll::Right => ScrollingBoxAxis::X,
@@ -2269,27 +2572,34 @@ impl DocumentEventHandler {
             const LINE_WIDTH: f32 = 76.0;
 
             let current_scroll_offset = scrolling_box.scroll_position();
-            (
-                current_scroll_offset,
-                match scroll {
-                    KeyboardScroll::Home => Vector2D::new(0.0, -current_scroll_offset.y),
-                    KeyboardScroll::End => Vector2D::new(
-                        0.0,
-                        -current_scroll_offset.y + scrolling_box.content_size().height -
-                            scrolling_box.size().height,
-                    ),
-                    KeyboardScroll::PageDown => {
-                        Vector2D::new(0.0, scrolling_box.size().height - 2.0 * LINE_HEIGHT)
-                    },
-                    KeyboardScroll::PageUp => {
-                        Vector2D::new(0.0, 2.0 * LINE_HEIGHT - scrolling_box.size().height)
-                    },
-                    KeyboardScroll::Up => Vector2D::new(0.0, -LINE_HEIGHT),
-                    KeyboardScroll::Down => Vector2D::new(0.0, LINE_HEIGHT),
-                    KeyboardScroll::Left => Vector2D::new(-LINE_WIDTH, 0.0),
-                    KeyboardScroll::Right => Vector2D::new(LINE_WIDTH, 0.0),
+            let delta = match scroll {
+                KeyboardScroll::Home => Vector2D::new(0.0, -current_scroll_offset.y),
+                KeyboardScroll::End => Vector2D::new(
+                    0.0,
+                    -current_scroll_offset.y + scrolling_box.content_size().height -
+                        scrolling_box.size().height,
+                ),
+                KeyboardScroll::PageDown => {
+                    Vector2D::new(0.0, scrolling_box.size().height - 2.0 * LINE_HEIGHT)
                 },
-            )
+                KeyboardScroll::PageUp => {
+                    Vector2D::new(0.0, 2.0 * LINE_HEIGHT - scrolling_box.size().height)
+                },
+                KeyboardScroll::Up => Vector2D::new(0.0, -LINE_HEIGHT),
+                KeyboardScroll::Down => Vector2D::new(0.0, LINE_HEIGHT),
+                KeyboardScroll::Left => Vector2D::new(-LINE_WIDTH, 0.0),
+                KeyboardScroll::Right => Vector2D::new(LINE_WIDTH, 0.0),
+            };
+            // Keyboard scrolls are directional: in a snap container they move on to the next
+            // snap position in their direction, even one further away than the scroll amount.
+            // Home and End instead go to an end of the box, so like in Chromium they do not
+            // stop at `scroll-snap-stop: always` snap areas on the way.
+            let origin = match scroll {
+                KeyboardScroll::Home | KeyboardScroll::End => None,
+                _ => Some(current_scroll_offset),
+            };
+            let snapped = scrolling_box.snapped_position(current_scroll_offset + delta, origin);
+            (current_scroll_offset, snapped - current_scroll_offset)
         };
 
         // If trying to scroll the viewport of this `Window` and this is the root `Document`
@@ -3083,8 +3393,12 @@ fn typing_command(event: &keyboard_types::KeyboardEvent) -> Option<(CommandName,
     }
     Some(match &event.key {
         Key::Character(text) => (CommandName::InsertText, Some(DOMString::from(text.as_str()))),
+        Key::Named(NamedKey::Enter) if event.modifiers.contains(Modifiers::SHIFT) => {
+            (CommandName::InsertLineBreak, None)
+        },
         Key::Named(NamedKey::Enter) => (CommandName::InsertParagraph, None),
         Key::Named(NamedKey::Backspace) => (CommandName::Delete, None),
+        Key::Named(NamedKey::Delete) => (CommandName::ForwardDelete, None),
         _ => return None,
     })
 }

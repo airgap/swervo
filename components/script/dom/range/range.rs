@@ -68,6 +68,68 @@ pub(crate) struct ContainedChildren {
 }
 
 impl Range {
+    /// <https://dom.spec.whatwg.org/#dom-range-stringifier>, leaving out the data of the
+    /// `Text` nodes that `include` rejects.
+    pub(crate) fn stringify(&self, no_gc: &NoGC, include: impl Fn(&Node) -> bool) -> DOMString {
+        let start_node = self.start_container();
+        let end_node = self.end_container();
+
+        // Step 1. Let string be the empty string.
+        let mut s = DOMString::new();
+
+        if let Some(text_node) = start_node.downcast::<Text>() &&
+            include(&start_node)
+        {
+            let char_data = text_node.upcast::<CharacterData>();
+
+            // Step 2. If this’s start node is this’s end node and it is a Text node,
+            // then return the substring of that Text node’s data beginning at
+            // this’s start offset and ending at this’s end offset.
+            if start_node == end_node {
+                return char_data
+                    .SubstringData(self.start_offset(), self.end_offset() - self.start_offset())
+                    .unwrap();
+            }
+
+            // Step 3. If this’s start node is a Text node, then append the substring of
+            // that node’s data from this’s start offset until the end to string.
+            s.push_str(
+                &char_data
+                    .SubstringData(
+                        self.start_offset(),
+                        char_data.Length() - self.start_offset(),
+                    )
+                    .unwrap()
+                    .str(),
+            );
+        }
+
+        // Step 4. Append the concatenation of the data of all Text nodes that are contained in this,
+        // in tree order, to string.
+        let ancestor = self.CommonAncestorContainer();
+        let iter = start_node
+            .following_nodes_unrooted(no_gc, &ancestor, ShadowIncluding::No)
+            .filter_map(UnrootedDom::downcast::<Text>);
+
+        for child in iter {
+            if self.contains(child.upcast()) && include(child.upcast()) {
+                s.push_str(&child.upcast::<CharacterData>().Data().str());
+            }
+        }
+
+        // Step 5. If this’s end node is a Text node, then append the substring of
+        // that node’s data from its start until this’s end offset to string.
+        if let Some(text_node) = end_node.downcast::<Text>() &&
+            include(&end_node)
+        {
+            let char_data = text_node.upcast::<CharacterData>();
+            s.push_str(&char_data.SubstringData(0, self.end_offset()).unwrap().str());
+        }
+
+        // Step 6. Return string.
+        s
+    }
+
     fn new_inherited(
         start_container: &Node,
         start_offset: u32,
@@ -343,18 +405,50 @@ impl Range {
         self.abstract_range().Collapsed()
     }
 
-    fn client_rects(&self) -> impl Iterator<Item = Rect<Au, CSSPixel>> {
-        // FIXME: For text nodes that are only partially selected, this should return the client
-        // rect of the selected part, not the whole text node.
+    /// <https://drafts.csswg.org/cssom-view/#dom-range-getclientrects>
+    fn client_rects(&self) -> Vec<Rect<Au, CSSPixel>> {
         let start = self.start_container();
         let end = self.end_container();
-        let document = start.owner_doc();
-        let end_clone = end.clone();
-        start
-            .following_nodes(document.upcast::<Node>(), ShadowIncluding::No)
-            .take_while(move |node| node != &end)
-            .chain(iter::once(end_clone))
-            .flat_map(move |node| node.border_boxes())
+        let start_offset = self.start_offset();
+        let end_offset = self.end_offset();
+        let window = start.owner_window();
+        let ancestor = self.CommonAncestorContainer();
+
+        // Nodes preceding the start node in tree order are neither contained nor partially
+        // contained, and neither is any node from the first one after the end boundary point.
+        let mut rects = Vec::new();
+        for node in iter::once(start.clone())
+            .chain(start.following_nodes(&ancestor, ShadowIncluding::No))
+        {
+            if node != end && bp_position(&node, 0, &end, end_offset) != Some(Ordering::Less) {
+                break;
+            }
+
+            if node.is::<Text>() {
+                // > For each Text node selected or partially selected by the range (including
+                // > when the boundary-points are identical), include scaled DOMRect object (for
+                // > the part that is selected, not the whole line box).
+                if node != start && node != end && !self.contains(&node) {
+                    continue;
+                }
+                let text_start = if node == start { start_offset } else { 0 };
+                let text_end = if node == end { end_offset } else { node.len() };
+                rects.extend(
+                    window.text_range_rects_query(&node, text_start as usize..text_end as usize),
+                );
+            } else if node.is::<Element>() &&
+                self.contains(&node) &&
+                !node
+                    .GetParentNode()
+                    .is_some_and(|parent| self.contains(&parent))
+            {
+                // > For each element selected by the range, whose parent is not selected by the
+                // > range, include the border areas returned by invoking getClientRects() on the
+                // > element.
+                rects.extend(node.border_boxes());
+            }
+        }
+        rects
     }
 
     /// <https://dom.spec.whatwg.org/#concept-range-bp-set>
@@ -1111,59 +1205,7 @@ impl RangeMethods<crate::DomTypeHolder> for Range {
 
     /// <https://dom.spec.whatwg.org/#dom-range-stringifier>
     fn Stringifier(&self, no_gc: &NoGC) -> DOMString {
-        let start_node = self.start_container();
-        let end_node = self.end_container();
-
-        // Step 1. Let string be the empty string.
-        let mut s = DOMString::new();
-
-        if let Some(text_node) = start_node.downcast::<Text>() {
-            let char_data = text_node.upcast::<CharacterData>();
-
-            // Step 2. If this’s start node is this’s end node and it is a Text node,
-            // then return the substring of that Text node’s data beginning at
-            // this’s start offset and ending at this’s end offset.
-            if start_node == end_node {
-                return char_data
-                    .SubstringData(self.start_offset(), self.end_offset() - self.start_offset())
-                    .unwrap();
-            }
-
-            // Step 3. If this’s start node is a Text node, then append the substring of
-            // that node’s data from this’s start offset until the end to string.
-            s.push_str(
-                &char_data
-                    .SubstringData(
-                        self.start_offset(),
-                        char_data.Length() - self.start_offset(),
-                    )
-                    .unwrap()
-                    .str(),
-            );
-        }
-
-        // Step 4. Append the concatenation of the data of all Text nodes that are contained in this,
-        // in tree order, to string.
-        let ancestor = self.CommonAncestorContainer();
-        let iter = start_node
-            .following_nodes_unrooted(no_gc, &ancestor, ShadowIncluding::No)
-            .filter_map(UnrootedDom::downcast::<Text>);
-
-        for child in iter {
-            if self.contains(child.upcast()) {
-                s.push_str(&child.upcast::<CharacterData>().Data().str());
-            }
-        }
-
-        // Step 5. If this’s end node is a Text node, then append the substring of
-        // that node’s data from its start until this’s end offset to string.
-        if let Some(text_node) = end_node.downcast::<Text>() {
-            let char_data = text_node.upcast::<CharacterData>();
-            s.push_str(&char_data.SubstringData(0, self.end_offset()).unwrap().str());
-        }
-
-        // Step 6. Return string.
-        s
+        self.stringify(no_gc, |_| true)
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-range-createcontextualfragment>
@@ -1230,6 +1272,7 @@ impl RangeMethods<crate::DomTypeHolder> for Range {
 
         let client_rects = self
             .client_rects()
+            .into_iter()
             .map(|rect| {
                 DOMRect::new(
                     cx,
@@ -1256,7 +1299,13 @@ impl RangeMethods<crate::DomTypeHolder> for Range {
         // Step 3. If all rectangles in list have zero width or height, return the first rectangle in list.
         // Step 4. Otherwise, return a DOMRect object describing the smallest rectangle that includes all
         // of the rectangles in list of which the height or width is not zero.
-        let bounding_rect = list.fold(euclid::Rect::zero(), |acc, rect| acc.union(&rect));
+        let bounding_rect = list
+            .iter()
+            .filter(|rect| !rect.is_empty())
+            .copied()
+            .reduce(|acc, rect| acc.union(&rect))
+            .or_else(|| list.first().copied())
+            .unwrap_or_else(Rect::zero);
 
         DOMRect::new(
             cx,

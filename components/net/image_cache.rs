@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use imsz::imsz_from_reader;
 use log::{debug, warn};
@@ -18,13 +19,16 @@ use mime::Mime;
 use net_traits::image_cache::{
     Image, ImageCache, ImageCacheFactory, ImageCacheResponseCallback, ImageCacheResponseMessage,
     ImageCacheResult, ImageLoadListener, ImageOrMetadataAvailable, ImageResponse, PendingImageId,
-    RasterizationCompleteResponse, VectorImage,
+    RasterizationCompleteResponse, VectorImage, VectorImageSource,
 };
 use net_traits::request::CorsSettings;
 use net_traits::{FetchMetadata, FetchResponseMsg, FilteredMetadata, NetworkError};
 use paint_api::{CrossProcessPaintApi, ImageUpdate, SerializableImageData};
 use parking_lot::Mutex;
-use pixels::{CorsStatus, ImageFrame, ImageMetadata, PixelFormat, RasterImage, load_from_memory};
+use pixels::{
+    CorsStatus, ImageFrame, ImageMetadata, PartialDecode, PixelFormat, RasterImage,
+    decode_partial_image, load_from_memory,
+};
 use profile_traits::mem::{Report, ReportKind};
 use profile_traits::path;
 use resvg::tiny_skia;
@@ -50,6 +54,10 @@ const FALLBACK_RIPPY: &[u8] = include_bytes!("resources/rippy.png");
 /// width/height of the pixmap allocated for rasterization.
 const MAX_SVG_PIXMAP_DIMENSION: u32 = 5000;
 
+/// How often the bytes of a still-downloading image are decoded to paint what has arrived so
+/// far. Loads that finish within this interval never pay for a partial decode.
+const PARTIAL_DECODE_INTERVAL: Duration = Duration::from_millis(100);
+
 //
 // TODO(gw): Remaining work on image cache:
 //     * Make use of the prefetch support in various parts of the code.
@@ -64,10 +72,110 @@ const MAX_SVG_PIXMAP_DIMENSION: u32 = 5000;
 // Helper functions.
 // ======================================================================
 
+/// The root `<svg>`'s `viewBox` and `preserveAspectRatio`, which fit the document's content into
+/// whatever viewport it is drawn in: <https://svgwg.org/svg2-draft/coords.html#ComputingAViewportsTransform>
+#[derive(Clone, Copy, Debug, MallocSizeOf)]
+struct RootViewBox {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    /// The fractions of the free space placed before the content horizontally and vertically, or
+    /// `None` for `preserveAspectRatio="none"`, which scales each axis on its own.
+    align: Option<(f32, f32)>,
+    slice: bool,
+}
+
+impl RootViewBox {
+    fn parse(root: usvg::roxmltree::Node) -> Option<Self> {
+        let numbers: Vec<f32> = root
+            .attribute("viewBox")?
+            .split(|c: char| c.is_ascii_whitespace() || c == ',')
+            .filter(|token| !token.is_empty())
+            .map(str::parse)
+            .collect::<Result<_, _>>()
+            .ok()?;
+        let [x, y, width, height] = numbers[..] else {
+            return None;
+        };
+        // A non-positive width or height disables the viewBox.
+        if !(width > 0.0 && height > 0.0) {
+            return None;
+        }
+        // An unparsable `preserveAspectRatio` takes its initial value, `xMidYMid meet`.
+        let (align, slice) = root
+            .attribute("preserveAspectRatio")
+            .and_then(Self::parse_preserve_aspect_ratio)
+            .unwrap_or((Some((0.5, 0.5)), false));
+        Some(Self {
+            x,
+            y,
+            width,
+            height,
+            align,
+            slice,
+        })
+    }
+
+    /// <https://svgwg.org/svg2-draft/coords.html#PreserveAspectRatioAttribute>
+    fn parse_preserve_aspect_ratio(value: &str) -> Option<(Option<(f32, f32)>, bool)> {
+        let mut tokens = value.split_ascii_whitespace().peekable();
+        tokens.next_if_eq(&"defer");
+        let fraction = |name: &str| match name {
+            "Min" => Some(0.0),
+            "Mid" => Some(0.5),
+            "Max" => Some(1.0),
+            _ => None,
+        };
+        let align = match tokens.next()? {
+            "none" => None,
+            align => {
+                let (x, y) = align.strip_prefix('x')?.split_once('Y')?;
+                Some((fraction(x)?, fraction(y)?))
+            },
+        };
+        let slice = match tokens.next() {
+            None | Some("meet") => false,
+            Some("slice") => true,
+            Some(_) => return None,
+        };
+        tokens.next().is_none().then_some((align, slice))
+    }
+
+    /// The transform from viewBox coordinates to a `width` by `height` viewport.
+    fn transform(&self, width: f32, height: f32) -> tiny_skia::Transform {
+        let scale_x = width / self.width;
+        let scale_y = height / self.height;
+        let Some((align_x, align_y)) = self.align else {
+            return tiny_skia::Transform::from_row(
+                scale_x,
+                0.0,
+                0.0,
+                scale_y,
+                -self.x * scale_x,
+                -self.y * scale_y,
+            );
+        };
+        let scale = if self.slice {
+            scale_x.max(scale_y)
+        } else {
+            scale_x.min(scale_y)
+        };
+        tiny_skia::Transform::from_row(
+            scale,
+            0.0,
+            0.0,
+            scale,
+            -self.x * scale + (width - self.width * scale) * align_x,
+            -self.y * scale + (height - self.height * scale) * align_y,
+        )
+    }
+}
+
 fn parse_svg_document_in_memory(
     bytes: &[u8],
     fontdb: Arc<fontdb::Database>,
-) -> Result<usvg::Tree, &'static str> {
+) -> Result<(usvg::Tree, VectorImageSource, Option<RootViewBox>), &'static str> {
     let image_string_href_resolver = Box::new(move |_: &str, _: &usvg::Options| {
         // Do not try to load `href` in <image> as local file path.
         None
@@ -82,11 +190,44 @@ fn parse_svg_document_in_memory(
         ..usvg::Options::default()
     };
 
-    usvg::Tree::from_data(bytes, &opt)
+    // The steps of `usvg::Tree::from_data`, unrolled to also keep the text and read the root
+    // element's attributes off the parsed document.
+    let decompressed;
+    let data = if bytes.starts_with(&[0x1f, 0x8b]) {
+        decompressed = usvg::decompress_svgz(bytes).map_err(|error| {
+            warn!("Error when decompressing SVG data: {error}");
+            "Not a valid SVG document"
+        })?;
+        &decompressed[..]
+    } else {
+        bytes
+    };
+    let text = std::str::from_utf8(data).map_err(|_| "Not a valid SVG document")?;
+    let xml_opt = usvg::roxmltree::ParsingOptions {
+        allow_dtd: true,
+        ..Default::default()
+    };
+    let document = usvg::roxmltree::Document::parse_with_options(text, xml_opt).map_err(|error| {
+        warn!("Error when parsing SVG data: {error}");
+        "Not a valid SVG document"
+    })?;
+    let root = document.root_element();
+    let source = VectorImageSource {
+        text: Arc::new(text.to_owned()),
+        root_preserve_aspect_ratio: root.has_attribute("viewBox").then(|| {
+            root.attribute("preserveAspectRatio")
+                .unwrap_or("xMidYMid meet")
+                .to_owned()
+        }),
+    };
+    let root_view_box = RootViewBox::parse(root);
+
+    let tree = usvg::Tree::from_xmltree(&document, &opt)
         .inspect_err(|error| {
             warn!("Error when parsing SVG data: {error}");
         })
-        .map_err(|_| "Not a valid SVG document")
+        .map_err(|_| "Not a valid SVG document")?;
+    Ok((tree, source, root_view_box))
 }
 
 fn decode_bytes_sync(
@@ -107,9 +248,11 @@ fn decode_bytes_sync(
     let image = if is_svg_document {
         parse_svg_document_in_memory(bytes, fontdb)
             .ok()
-            .map(|svg_tree| {
+            .map(|(svg_tree, source, root_view_box)| {
                 DecodedImage::Vector(VectorImageData {
                     svg_tree: Arc::new(svg_tree),
+                    source,
+                    root_view_box,
                     cors_status: cors,
                 })
             })
@@ -245,6 +388,8 @@ impl CompletedLoad {
 struct VectorImageData {
     #[conditional_malloc_size_of]
     svg_tree: Arc<usvg::Tree>,
+    source: VectorImageSource,
+    root_view_box: Option<RootViewBox>,
     cors_status: CorsStatus,
 }
 
@@ -318,6 +463,17 @@ impl LoadKeyGenerator {
     }
 }
 
+/// Progress of decoding an image while its bytes are still arriving.
+#[derive(MallocSizeOf)]
+enum PartialDecodeState {
+    /// Decode what has arrived once this instant has passed.
+    WaitingUntil(Instant),
+    /// A decode of the bytes received so far is running on the thread pool.
+    Decoding,
+    /// The image will only be shown once it is complete.
+    Unsupported,
+}
+
 #[derive(Debug)]
 enum LoadResult {
     LoadedRasterImage(RasterImage),
@@ -360,6 +516,13 @@ struct PendingLoad {
 
     /// The MIME type from the `Content-type` header of the HTTP response, if any.
     content_type: Option<Mime>,
+
+    partial_decode: PartialDecodeState,
+
+    /// The most recent decode of the bytes received so far, painted while the rest downloads.
+    /// The complete image takes over its WebRender key, so paint picks up the final pixels.
+    #[conditional_malloc_size_of]
+    partial_image: Option<Arc<RasterImage>>,
 }
 
 impl PendingLoad {
@@ -379,6 +542,10 @@ impl PendingLoad {
             cors_setting,
             cors_status: CorsStatus::Unsafe,
             content_type: None,
+            partial_decode: PartialDecodeState::WaitingUntil(
+                Instant::now() + PARTIAL_DECODE_INTERVAL,
+            ),
+            partial_image: None,
         }
     }
 
@@ -652,6 +819,14 @@ impl ImageCacheStore {
             Some(load) => load,
             None => return,
         };
+        if let Some(partial_key) = pending_load
+            .partial_image
+            .as_ref()
+            .and_then(|image| image.id) &&
+            !matches!(&load_result, LoadResult::LoadedRasterImage(image) if image.id == Some(partial_key))
+        {
+            self.paint_api.delete_image(partial_key);
+        }
         let url = pending_load.final_url.clone();
         let image_response = match load_result {
             LoadResult::LoadedRasterImage(raster_image) => {
@@ -755,7 +930,9 @@ impl ImageCacheStore {
             .get(&(url, origin, cors_setting))
             .map(|completed_load| match &completed_load.image_response {
                 ImageResponse::Loaded(image, url) => Ok((image.clone(), url.clone())),
-                ImageResponse::FailedToLoadOrDecode | ImageResponse::MetadataLoaded(_) => Err(()),
+                ImageResponse::FailedToLoadOrDecode |
+                ImageResponse::MetadataLoaded(_) |
+                ImageResponse::PartiallyDecoded(_) => Err(()),
             })
     }
 
@@ -764,15 +941,96 @@ impl ImageCacheStore {
     fn handle_decoder(&mut self, msg: DecoderMsg) {
         let image = match msg.image {
             None => LoadResult::FailedToLoadOrDecode,
-            Some(DecodedImage::Raster(raster_image)) => {
-                self.load_image_with_keycache(PendingKey::RasterImage((msg.key, raster_image)));
-                return;
+            Some(DecodedImage::Raster(mut raster_image)) => {
+                let partial_key = self
+                    .pending_loads
+                    .get_by_key_mut(&msg.key)
+                    .and_then(|pending_load| pending_load.partial_image.as_ref())
+                    .and_then(|partial_image| partial_image.id);
+                let Some(partial_key) = partial_key else {
+                    self.load_image_with_keycache(PendingKey::RasterImage((msg.key, raster_image)));
+                    return;
+                };
+                let (descriptor, data, _) =
+                    raster_image.webrender_image_descriptor_and_data_for_frame(0);
+                self.paint_api.update_image(
+                    partial_key,
+                    descriptor,
+                    SerializableImageData::Raw(data),
+                    None,
+                );
+                raster_image.id = Some(partial_key);
+                LoadResult::LoadedRasterImage(raster_image)
             },
             Some(DecodedImage::Vector(vector_image_data)) => {
                 LoadResult::LoadedVectorImage(vector_image_data)
             },
         };
         self.complete_load(msg.key, image);
+    }
+
+    /// Handle the decode of the bytes of a still-downloading image that a worker thread
+    /// started in `notify_pending_response`.
+    fn handle_partial_decode(&mut self, key: LoadKey, decode: PartialDecode) {
+        let Some(pending_load) = self.pending_loads.loads.get_mut(&key) else {
+            return;
+        };
+        // Once all bytes have arrived the complete image is decoding (or the load failed),
+        // and that result supersedes this one.
+        if pending_load.result.is_some() {
+            return;
+        }
+        let mut image = match decode {
+            PartialDecode::Unsupported => {
+                pending_load.partial_decode = PartialDecodeState::Unsupported;
+                return;
+            },
+            PartialDecode::NeedMoreData => {
+                pending_load.partial_decode =
+                    PartialDecodeState::WaitingUntil(Instant::now() + PARTIAL_DECODE_INTERVAL);
+                return;
+            },
+            PartialDecode::Decoded(image) => image,
+        };
+        pending_load.partial_decode =
+            PartialDecodeState::WaitingUntil(Instant::now() + PARTIAL_DECODE_INTERVAL);
+
+        let (descriptor, data, _) = image.webrender_image_descriptor_and_data_for_frame(0);
+        let data = SerializableImageData::Raw(data);
+        match pending_load
+            .partial_image
+            .as_ref()
+            .and_then(|image| image.id)
+        {
+            Some(image_key) => {
+                self.paint_api
+                    .update_image(image_key, descriptor, data, None);
+                image.id = Some(image_key);
+            },
+            None => {
+                // Waiting for a batch of keys would only delay a later, more complete decode,
+                // so skip showing this one if no key is at hand.
+                let KeyCacheState::Ready(ref mut keys) = self.key_cache.cache else {
+                    return;
+                };
+                let Some(image_key) = keys.pop() else {
+                    self.key_cache.cache = KeyCacheState::PendingBatch;
+                    self.paint_api
+                        .generate_image_key_async(self.webview_id, self.pipeline_id);
+                    return;
+                };
+                self.paint_api.add_image(image_key, descriptor, data, false);
+                image.id = Some(image_key);
+            },
+        }
+
+        let image = Arc::new(image);
+        pending_load.partial_image = Some(image.clone());
+        for listener in &pending_load.listeners {
+            listener.respond(ImageResponse::PartiallyDecoded(Image::Raster(
+                image.clone(),
+            )));
+        }
     }
 }
 
@@ -895,6 +1153,12 @@ impl ImageCache for ImageCacheImpl {
         }
     }
 
+    fn get_partially_decoded_image(&self, id: PendingImageId) -> Option<Image> {
+        let store = self.store.lock();
+        let image = store.pending_loads.loads.get(&id)?.partial_image.clone()?;
+        Some(Image::Raster(image))
+    }
+
     fn get_cached_image_status(
         &self,
         url: ServoUrl,
@@ -946,6 +1210,14 @@ impl ImageCache for ImageCacheImpl {
                 ImageCacheResult::FailedToLoadOrDecode
             },
         }
+    }
+
+    fn vector_image_source(&self, image_id: PendingImageId) -> Option<VectorImageSource> {
+        self.store
+            .lock()
+            .vector_images
+            .get(&image_id)
+            .map(|vector_image| vector_image.source.clone())
     }
 
     fn add_rasterization_complete_listener(
@@ -1008,10 +1280,13 @@ impl ImageCache for ImageCacheImpl {
             return Some(result.clone());
         }
 
+        let mut svg_id_image_id_map = self.svg_id_image_id_map.lock();
         if let Some(svg_id) = svg_id &&
-            let Some(old_mapped_image_id) =
-                self.svg_id_image_id_map.lock().insert(svg_id, image_id) &&
-            old_mapped_image_id != image_id
+            let Some(old_mapped_image_id) = svg_id_image_id_map.insert(svg_id, image_id) &&
+            old_mapped_image_id != image_id &&
+            !svg_id_image_id_map
+                .values()
+                .any(|mapped_image_id| *mapped_image_id == old_mapped_image_id)
         {
             store.vector_images.remove(&old_mapped_image_id);
             store
@@ -1021,6 +1296,7 @@ impl ImageCache for ImageCacheImpl {
                 .svg_rasterization_task_store
                 .remove_all_for_id(old_mapped_image_id);
         }
+        drop(svg_id_image_id_map);
 
         if store
             .svg_rasterization_task_store
@@ -1045,10 +1321,32 @@ impl ImageCache for ImageCacheImpl {
                     .min(MAX_SVG_PIXMAP_DIMENSION);
                 tiny_skia::IntSize::from_wh(width, height).unwrap_or(natural_size)
             };
-            let transform = tiny_skia::Transform::from_scale(
-                tinyskia_requested_size.width() as f32 / natural_size.width() as f32,
-                tinyskia_requested_size.height() as f32 / natural_size.height() as f32,
+            // Scale from the unrounded size: a document whose size is a fraction of a pixel
+            // (vercel.com's logo has a 0.3047 viewBox) rounds up to 1px and would render tiny.
+            let svg_size = vector_image.svg_tree.size();
+            let (requested_width, requested_height) = (
+                tinyskia_requested_size.width() as f32,
+                tinyskia_requested_size.height() as f32,
             );
+            // The image's box becomes the document's viewport, so like Chrome, a viewBox is fitted
+            // into it with the root's `preserveAspectRatio` (discord.com's 165x24 logo in a 146x40
+            // box is letterboxed, not squashed). usvg already fitted the viewBox into the
+            // document's own size, so that fit is undone before applying the one for the box.
+            // Without a viewBox the document is stretched to the box, as in Chrome.
+            let transform = match vector_image.root_view_box {
+                Some(view_box) => view_box
+                    .transform(requested_width, requested_height)
+                    .pre_concat(
+                        view_box
+                            .transform(svg_size.width(), svg_size.height())
+                            .invert()
+                            .expect("a viewBox fit into a non-empty size is invertible"),
+                    ),
+                None => tiny_skia::Transform::from_scale(
+                    requested_width / svg_size.width(),
+                    requested_height / svg_size.height(),
+                ),
+            };
             let mut pixmap = tiny_skia::Pixmap::new(
                 tinyskia_requested_size.width(),
                 tinyskia_requested_size.height(),
@@ -1155,7 +1453,16 @@ impl ImageCache for ImageCacheImpl {
 
     fn evict_rasterized_image(&self, svg_id: &str) {
         let mut store = self.store.lock();
-        if let Some(mapped_image_id) = self.svg_id_image_id_map.lock().remove(svg_id) {
+        let mut svg_id_image_id_map = self.svg_id_image_id_map.lock();
+        if let Some(mapped_image_id) = svg_id_image_id_map.remove(svg_id) {
+            // `<svg>` elements whose serializations are identical (the same icon in the same
+            // colours) share one image; it stays while another of them still paints it.
+            if svg_id_image_id_map
+                .values()
+                .any(|other_image_id| *other_image_id == mapped_image_id)
+            {
+                return;
+            }
             store.pending_loads.remove(&mapped_image_id);
             store.vector_images.remove(&mapped_image_id);
             let images_to_remove = store
@@ -1202,6 +1509,8 @@ impl ImageCache for ImageCacheImpl {
                         .as_ref()
                         .and_then(|metadata| metadata.content_type.clone())
                         .map(|content_type| content_type.into_inner().into());
+                    pending_load.partial_decode =
+                        PartialDecodeState::WaitingUntil(Instant::now() + PARTIAL_DECODE_INTERVAL);
                 } else {
                     debug!("Pending load for id {:?} already evicted from cache", id);
                 }
@@ -1225,6 +1534,19 @@ impl ImageCache for ImageCacheImpl {
                             }
                             pending_load.metadata = Some(img_metadata);
                         }
+                    }
+
+                    if let PartialDecodeState::WaitingUntil(deadline) = pending_load.partial_decode &&
+                        Instant::now() >= deadline
+                    {
+                        pending_load.partial_decode = PartialDecodeState::Decoding;
+                        let bytes = pending_load.bytes.as_slice().to_vec();
+                        let cors_status = pending_load.cors_status;
+                        let local_store = self.store.clone();
+                        self.thread_pool.spawn(move || {
+                            let decode = decode_partial_image(&bytes, cors_status);
+                            local_store.lock().handle_partial_decode(id, decode);
+                        });
                     }
                 } else {
                     debug!("Pending load for id {:?} already evicted from cache", id);
@@ -1329,6 +1651,11 @@ impl ImageCacheStore {
                     .and_then(|icon| icon.id)
                     .map(ImageUpdate::DeleteImage),
             )
+            .chain(self.pending_loads.loads.values_mut().filter_map(|load| {
+                // Loads that are still running must not show or reuse the deleted key.
+                load.partial_decode = PartialDecodeState::Unsupported;
+                load.partial_image.take()?.id.map(ImageUpdate::DeleteImage)
+            }))
             .collect();
         if !deletions.is_empty() {
             self.paint_api
@@ -1356,6 +1683,11 @@ impl ImageCacheImpl {
         if let Some(load) = store.pending_loads.get_by_key_mut(&id) {
             if let Some(ref metadata) = load.metadata {
                 listener.respond(ImageResponse::MetadataLoaded(*metadata));
+            }
+            if let Some(ref partial_image) = load.partial_image {
+                listener.respond(ImageResponse::PartiallyDecoded(Image::Raster(
+                    partial_image.clone(),
+                )));
             }
             load.add_listener(listener);
             return;

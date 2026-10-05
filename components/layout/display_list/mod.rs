@@ -11,7 +11,8 @@ pub(crate) use clip::ClipId;
 use euclid::{Box2D, Point2D, Rect, Scale, SideOffsets2D, Size2D, UnknownUnit, Vector2D};
 use fonts::{FontRef, ShapedTextSlice};
 use gradient::WebRenderGradient;
-use layout_api::ReflowStatistics;
+use layout_api::{DocumentSelection, ReflowStatistics};
+use rustc_hash::FxHashMap;
 use net_traits::image_cache::Image as CachedImage;
 use paint_api::display_list::{PaintDisplayListInfo, SpatialTreeNodeInfo};
 use paint_api::{CrossProcessPaintApi, SerializableImageData};
@@ -32,12 +33,13 @@ use style::computed_values::text_decoration_style::{
     T as ComputedTextDecorationStyle, T as TextDecorationStyle,
 };
 use style::dom::OpaqueNode;
+use style::computed_value_flags::ComputedValueFlags;
 use style::properties::ComputedValues;
 use style::properties::longhands::visibility::computed_value::T as Visibility;
 use style::properties::style_structs::Border;
 use style::values::computed::basic_shape::ClipPath;
 use style::values::computed::{
-    BorderImageSideWidth, BorderImageWidth, BorderStyle, LengthPercentage,
+    Appearance, BorderImageSideWidth, BorderImageWidth, BorderStyle, LengthPercentage,
     NonNegativeLengthOrNumber, NumberOrPercentage, OutlineStyle,
 };
 use style::values::generics::NonNegative;
@@ -62,6 +64,8 @@ use crate::display_list::background::BackgroundPainter;
 use crate::display_list::conversions::FilterToWebRender;
 pub(crate) use crate::display_list::conversions::ToWebRender;
 use crate::display_list::paint_traversal::{PaintTraversal, PaintTraversalHandler, TraversalState};
+use crate::flow::inline::TextOrigins;
+use crate::flow::inline::line::TextRunOffsets;
 use crate::fragment_tree::{
     BackgroundMode, BaseFragment, BoxFragment, BoxFragmentWithStyle, ContainingBlockCalculation,
     Fragment, FragmentFlags, FragmentStatus, FragmentTree, IFrameFragment, ImageFragment,
@@ -70,6 +74,7 @@ use crate::fragment_tree::{
 use crate::geom::{
     LengthPercentageOrAuto, PhysicalPoint, PhysicalRect, PhysicalSides, PhysicalSize,
 };
+use crate::lists::SymbolMarker;
 use crate::replaced::NaturalSizes;
 use crate::style_ext::{BorderStyleColor, ComputedValuesExt};
 
@@ -87,6 +92,15 @@ pub(crate) use paint_timing_handler::PaintTimingHandler;
 pub(crate) use stacking_context::*;
 
 const INSERTION_POINT_LOGICAL_WIDTH: Au = Au(AU_PER_PX);
+
+/// The colours of selected text without a `::selection` rule, those of Chrome.
+const DEFAULT_SELECTION_BACKGROUND: wr::ColorF = wr::ColorF {
+    r: 51. / 255.,
+    g: 103. / 255.,
+    b: 209. / 255.,
+    a: 1.,
+};
+const DEFAULT_SELECTION_TEXT: wr::ColorF = wr::ColorF::WHITE;
 
 pub(crate) struct DisplayListBuilder<'a> {
     /// The [`FragmentTree`] that we are building a display list for.
@@ -137,6 +151,16 @@ pub(crate) struct DisplayListBuilder<'a> {
 
     /// Statistics collected about the reflow, in order to write tests for incremental layout.
     reflow_statistics: &'a mut ReflowStatistics,
+
+    /// The caret of a selection collapsed in the focused editing host, as in
+    /// [`DocumentSelection::caret`].
+    caret: Option<(OpaqueNode, u32)>,
+
+    /// The selected UTF-16 range of each text node in a non-collapsed selection of the document.
+    selected_text: FxHashMap<OpaqueNode, std::ops::Range<u32>>,
+
+    /// The node that a non-collapsed selection of the document ends in.
+    selection_end_node: Option<OpaqueNode>,
 }
 
 struct InspectorHighlight {
@@ -177,7 +201,7 @@ impl InspectorHighlight {
     }
 }
 
-impl DisplayListBuilder<'_> {
+impl<'a> DisplayListBuilder<'a> {
     #[expect(clippy::too_many_arguments)]
     pub(crate) fn build(
         stacking_context_tree: &mut StackingContextTree,
@@ -187,6 +211,7 @@ impl DisplayListBuilder<'_> {
         webview_id: WebViewId,
         device_pixel_ratio: Scale<f32, StyloCSSPixel, StyloDevicePixel>,
         highlighted_dom_node: Option<OpaqueNode>,
+        document_selection: Option<&DocumentSelection>,
         debug: &DiagnosticsLogging,
         paint_timing_handler: &mut PaintTimingHandler,
         reflow_statistics: &mut ReflowStatistics,
@@ -221,6 +246,11 @@ impl DisplayListBuilder<'_> {
             device_pixel_ratio,
             paint_timing_handler,
             reflow_statistics,
+            caret: document_selection.and_then(|selection| selection.caret),
+            selected_text: document_selection
+                .map(|selection| selection.selected_text.iter().cloned().collect())
+                .unwrap_or_default(),
+            selection_end_node: document_selection.and_then(|selection| selection.end_node),
         };
 
         // Clear any caret color from previous display list constructions.
@@ -479,7 +509,19 @@ impl DisplayListBuilder<'_> {
         let effects = style.get_effects();
         let transform_style = style.used_transform_style(fragment.base.flags);
         let has_mask = fragment.has_mask_image();
-        if effects.filter.0.is_empty() &&
+        // Every stacking context is an isolated group for its blended descendants
+        // (https://drafts.fxtf.org/compositing-1/#isolation), so one that contains a
+        // `mix-blend-mode` child must reach WebRender flagged as a blend container even when it
+        // has no effect of its own; otherwise the child blends with whatever lies behind it.
+        // Blending elements always establish stacking contexts, and children stolen from
+        // stacking containers are hoisted into the nearest real one, so direct children suffice.
+        let is_blend_container = stacking_context.children.iter().any(|child| {
+            child.fragment().is_some_and(|child| {
+                child.style().get_effects().mix_blend_mode != ComputedMixBlendMode::Normal
+            })
+        });
+        if !is_blend_container &&
+            effects.filter.0.is_empty() &&
             effects.opacity == 1.0 &&
             effects.mix_blend_mode == ComputedMixBlendMode::Normal &&
             !style.has_effective_transform_or_perspective(FragmentFlags::empty()) &&
@@ -505,12 +547,6 @@ impl DisplayListBuilder<'_> {
             ));
         }
 
-        // TODO(jdm): WebRender now requires us to create stacking context items
-        //            with the IS_BLEND_CONTAINER flag enabled if any children
-        //            of the stacking context have a blend mode applied.
-        //            This will require additional tracking during layout
-        //            before we start collecting stacking contexts so that
-        //            information will be available when we reach this point.
         let spatial_id = self.spatial_id(stacking_context.scroll_tree_node_id);
 
         // WebRender has two different ways of expressing "no clip." ClipChainId::INVALID
@@ -542,7 +578,11 @@ impl DisplayListBuilder<'_> {
             &filters,
             &[], // filter_datas
             wr::RasterSpace::Screen,
-            wr::StackingContextFlags::empty(),
+            if is_blend_container {
+                wr::StackingContextFlags::IS_BLEND_CONTAINER
+            } else {
+                wr::StackingContextFlags::empty()
+            },
             None, // snapshot
         );
 
@@ -917,6 +957,16 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
         if style.get_inherited_box().visibility != Visibility::Visible {
             return;
         }
+        if let Some(symbol) = SymbolMarker::for_outside_marker(&style) {
+            Fragment::build_display_list_for_symbol_marker(
+                symbol,
+                fragment,
+                self,
+                state,
+                &containing_block,
+            );
+            return;
+        }
         Fragment::build_display_list_for_text_fragment(fragment, self, state, &containing_block);
     }
 
@@ -1083,7 +1133,13 @@ impl Fragment {
         let mut baseline_origin = rect.origin;
         baseline_origin.y += fragment.font_metrics.ascent;
 
-        let include_whitespace = fragment.offsets.is_some() ||
+        let include_whitespace = fragment.offsets.as_ref().is_some_and(|offsets| {
+            offsets.shared_selection.is_some() ||
+                offsets
+                    .text_origins
+                    .as_ref()
+                    .is_some_and(|text_origins| text_origins.is_editable)
+        }) ||
             state
                 .text_decorations
                 .iter()
@@ -1097,6 +1153,15 @@ impl Fragment {
         );
 
         if glyphs.is_empty() && !fragment.is_empty_for_text_cursor {
+            // Selected white space is highlighted although it has no glyphs to paint.
+            Self::build_display_list_for_text_selection(
+                fragment,
+                builder,
+                state,
+                containing_block,
+                fragment.base.rect().min_x(),
+                fragment.justification_adjustment,
+            );
             return;
         }
 
@@ -1110,9 +1175,17 @@ impl Fragment {
         // paint`), we just need to make sure these boundaries are big enough to
         // contain the inked portion of the glyphs. We assume that the descent and
         // ascent are big enough and then just expand the advance-based boundaries by
-        // twice the size of the biggest advance in the advance dimention.
+        // twice the size of the biggest advance in the advance dimention. A text stroke reaches
+        // half its width beyond the glyph outlines.
+        let stroke_overflow = match fragment.stroke_font_key {
+            Some(_) => parent_style
+                .get_inherited_text()
+                .clone__webkit_text_stroke_width()
+                .scale_by(0.5),
+            None => Au::zero(),
+        };
         let glyph_bounds = rect
-            .inflate(largest_advance.scale_by(2.0), Au::zero())
+            .inflate(largest_advance.scale_by(2.0) + stroke_overflow, stroke_overflow)
             .to_webrender();
         let common = builder.common_properties(state, glyph_bounds, &parent_style);
 
@@ -1138,8 +1211,12 @@ impl Fragment {
             if text_decoration.line.contains(TextDecorationLine::UNDERLINE) {
                 let mut rect = rect;
                 rect.origin.y += font_metrics.ascent - font_metrics.underline_offset;
-                rect.size.height =
-                    decoration_thickness(font_metrics.underline_size, dppx);
+                rect.size.height = decoration_thickness(
+                    text_decoration
+                        .thickness
+                        .unwrap_or(font_metrics.underline_size),
+                    dppx,
+                );
 
                 Self::build_display_list_for_text_decoration(
                     state,
@@ -1155,8 +1232,12 @@ impl Fragment {
         for text_decoration in state.text_decorations.iter() {
             if text_decoration.line.contains(TextDecorationLine::OVERLINE) {
                 let mut rect = rect;
-                rect.size.height =
-                    decoration_thickness(font_metrics.underline_size, dppx);
+                rect.size.height = decoration_thickness(
+                    text_decoration
+                        .thickness
+                        .unwrap_or(font_metrics.underline_size),
+                    dppx,
+                );
                 Self::build_display_list_for_text_decoration(
                     state,
                     &parent_style,
@@ -1168,7 +1249,7 @@ impl Fragment {
             }
         }
 
-        Self::build_display_list_for_text_selection(
+        let selection = Self::build_display_list_for_text_selection(
             fragment,
             builder,
             state,
@@ -1184,14 +1265,62 @@ impl Fragment {
             .get_inherited_text()
             .clone__webkit_text_fill_color()
             .resolve_to_absolute(&color);
-        builder.wr().push_text(
-            &common,
-            glyph_bounds,
-            &glyphs,
-            fragment.font_key,
-            rgba(fill_color),
-            None,
-        );
+        // Selected text is painted in the colour of the selection: the glyphs are painted once
+        // for each side of the selection and once for the selection, each clipped to its part.
+        let mut parts = vec![(common.clip_rect, rgba(fill_color))];
+        if let Some((selection_rect, selected_text_color)) = selection &&
+            selected_text_color != rgba(fill_color)
+        {
+            let clip = common.clip_rect;
+            let (start, end) = (selection_rect.min.x, selection_rect.max.x);
+            parts = vec![
+                (
+                    Box2D::new(clip.min, Point2D::new(start, clip.max.y)),
+                    rgba(fill_color),
+                ),
+                (
+                    Box2D::new(Point2D::new(start, clip.min.y), Point2D::new(end, clip.max.y)),
+                    selected_text_color,
+                ),
+                (
+                    Box2D::new(Point2D::new(end, clip.min.y), clip.max),
+                    rgba(fill_color),
+                ),
+            ];
+        }
+        for (clip_rect, color) in parts {
+            let Some(clip_rect) = clip_rect.intersection(&common.clip_rect) else {
+                continue;
+            };
+            builder.wr().push_text(
+                &wr::CommonItemProperties {
+                    clip_rect,
+                    ..common
+                },
+                glyph_bounds,
+                &glyphs,
+                fragment.font_key,
+                color,
+                None,
+            );
+        }
+
+        // <https://compat.spec.whatwg.org/#the-webkit-text-stroke>: the stroke paints over the
+        // fill, as in Chrome.
+        if let Some(stroke_font_key) = fragment.stroke_font_key {
+            let stroke_color = parent_style
+                .get_inherited_text()
+                .clone__webkit_text_stroke_color()
+                .resolve_to_absolute(&color);
+            builder.wr().push_text(
+                &common,
+                glyph_bounds,
+                &glyphs,
+                stroke_font_key,
+                rgba(stroke_color),
+                None,
+            );
+        }
 
         builder.check_if_paintable(glyph_bounds, common.clip_rect, parent_style.clone_opacity());
 
@@ -1207,8 +1336,12 @@ impl Fragment {
             {
                 let mut rect = rect;
                 rect.origin.y += font_metrics.ascent - font_metrics.strikeout_offset;
-                rect.size.height =
-                    decoration_thickness(font_metrics.strikeout_size, dppx);
+                rect.size.height = decoration_thickness(
+                    text_decoration
+                        .thickness
+                        .unwrap_or(font_metrics.strikeout_size),
+                    dppx,
+                );
                 Self::build_display_list_for_text_decoration(
                     state,
                     &parent_style,
@@ -1290,6 +1423,75 @@ impl Fragment {
         }
     }
 
+    /// Paints a disc, circle or square list marker as a shape in place of its glyph, see
+    /// [`SymbolMarker`].
+    fn build_display_list_for_symbol_marker(
+        symbol: SymbolMarker,
+        fragment: &TextFragment,
+        builder: &mut DisplayListBuilder,
+        state: &TraversalState,
+        containing_block: &PhysicalRect<Au>,
+    ) {
+        // The marker's trailing space can end up in a fragment of its own.
+        if fragment
+            .glyphs
+            .iter()
+            .all(|shaped_text_slice| shaped_text_slice.is_whitespace())
+        {
+            return;
+        }
+        let text_origin = fragment.base.rect().origin + containing_block.origin.to_vector();
+        let rect = SymbolMarker::rect(fragment.font_metrics.ascent)
+            .translate(text_origin.to_vector())
+            .to_webrender();
+
+        // Blink pixel-snaps the shape (`ToPixelSnappedRect`) before painting it.
+        let dppx = builder.device_pixel_ratio.get();
+        let snap = |value: f32| (value * dppx).round() / dppx;
+        let bounds = LayoutRect::new(
+            LayoutPoint::new(snap(rect.min.x), snap(rect.min.y)),
+            LayoutPoint::new(snap(rect.max.x), snap(rect.max.y)),
+        );
+
+        let style = fragment.base.style();
+        let color = rgba(style.clone_color());
+        let mut common = builder.common_properties(state, bounds, &style);
+        match symbol {
+            SymbolMarker::Disc => {
+                let radii = wr::BorderRadius::uniform(bounds.width() / 2.0);
+                if let Some(clip_chain_id) = builder.maybe_create_clip(state, radii, bounds, false)
+                {
+                    common.clip_chain_id = clip_chain_id;
+                }
+                builder.wr().push_rect(&common, bounds, color);
+            },
+            SymbolMarker::Circle => {
+                // Blink strokes a 1px line centred on the edge of the rect.
+                let stroke_bounds = bounds.inflate(0.5, 0.5);
+                common.clip_rect = stroke_bounds;
+                let side = BorderSide {
+                    color,
+                    style: wr::BorderStyle::Solid,
+                };
+                builder.wr().push_border(
+                    &common,
+                    stroke_bounds,
+                    LayoutSideOffsets::new_all_same(1.0),
+                    BorderDetails::Normal(NormalBorder {
+                        left: side,
+                        right: side,
+                        top: side,
+                        bottom: side,
+                        radius: wr::BorderRadius::uniform(stroke_bounds.width() / 2.0),
+                        do_aa: true,
+                    }),
+                );
+            },
+            SymbolMarker::Square => builder.wr().push_rect(&common, bounds, color),
+        }
+        builder.check_if_paintable(bounds, common.clip_rect, style.clone_opacity());
+    }
+
     fn build_display_list_for_broken_image_border(
         builder: &mut DisplayListBuilder,
         containing_block: &PhysicalRect<Au>,
@@ -1314,6 +1516,90 @@ impl Fragment {
         );
     }
 
+    /// The part of the selection of the document that falls in this text fragment, as character
+    /// offsets of its inline formatting context, whether it is a caret, and whether the selection
+    /// goes on past the end of the line that the fragment ends.
+    fn document_selection_in_text_fragment(
+        builder: &DisplayListBuilder,
+        fragment: &TextFragment,
+        offsets: &TextRunOffsets,
+        text_origins: &TextOrigins,
+    ) -> Option<(std::ops::Range<usize>, bool, bool)> {
+        let character_range = &offsets.character_range;
+        if let Some((node, offset)) = builder.caret {
+            if !text_origins.is_editable {
+                return None;
+            }
+            let caret = text_origins.character_offset(node, offset)?;
+            // Where a line wraps at a space, the space ends the first line but is not painted, and
+            // the offset after it starts the next line. Paint the caret there only once, on the
+            // next line.
+            let laid_out_characters: usize = fragment
+                .glyphs
+                .iter()
+                .map(|glyph_store| glyph_store.character_count())
+                .sum();
+            let wrapped_at_end = laid_out_characters < character_range.len();
+            if caret < character_range.start ||
+                caret > character_range.end ||
+                (caret == character_range.end && wrapped_at_end)
+            {
+                return None;
+            }
+            return Some((caret..caret, true, false));
+        }
+
+        if builder.selected_text.is_empty() ||
+            !text_origins.is_selectable(character_range, &fragment.base.style())
+        {
+            return None;
+        }
+        // White space where a line wraps is not laid out, so the line ends before it.
+        let line_end = character_range.start +
+            fragment
+                .glyphs
+                .iter()
+                .map(|glyph_store| glyph_store.character_count())
+                .sum::<usize>();
+        let mut selected: Option<std::ops::Range<usize>> = None;
+        let mut selects_line_break = false;
+        for source in text_origins.sources_in(character_range) {
+            let Some(dom_range) = builder.selected_text.get(&source.node) else {
+                continue;
+            };
+            let source_start = source.character_offset(dom_range.start);
+            let source_end = source.character_offset(dom_range.end);
+            // The selection goes on past the line when it goes on to the next character (a
+            // line break, or white space where the line wraps), or past the end of the last
+            // text of the inline formatting context.
+            selects_line_break |= offsets.ends_line &&
+                source_start <= line_end &&
+                (source_end > line_end ||
+                    (source_end == line_end &&
+                        dom_range.end == *source.dom_offsets.last().expect("Has an end offset") &&
+                        text_origins
+                            .sources
+                            .last()
+                            .is_some_and(|last| std::ptr::eq(last, source)) &&
+                        builder.selection_end_node != Some(source.node)));
+            let start = source_start.max(character_range.start);
+            let end = source_end.min(character_range.end);
+            if start >= end {
+                continue;
+            }
+            selected = Some(match selected {
+                Some(selected) => selected.start.min(start)..selected.end.max(end),
+                None => start..end,
+            });
+        }
+        match selected {
+            Some(selected) => Some((selected, false, selects_line_break)),
+            // The selection starts at the end of the line, so only its line break is selected.
+            None if selects_line_break => Some((line_end..line_end, false, true)),
+            None => None,
+        }
+    }
+
     // TODO: This caret/text selection implementation currently does not account for vertical text
     // and RTL text properly.
     fn build_display_list_for_text_selection(
@@ -1323,20 +1609,36 @@ impl Fragment {
         containing_block_rect: &PhysicalRect<Au>,
         fragment_x_offset: Au,
         justification_adjustment: Au,
-    ) {
-        let Some(offsets) = fragment.offsets.as_ref() else {
-            return;
+    ) -> Option<(units::LayoutRect, wr::ColorF)> {
+        let offsets = fragment.offsets.as_ref()?;
+
+        // The selected characters of the inline formatting context, whether they are a caret, and
+        // whether the line break ending the line is selected.
+        let (selection, is_caret, selects_line_break) = match (
+            &offsets.shared_selection,
+            &offsets.text_origins,
+        ) {
+            (Some(shared_selection), _) => {
+                let shared_selection = shared_selection.borrow();
+                if !shared_selection.enabled {
+                    return None;
+                }
+                (
+                    shared_selection.character_range.clone(),
+                    shared_selection.range.is_empty(),
+                    false,
+                )
+            },
+            (None, Some(text_origins)) => {
+                Self::document_selection_in_text_fragment(builder, fragment, offsets, text_origins)?
+            },
+            (None, None) => return None,
         };
 
-        let shared_selection = offsets.shared_selection.borrow();
-        if !shared_selection.enabled {
-            return;
-        }
-
-        if offsets.character_range.start > shared_selection.character_range.end ||
-            offsets.character_range.end < shared_selection.character_range.start
+        if offsets.character_range.start > selection.end ||
+            offsets.character_range.end < selection.start
         {
-            return;
+            return None;
         }
 
         // When there is an active selection, the line is empty, and there is a forced linebreak,
@@ -1346,9 +1648,9 @@ impl Fragment {
         if fragment.is_empty_for_text_cursor &&
             !offsets
                 .character_range
-                .contains(&shared_selection.character_range.start)
+                .contains(&selection.start)
         {
-            return;
+            return None;
         }
 
         let mut current_character_index = offsets.character_range.start;
@@ -1358,7 +1660,7 @@ impl Fragment {
         for glyph_store in fragment.glyphs.iter() {
             let glyph_store_character_count = glyph_store.character_count();
             if current_character_index + glyph_store_character_count <
-                shared_selection.character_range.start
+                selection.start
             {
                 current_advance += glyph_store.total_advance() +
                     (justification_adjustment * glyph_store.total_word_separators() as i32);
@@ -1366,12 +1668,12 @@ impl Fragment {
                 continue;
             }
 
-            if current_character_index >= shared_selection.character_range.end {
+            if current_character_index >= selection.end {
                 break;
             }
 
             for glyph in glyph_store.glyphs() {
-                if current_character_index >= shared_selection.character_range.start {
+                if current_character_index >= selection.start {
                     start_advance = start_advance.or(Some(current_advance));
                 }
 
@@ -1381,37 +1683,51 @@ impl Fragment {
                     current_advance += justification_adjustment;
                 }
 
-                if current_character_index <= shared_selection.character_range.end {
+                if current_character_index <= selection.end {
                     end_advance = Some(current_advance);
                 }
             }
         }
 
         let start_x = start_advance.unwrap_or(current_advance);
-        let end_x = end_advance.unwrap_or(current_advance);
+        let mut end_x = end_advance.unwrap_or(current_advance);
+        // Like Blink, show a selected line break as a selected space at the end of the line.
+        if selects_line_break {
+            end_x += fragment.font_metrics.space_advance;
+        }
 
         let parent_style = fragment.base.style();
-        if !shared_selection.range.is_empty() {
+        if !is_caret {
+            // Like in other browsers, the highlight spans the whole line box.
             let selection_rect = Rect::new(
                 containing_block_rect.origin +
-                    Vector2D::new(fragment_x_offset + start_x, Au::zero()),
-                Size2D::new(end_x - start_x, containing_block_rect.height()),
+                    Vector2D::new(
+                        fragment_x_offset + start_x,
+                        fragment.base.rect().min_y() + offsets.line_block_start,
+                    ),
+                Size2D::new(end_x - start_x, offsets.line_block_size),
             )
             .to_webrender();
 
-            if let Some(selection_color) = fragment
-                .selected_style
-                .borrow()
-                .clone_background_color()
-                .as_absolute()
+            let selected_style = fragment.selected_style.borrow();
+            // Without a `::selection` rule the selected style is the style of the text itself.
+            let (background_color, text_color) = if ServoArc::ptr_eq(&selected_style, &parent_style)
             {
-                let selection_common =
-                    builder.common_properties(state, selection_rect, &parent_style);
-                builder
-                    .wr()
-                    .push_rect(&selection_common, selection_rect, rgba(*selection_color));
-            }
-            return;
+                (DEFAULT_SELECTION_BACKGROUND, DEFAULT_SELECTION_TEXT)
+            } else {
+                (
+                    selected_style
+                        .clone_background_color()
+                        .as_absolute()
+                        .map_or(wr::ColorF::TRANSPARENT, |color| rgba(*color)),
+                    rgba(selected_style.clone_color()),
+                )
+            };
+            let selection_common = builder.common_properties(state, selection_rect, &parent_style);
+            builder
+                .wr()
+                .push_rect(&selection_common, selection_rect, background_color);
+            return Some((selection_rect, text_color));
         }
 
         let insertion_point_rect = Rect::new(
@@ -1449,6 +1765,7 @@ impl Fragment {
             insertion_point_rect,
             property_binding,
         );
+        None
     }
 }
 
@@ -2286,7 +2603,8 @@ impl<'a> BuilderForBoxFragment<'a> {
 
         let style = self.fragment.style();
         let border = style.get_border();
-        let border_widths = self.fragment.border.to_webrender();
+        // Layout reserves the scrollbar gutter as part of the border widths.
+        let border_widths = (self.fragment.border - style.scrollbar_gutter()).to_webrender();
 
         if border_widths == SideOffsets2D::zero() {
             return;
@@ -2299,6 +2617,31 @@ impl<'a> BuilderForBoxFragment<'a> {
 
         let current_color = style.get_inherited_text().clone_color();
         let style_color = BorderStyleColor::from_border(border, &current_color);
+        if paints_native_text_field(style) {
+            // Chrome draws an unstyled text field itself (`NativeThemeBase::PaintTextField`): a
+            // 1px border in the field's border colour along the border box edge, with rounded
+            // corners, whatever the width and style of its CSS border.
+            let side = wr::BorderSide {
+                color: rgba(style_color.top.color),
+                style: wr::BorderStyle::Solid,
+            };
+            let details = wr::BorderDetails::Normal(wr::NormalBorder {
+                top: side,
+                right: side,
+                bottom: side,
+                left: side,
+                radius: self.border_radius(),
+                do_aa: true,
+            });
+            let common = builder.common_properties(state, self.border_rect, style);
+            builder.wr().push_border(
+                &common,
+                self.border_rect,
+                SideOffsets2D::new_all_same(1.0),
+                details,
+            );
+            return;
+        }
         let details = wr::BorderDetails::Normal(wr::NormalBorder {
             top: self.build_border_side(style_color.top),
             right: self.build_border_side(style_color.right),
@@ -2841,9 +3184,29 @@ pub(super) fn compute_margin_box_radius(
     }
 }
 
+/// Whether this is a text field that Chrome would draw natively, which it does unless the author
+/// styles its border or background (`LayoutTheme::IsControlStyled`).
+fn paints_native_text_field(style: &ComputedValues) -> bool {
+    let box_style = style.get_box();
+    matches!(
+        box_style.clone__moz_default_appearance(),
+        Appearance::Textfield | Appearance::Textarea
+    ) && box_style.clone_appearance() != Appearance::None &&
+        !style
+            .flags
+            .contains(ComputedValueFlags::HAS_AUTHOR_SPECIFIED_BORDER_BACKGROUND)
+}
+
 impl BoxFragment {
     fn border_radius(&self) -> BorderRadius {
         let style = self.style();
+        let border_rect = self.border_rect();
+        if paints_native_text_field(&style) {
+            // The corner radius of Chrome's native text fields.
+            let mut radius = wr::BorderRadius::uniform(2.0);
+            normalize_radii(&border_rect.to_webrender(), &mut radius);
+            return radius;
+        }
         let border = style.get_border();
         if border.border_top_left_radius.0.is_zero() &&
             border.border_top_right_radius.0.is_zero() &&
@@ -2853,7 +3216,6 @@ impl BoxFragment {
             return BorderRadius::zero();
         }
 
-        let border_rect = self.border_rect();
         let resolve =
             |radius: &LengthPercentage, box_size: Au| radius.to_used_value(box_size).to_f32_px();
         let corner = |corner: &style::values::computed::BorderCornerRadius| {

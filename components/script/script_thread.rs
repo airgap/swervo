@@ -1214,6 +1214,14 @@ impl ScriptThread {
             // > 8. For each doc of docs, run the resize steps for doc. [CSSOMVIEW]
             let resized = document.window().run_the_resize_steps(cx);
 
+            // Smooth scrolls advance here so the scroll events they cause are part of
+            // this rendering update's scroll steps.
+            document.window().advance_smooth_scrolls(cx);
+
+            // Snap containers re-snap to layout changes since the last rendering update here,
+            // so the scroll events that causes are part of this update's scroll steps.
+            document.resnap_snap_containers(cx);
+
             // > 9. For each doc of docs, run the scroll steps for doc.
             document.run_the_scroll_steps(cx);
 
@@ -1813,6 +1821,12 @@ impl ScriptThread {
             ScriptThreadMessage::ThemeChange(_, theme) => {
                 self.handle_theme_change_msg(theme);
             },
+            ScriptThreadMessage::ScreenGeometryChanged(pipeline_id) => {
+                // A pipeline still loading has no Window yet, and its Window starts uncached.
+                if let Some(window) = self.documents.borrow().find_window(pipeline_id) {
+                    window.invalidate_screen_geometry();
+                }
+            },
             ScriptThreadMessage::GetDocumentOrigin(pipeline_id, result_sender) => {
                 self.handle_get_document_origin(pipeline_id, result_sender);
             },
@@ -2025,6 +2039,7 @@ impl ScriptThread {
             return;
         };
 
+        let previous_offset = window.layout().scroll_offset(scroll_states.scrolled_node);
         self.profile_event(
             ScriptThreadEventCategory::SetScrollState,
             Some(pipeline_id),
@@ -2038,7 +2053,7 @@ impl ScriptThread {
         window
             .Document()
             .event_handler()
-            .handle_embedder_scroll_event(scroll_states.scrolled_node);
+            .handle_embedder_scroll_event(scroll_states.scrolled_node, previous_offset);
     }
 
     #[cfg(feature = "webgpu")]
@@ -3634,6 +3649,12 @@ impl ScriptThread {
         window.init_document(&document);
 
         // Initialize the browsing context for the window.
+        // A nested browsing context navigated into this script thread from another one has no
+        // WindowProxy here yet, and its name lives in the other thread's WindowProxy.
+        let creates_window_proxy = self
+            .window_proxies
+            .find_window_proxy(incomplete.browsing_context_id)
+            .is_none();
         let window_proxy = self.window_proxies.local_window_proxy(
             cx,
             &self.senders,
@@ -3644,6 +3665,9 @@ impl ScriptThread {
             incomplete.parent_info,
             incomplete.opener,
         );
+        if creates_window_proxy {
+            window_proxy.set_name(DOMString::from(incomplete.browsing_context_name.as_str()));
+        }
         if window_proxy.parent().is_some() {
             // https://html.spec.whatwg.org/multipage/#navigating-across-documents:delaying-load-events-mode-2
             // The user agent must take this nested browsing context
@@ -4076,11 +4100,13 @@ impl ScriptThread {
             return;
         };
 
-        // Update the `url_list` of the incomplete load to track all redirects. This will be reflected
-        // in the new `RequestBuilder` as well.
-        incomplete_load.url_list.push(metadata.final_url.clone());
-
         let mut request_builder = incomplete_load.request_builder();
+        // `http_redirect_fetch` appends the location URL to the new request's URL list. Track it in
+        // the `url_list` of the incomplete load too, so that a later redirect's request carries every
+        // URL fetched so far, once, and the document's redirect count matches the redirects taken.
+        if let Some(Ok(location_url)) = &metadata.location_url {
+            incomplete_load.url_list.push(location_url.clone());
+        }
         request_builder.referrer = metadata
             .referrer
             .clone()
@@ -4358,6 +4384,20 @@ impl ScriptThread {
         };
 
         let global_scope = window.as_global_scope();
+        // The constellation can route an evaluation to a pipeline whose document is no longer
+        // fully active (a navigation is replacing it) or is sandboxed without allow-scripts;
+        // evaluation asserts that script may run, so report it as not ready instead.
+        if !global_scope.can_run_script() {
+            let _ = self.senders.pipeline_to_constellation_sender.send((
+                webview_id,
+                pipeline_id,
+                ScriptToConstellationMessage::FinishJavaScriptEvaluation(
+                    evaluation_id,
+                    Err(JavaScriptEvaluationError::WebViewNotReady),
+                ),
+            ));
+            return;
+        }
         let mut realm = enter_auto_realm(cx, global_scope);
         let cx = &mut realm.current_realm();
 

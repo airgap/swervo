@@ -2,17 +2,20 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use app_units::Au;
+use euclid::{Point2D, Size2D};
 use layout_api::{DangerousStyleElement, LayoutElement, LayoutNode};
 use script::layout_dom::{ServoDangerousStyleElement, ServoLayoutNode};
 use selectors::Element as _;
 use style::counter_style::{CounterStyle, Symbol, SymbolsType};
 use style::dom::{OpaqueNode, TElement};
 use style::properties::ComputedValues;
+use style::properties::longhands::list_style_position::computed_value::T as ListStylePosition;
 use style::properties::longhands::list_style_type::computed_value::T as ListStyleType;
 use style::selector_parser::PseudoElement;
 use style::values::CustomIdent;
 use style::values::computed::Image;
-use style::values::generics::counters::Content;
+use style::values::generics::counters::{Content, ContentItem};
 use stylo_atoms::atom;
 use web_atoms::{local_name, ns};
 
@@ -20,6 +23,7 @@ use crate::context::LayoutContext;
 use crate::dom_traversal::{
     NodeAndStyleInfo, PseudoElementContentItem, generate_pseudo_element_content,
 };
+use crate::geom::PhysicalRect;
 use crate::replaced::ReplacedContents;
 
 /// <https://drafts.csswg.org/css-lists/#content-property>
@@ -64,6 +68,66 @@ pub(crate) fn make_marker<'dom>(
     };
 
     Some((marker_info, content))
+}
+
+/// A disc, circle or square marking an outside list item. Chrome paints these as shapes sized
+/// from the marker font's ascent rather than as the `•`/`◦`/`▪` glyphs their counter styles
+/// name, and spaces them from the item by that ascent too. Fonts draw the glyphs at widely varying
+/// sizes (Liberation Sans' bullet is about two thirds of Chrome's disc), so following Blink's
+/// geometry (`ListMarker::InlineMarginsForOutside`, `ListMarker::RelativeSymbolMarkerRect`,
+/// `ListMarkerPainter::PaintSymbol`) is what keeps list layouts from shifting.
+#[derive(Clone, Copy)]
+pub(crate) enum SymbolMarker {
+    Disc,
+    Circle,
+    Square,
+}
+
+impl SymbolMarker {
+    pub(crate) fn for_outside_marker(marker_style: &ComputedValues) -> Option<Self> {
+        let list_style = marker_style.get_list();
+        if marker_style.pseudo() != Some(PseudoElement::Marker) ||
+            list_style.list_style_position != ListStylePosition::Outside ||
+            !matches!(marker_style.get_counters().content, Content::Normal) ||
+            !matches!(list_style.list_style_image, Image::None)
+        {
+            return None;
+        }
+        let CounterStyle::Name(name) = &list_style.list_style_type.0 else {
+            return None;
+        };
+        match name.0 {
+            atom!("disc") => Some(Self::Disc),
+            atom!("circle") => Some(Self::Circle),
+            atom!("square") => Some(Self::Square),
+            _ => None,
+        }
+    }
+
+    /// Blink works in whole pixels of the font's rounded ascent.
+    fn ascent_px(ascent: Au) -> i32 {
+        ascent.to_f32_px().round() as i32
+    }
+
+    /// How far the start of the marker box sits before the list item's content edge.
+    pub(crate) fn inline_offset(ascent: Au) -> Au {
+        // `kCMarkerPaddingPx` (7) plus one.
+        Au::from_px(Self::ascent_px(ascent) * 2 / 3 + 8)
+    }
+
+    /// The shape's rect relative to the top-left corner of the marker text, whose top is the
+    /// baseline minus `ascent`.
+    pub(crate) fn rect(ascent: Au) -> PhysicalRect<Au> {
+        let ascent = Self::ascent_px(ascent);
+        let size = Au::from_px(ascent / 3);
+        PhysicalRect::new(
+            Point2D::new(
+                Au::from_px(1),
+                Au::from_px(3 * (ascent - ascent * 2 / 3) / 2),
+            ),
+            Size2D::new(size, size),
+        )
+    }
 }
 
 fn symbol_to_string(symbol: &Symbol) -> &str {
@@ -458,5 +522,104 @@ impl CounterWalk<'_> {
         // The instances its children and pseudo-elements created end with this element.
         self.instances.retain(|(creator_depth, _)| *creator_depth <= depth);
         None
+    }
+}
+
+/// The quote depth at the start of the generated content of the pseudo-element `node`.
+/// <https://drafts.csswg.org/css-content/#quote-values>: walks the document in tree order up to
+/// `node`; each `open-quote` and `no-open-quote` of a rendered `::before`/`::after` increments the
+/// depth, each `close-quote` and `no-close-quote` decrements it, never below zero.
+#[expect(unsafe_code)]
+pub(crate) fn quote_depth(context: &LayoutContext, node: ServoLayoutNode<'_>) -> usize {
+    let mut root = node;
+    while let Some(parent) = unsafe { root.dangerous_flat_tree_parent() } {
+        root = parent;
+    }
+    let mut walk = QuoteWalk {
+        context,
+        target: node.opaque(),
+        target_pseudo: node.pseudo_element_chain().primary,
+        depth: 0,
+    };
+    for child in root.flat_tree_children() {
+        if walk.visit(child) {
+            break;
+        }
+    }
+    walk.depth
+}
+
+/// Applies one quote item of `content` to the quote `depth`, returning the depth to use for the
+/// quote mark it renders, if it renders one.
+pub(crate) fn apply_quote_item<I>(item: &ContentItem<I>, depth: &mut usize) -> Option<usize> {
+    match item {
+        ContentItem::OpenQuote => {
+            *depth += 1;
+            Some(*depth - 1)
+        },
+        ContentItem::NoOpenQuote => {
+            *depth += 1;
+            None
+        },
+        // A close-quote that would make the depth negative renders nothing.
+        ContentItem::CloseQuote => depth.checked_sub(1).inspect(|new_depth| *depth = *new_depth),
+        ContentItem::NoCloseQuote => {
+            *depth = depth.saturating_sub(1);
+            None
+        },
+        _ => None,
+    }
+}
+
+struct QuoteWalk<'a> {
+    context: &'a LayoutContext<'a>,
+    target: OpaqueNode,
+    target_pseudo: Option<PseudoElement>,
+    depth: usize,
+}
+
+impl QuoteWalk<'_> {
+    fn apply(&mut self, node: ServoLayoutNode<'_>, pseudo: PseudoElement) {
+        let Some(style) = node
+            .as_element()
+            .and_then(|element| element.with_pseudo(pseudo))
+            .map(|element| element.style(&self.context.style_context))
+            .filter(|style| !style.ineffective_content_property())
+        else {
+            return;
+        };
+        if let Content::Items(items) = &style.get_counters().content {
+            for item in items.items.iter() {
+                apply_quote_item(item, &mut self.depth);
+            }
+        }
+    }
+
+    /// Returns true once the target is reached.
+    fn visit(&mut self, node: ServoLayoutNode<'_>) -> bool {
+        if node.as_element().is_none() {
+            return false;
+        }
+        let style = node.style(&self.context.style_context);
+        if style.get_box().display.is_none() {
+            return false;
+        }
+        let is_target = node.opaque() == self.target;
+        // ::marker and ::before precede the element's children. Quotes in ::marker content are
+        // not counted, as computing the (lazy) ::marker style of every element is costly.
+        if is_target && self.target_pseudo != Some(PseudoElement::After) {
+            return true;
+        }
+        self.apply(node, PseudoElement::Before);
+        for child in node.flat_tree_children() {
+            if self.visit(child) {
+                return true;
+            }
+        }
+        if is_target {
+            return true;
+        }
+        self.apply(node, PseudoElement::After);
+        false
     }
 }

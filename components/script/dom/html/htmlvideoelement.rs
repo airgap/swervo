@@ -289,7 +289,7 @@ impl HTMLVideoElement {
                 }
                 LoadBlocker::terminate(&self.load_blocker, cx);
             },
-            ImageResponse::MetadataLoaded(..) => {},
+            ImageResponse::MetadataLoaded(..) | ImageResponse::PartiallyDecoded(_) => {},
             // The image cache may have loaded a placeholder for an invalid poster url
             ImageResponse::FailedToLoadOrDecode => {
                 self.htmlmediaelement.set_poster_frame(None);

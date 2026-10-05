@@ -28,7 +28,7 @@ use crate::geom::{
     PhysicalSides, PhysicalSize, PhysicalVec, ToLogical, ToLogicalWithContainingBlock,
 };
 use crate::layout_box_base::{IndependentFormattingContextLayoutResult, LayoutBoxBase};
-use crate::sizing::{LazySize, Size, SizeConstraint, Sizes};
+use crate::sizing::{self, LazySize, Size, SizeConstraint, Sizes};
 use crate::style_ext::{Clamp, ComputedValuesExt, ContentBoxSizesAndPBM, DisplayInside};
 use crate::{
     ConstraintSpace, ContainingBlock, ContainingBlockSize, DefiniteContainingBlock,
@@ -224,10 +224,12 @@ impl PositioningContext {
             style.establishes_containing_block_for_absolute_descendants(fragment.base.flags)
         );
         if style.establishes_containing_block_for_all_descendants(fragment.base.flags) {
-            self.absolutes.clear();
-        } else {
             self.absolutes
-                .retain(|hoisted_box| hoisted_box.position() == Position::Fixed);
+                .retain(HoistedAbsolutelyPositionedBox::in_top_layer);
+        } else {
+            self.absolutes.retain(|hoisted_box| {
+                hoisted_box.position() == Position::Fixed || hoisted_box.in_top_layer()
+            });
         }
     }
 
@@ -242,16 +244,16 @@ impl PositioningContext {
             style.establishes_containing_block_for_absolute_descendants(new_fragment.base.flags)
         );
 
-        if style.establishes_containing_block_for_all_descendants(new_fragment.base.flags) {
-            boxes_to_layout_out.append(&mut self.absolutes);
-            return;
-        }
+        let establishes_containing_block_for_all_descendants =
+            style.establishes_containing_block_for_all_descendants(new_fragment.base.flags);
 
         // TODO: This could potentially use `extract_if` when that is stabilized.
-        let (mut boxes_to_layout, mut boxes_to_continue_hoisting) = self
-            .absolutes
-            .drain(..)
-            .partition(|hoisted_box| hoisted_box.position() != Position::Fixed);
+        let (mut boxes_to_layout, mut boxes_to_continue_hoisting) =
+            self.absolutes.drain(..).partition(|hoisted_box| {
+                !hoisted_box.in_top_layer() &&
+                    (establishes_containing_block_for_all_descendants ||
+                        hoisted_box.position() != Position::Fixed)
+            });
         boxes_to_layout_out.append(&mut boxes_to_layout);
         boxes_to_continue_hoisting_out.append(&mut boxes_to_continue_hoisting);
     }
@@ -393,6 +395,17 @@ impl Zero for PositioningContextLength {
 }
 
 impl HoistedAbsolutelyPositionedBox {
+    /// Boxes in the top layer escape every containing block: their containing block is the
+    /// initial containing block (or the viewport, for `position: fixed`).
+    /// <https://drafts.csswg.org/css-position-4/#top-styling>
+    fn in_top_layer(&self) -> bool {
+        self.absolutely_positioned_box
+            .borrow()
+            .context
+            .style()
+            .in_top_layer()
+    }
+
     fn position(&self) -> Position {
         let position = self
             .absolutely_positioned_box
@@ -607,9 +620,40 @@ impl IndependentFormattingContext {
             is_table_or_replaced,
         };
 
+        // <https://drafts.csswg.org/css-sizing-4/#aspect-ratio>: a non-replaced box with an
+        // `aspect-ratio` takes the size of its ratio-dependent axis from the other axis instead
+        // of stretching. With both sizes `auto` the inline size determines the block size,
+        // unless only the block axis stretches (`top: 0; bottom: 0; left: 0`), which Chrome
+        // treats as a definite block size to transfer through the ratio. Replaced boxes
+        // transfer their ratio in `tentative_block_content_size()`.
+        let ratio_dependent_axis = preferred_aspect_ratio
+            .filter(|_| !self.is_replaced())
+            .and_then(|ratio| {
+                let axis = match (
+                    inline_axis_solver.computed_sizes.preferred.is_initial(),
+                    block_axis_solver.computed_sizes.preferred.is_initial(),
+                ) {
+                    (false, false) => return None,
+                    (true, false) => Direction::Inline,
+                    (false, true) => Direction::Block,
+                    (true, true)
+                        if block_axis_solver.automatic_size() == Size::Stretch &&
+                            inline_axis_solver.automatic_size() != Size::Stretch =>
+                    {
+                        Direction::Inline
+                    },
+                    (true, true) => Direction::Block,
+                };
+                Some((axis, ratio))
+            });
+        let automatic_size = |solver: &AbsoluteAxisSolver| match ratio_dependent_axis {
+            Some((axis, _)) if axis == solver.axis => Size::FitContent,
+            _ => solver.automatic_size(),
+        };
+
         // The block size can depend on layout results, so we only solve it tentatively,
         // we may have to resolve it properly later on.
-        let block_automatic_size = block_axis_solver.automatic_size();
+        let block_automatic_size = automatic_size(&block_axis_solver);
         let block_stretch_size = Some(block_axis_solver.stretch_size());
         let inline_stretch_size = inline_axis_solver.stretch_size();
         let tentative_block_content_size =
@@ -639,19 +683,44 @@ impl IndependentFormattingContext {
             self.inline_content_sizes(layout_context, &constraint_space)
                 .sizes
         };
+        // A stretched inline size is still limited by min and max block sizes transferred
+        // through the ratio.
+        let inline_automatic_size = sizing::automatic_inline_size_with_aspect_ratio(
+            automatic_size(&inline_axis_solver),
+            preferred_aspect_ratio,
+            self.is_replaced(),
+            tentative_block_size,
+            inline_stretch_size,
+        );
         let inline_size = inline_axis_solver.computed_sizes.resolve(
             Direction::Inline,
-            inline_axis_solver.automatic_size(),
+            inline_automatic_size,
             Au::zero,
             Some(inline_stretch_size),
             get_inline_content_size,
             is_table,
         );
 
+        // The content can still make the box taller than the ratio: the automatic minimum
+        // size of a box with an `aspect-ratio` is its content size.
+        let aspect_ratio_block_size = match ratio_dependent_axis {
+            Some((Direction::Block, _)) => sizing::block_size_from_aspect_ratio(
+                preferred_aspect_ratio,
+                self.is_replaced(),
+                &block_axis_solver.computed_sizes,
+                block_stretch_size,
+                inline_size,
+            ),
+            _ => None,
+        };
+        let tentative_block_size =
+            aspect_ratio_block_size.map_or(tentative_block_size, SizeConstraint::Definite);
+
         let containing_block_for_children = ContainingBlock {
             size: ContainingBlockSize {
                 inline: inline_size,
                 block: tentative_block_size,
+                table_cell: None,
             },
             style: &style,
         };
@@ -694,7 +763,8 @@ impl IndependentFormattingContext {
             inline: content_inline_size_for_table.unwrap_or(inline_size),
 
             // Now we can properly solve the block size.
-            block: lazy_block_size.resolve(|| content_block_size),
+            block: lazy_block_size
+                .resolve(|| content_block_size.max(aspect_ratio_block_size.unwrap_or_default())),
         };
 
         let inline_margins = inline_axis_solver.solve_margins(content_size.inline);

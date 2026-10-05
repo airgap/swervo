@@ -356,6 +356,10 @@ impl Node {
             debug_assert!(!node.get_flag(NodeFlags::HAS_DIRTY_DESCENDANTS));
             vtable_for(&node).bind_to_tree(cx, &context);
         }
+
+        if parent_is_connected && let Some(element) = new_child.downcast::<Element>() {
+            element.invalidate_relative_selectors_for_insertion();
+        }
     }
 
     /// Clear style and layout data on this [`Node`] and all descendants. This is used to clean
@@ -501,6 +505,9 @@ impl Node {
     fn remove_child(&self, cx: &mut JSContext, child: &Node, cached_index: Option<u32>) {
         assert!(child.parent_node.get().as_deref() == Some(self));
         self.note_dirty_descendants();
+        if let Some(element) = child.downcast::<Element>() {
+            element.invalidate_relative_selectors_for_removal();
+        }
 
         let prev_sibling = child.GetPreviousSibling();
         match prev_sibling {
@@ -543,6 +550,9 @@ impl Node {
     fn move_child(&self, cx: &mut JSContext, child: &Node) {
         assert!(child.parent_node.get().as_deref() == Some(self));
         self.note_dirty_descendants();
+        if let Some(element) = child.downcast::<Element>() {
+            element.invalidate_relative_selectors_for_removal();
+        }
 
         child.prev_sibling.set(None);
         child.next_sibling.set(None);
@@ -1612,7 +1622,9 @@ impl Node {
     ) -> Fallible<Option<DomRoot<Element>>> {
         // > The querySelector(selectors) method steps are to return the first result of running scope-match
         // > a selectors string selectors against this, if the result is not an empty list; otherwise null.
-        let document_url = self.owner_document().url().get_arc();
+        let selector_list = self
+            .owner_document()
+            .parse_selector_list(&selectors.str())?;
 
         // If there are any duplicate ids, their targets may need to be updated in the id map before
         // layout runs, so that the map can gather their elements in DOM order.
@@ -1626,8 +1638,8 @@ impl Node {
         let first_matching_element = with_layout_state(|| {
             let layout_node: LayoutDom<'_, _> = unsafe { traced_node.to_layout() };
             ServoDangerousStyleNode::from(layout_node)
-                .scope_match_a_selectors_string::<QueryFirst>(document_url, &selectors.str())
-        })?;
+                .scope_match_a_selector_list::<QueryFirst>(&selector_list)
+        });
 
         Ok(first_matching_element.map(ServoDangerousStyleElement::rooted))
     }
@@ -1642,7 +1654,9 @@ impl Node {
     ) -> Fallible<DomRoot<NodeList>> {
         // > The querySelectorAll(selectors) method steps are to return the static result of running scope-match
         // > a selectors string selectors against this.
-        let document_url = self.owner_document().url().get_arc();
+        let selector_list = self
+            .owner_document()
+            .parse_selector_list(&selectors.str())?;
 
         // If there are any duplicate ids, their targets may need to be updated in the id map before
         // layout runs, so that the map can gather their elements in DOM order.
@@ -1654,8 +1668,8 @@ impl Node {
         let matching_elements = with_layout_state(|| {
             let layout_node: LayoutDom<'_, _> = unsafe { traced_node.to_layout() };
             ServoDangerousStyleNode::from(layout_node)
-                .scope_match_a_selectors_string::<QueryAll>(document_url, &selectors.str())
-        })?;
+                .scope_match_a_selector_list::<QueryAll>(&selector_list)
+        });
         let iter = matching_elements
             .into_iter()
             .map(ServoDangerousStyleElement::rooted)
@@ -2676,8 +2690,11 @@ impl Node {
             }),
         );
 
-        parent_document.remove_script_and_layout_blocker(cx);
+        // The post-connection steps can run script in any realm (an inserted iframe fires `load`
+        // synchronously, possibly at a listener from the node's old document), so the document
+        // that holds them must be the last one released.
         from_document.remove_script_and_layout_blocker(cx);
+        parent_document.remove_script_and_layout_blocker(cx);
     }
 
     /// <https://dom.spec.whatwg.org/#concept-node-replace-all>

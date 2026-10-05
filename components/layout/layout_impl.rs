@@ -6,6 +6,7 @@
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::atomic::Ordering;
 use std::fmt::Debug;
 use std::rc::Rc;
@@ -21,17 +22,19 @@ use fonts::{FontContext, FontContextWebFontMethods, WebFontDocumentContext};
 use fonts_traits::StylesheetWebFontLoadFinishedCallback;
 use icu_locid::subtags::Language;
 use layout_api::{
-    AxesOverflow, BoxAreaType, CSSPixelRectVec, DangerousStyleNode, IFrameSizes, Layout,
-    LayoutConfig, LayoutDamage, LayoutElement, LayoutFactory, LayoutNode, NodeRenderingType,
-    OffsetParentResponse, PhysicalSides, QueryMsg, ReflowGoal, ReflowPhasesRun, ReflowRequest,
-    ReflowRequestRestyle, ReflowResult, ReflowStatistics, ScrollContainerQueryFlags,
-    ScrollContainerResponse, TrustedNodeAddress, with_layout_state,
+    AxesOverflow, BoxAreaType, CSSPixelRectVec, CaretLine, DangerousStyleNode, DocumentSelection,
+    IFrameSizes, Layout, LayoutConfig, LayoutDamage, LayoutElement, LayoutFactory, LayoutNode,
+    NodeRenderingType, OffsetParentResponse, PhysicalSides, QueryMsg, ReflowGoal, ReflowPhasesRun,
+    ReflowRequest, ReflowRequestRestyle, ReflowResult, ReflowStatistics, RestyleReason,
+    ScrollContainerQueryFlags, ScrollContainerResponse, TrustedNodeAddress, with_layout_state,
 };
 use log::{debug, warn};
 use malloc_size_of::{MallocConditionalSizeOf, MallocSizeOf, MallocSizeOfOps};
 use net_traits::image_cache::ImageCache;
 use paint_api::CrossProcessPaintApi;
-use paint_api::display_list::{AxesScrollSensitivity, PaintDisplayListInfo, ScrollType};
+use paint_api::display_list::{
+    AxesScrollSensitivity, PaintDisplayListInfo, ScrollType, SpatialTreeNodeInfo,
+};
 use parking_lot::{Mutex, RwLock};
 use profile_traits::mem::{Report, ReportKind};
 use profile_traits::time::{
@@ -49,6 +52,7 @@ use servo_base::generic_channel::GenericSender;
 use servo_base::id::{PipelineId, WebViewId};
 use servo_config::opts::{self, DiagnosticsLogging, DiagnosticsLoggingOption};
 use servo_config::pref;
+use servo_geometry::FastLayoutTransform;
 use servo_url::ServoUrl;
 use style::animation::DocumentAnimationSet;
 use style::context::{
@@ -88,15 +92,18 @@ use webrender_api::units::{DevicePixel, LayoutVector2D};
 use crate::accessibility_tree::AccessibilityTree;
 use crate::context::{CachedImageOrError, ImageResolver, LayoutContext};
 use crate::display_list::{DisplayListBuilder, HitTest, PaintTimingHandler, StackingContextTree};
-use crate::dom::NodeExt;
+use crate::cell::WeakRefCell;
+use crate::dom::{LayoutBox, NodeExt};
 use crate::query::{
-    find_character_offset_in_fragment_descendants, get_the_text_steps, process_box_area_request,
-    process_box_areas_request, process_client_rect_request,
+    find_character_offset_in_fragment_descendants, get_the_text_steps,
+    has_sticky_inclusive_ancestor, is_fixed_to_untransformed_viewport, process_box_area_request,
+    process_box_areas_request, process_caret_stops_query, process_client_rect_request,
     process_containing_block_descendant_query, process_containing_block_query,
     process_current_css_zoom_query, process_effective_overflow_query,
     process_node_scroll_area_request, process_offset_parent_query, process_padding_request,
     process_resolved_font_style_query, process_resolved_style_request,
-    process_scroll_container_query,
+    process_scroll_container_query, process_text_range_rects_request,
+    root_transform_for_layout_node,
 };
 use crate::fragment_tree::Fragment;
 use crate::traversal::{RecalcStyle, compute_damage_and_rebuild_box_tree};
@@ -186,6 +193,12 @@ pub struct LayoutThread {
     /// queries were evaluated against these, see [`Self::relayout_if_container_sizes_changed`].
     container_sizes: RefCell<FxHashMap<OpaqueNode, euclid::default::Size2D<Au>>>,
 
+    /// The elements styled with a `container-type`, with weak references to the slots that hold
+    /// their boxes. Measuring these is much cheaper than walking the fragment tree after every
+    /// layout. Entries whose element was dropped, or whose box is gone or no longer a
+    /// container, are pruned when measuring; restyling such an element registers it again.
+    container_slots: RefCell<FxHashMap<OpaqueNode, WeakRefCell<Option<LayoutBox>>>>,
+
     /// Whether this document's styles have evaluated container queries or units against a
     /// container. Until then layout doesn't look for containers.
     uses_container_queries: Cell<bool>,
@@ -196,11 +209,24 @@ pub struct LayoutThread {
     /// eagerly calculated.
     need_containing_block_calculation: Cell<bool>,
 
+    /// The nodes whose fragments and ancestors' fragments have had their cumulative
+    /// containing blocks calculated since the last layout, while
+    /// `need_containing_block_calculation` is set.
+    containing_blocks_calculated_for: RefCell<FxHashSet<OpaqueNode>>,
+
+    /// The viewport of the last reflow, for layout queries that build the stacking context
+    /// tree on demand.
+    viewport_details: Cell<ViewportDetails>,
+
     /// Whether or not the existing stacking context tree is dirty and needs to be
     /// rebuilt. This happens after a relayout or overflow update. The reason that we
     /// don't simply clear the stacking context tree when it becomes dirty is that we need
     /// to preserve scroll offsets from the old tree to the new one.
     need_new_stacking_context_tree: Cell<bool>,
+
+    /// The document's top layer, in the order its elements were added, which is the order
+    /// the stacking context tree paints and hit tests them in.
+    top_layer_order: RefCell<Vec<OpaqueNode>>,
 
     /// The box tree.
     box_tree: RefCell<Option<Arc<BoxTree>>>,
@@ -230,6 +256,10 @@ pub struct LayoutThread {
     ///
     /// If this changed, then we need to create a new display list.
     previously_highlighted_dom_node: Cell<Option<OpaqueNode>>,
+
+    /// The selection of the document painted by the last display list. If this changed, then we
+    /// need to create a new display list.
+    previously_painted_selection: RefCell<Option<DocumentSelection>>,
 
     /// Handler for all Paint Timings
     paint_timing_handler: RefCell<Option<PaintTimingHandler>>,
@@ -333,7 +363,7 @@ impl Layout for LayoutThread {
     }
 
     #[servo_tracing::instrument(skip_all)]
-    fn remove_stylesheet(&mut self, stylesheet: ServoArc<Stylesheet>) {
+    fn remove_stylesheet(&mut self, stylesheet: ServoArc<Stylesheet>) -> bool {
         let guard = stylesheet.shared_lock.read();
         let stylesheet = DocumentStyleSheet(stylesheet.clone());
         self.stylist.remove_stylesheet(stylesheet.clone(), &guard);
@@ -341,7 +371,7 @@ impl Layout for LayoutThread {
             &stylesheet,
             self.stylist.device(),
             &guard,
-        );
+        )
     }
 
     #[servo_tracing::instrument(skip_all)]
@@ -450,15 +480,7 @@ impl Layout for LayoutThread {
             }
 
             let node = unsafe { ServoLayoutNode::new(&node) };
-            let stacking_context_tree = self.stacking_context_tree.borrow();
-            let stacking_context_tree = stacking_context_tree.as_ref()?;
-            process_box_area_request(
-                self,
-                stacking_context_tree,
-                node,
-                area,
-                exclude_transform_and_inline,
-            )
+            process_box_area_request(self, node, area, exclude_transform_and_inline)
         })
     }
 
@@ -476,13 +498,30 @@ impl Layout for LayoutThread {
             }
 
             let node = unsafe { ServoLayoutNode::new(&node) };
+            Some(process_box_areas_request(self, node, area))
+        })
+        .unwrap_or_default()
+    }
+
+    /// Get the bounding boxes of the glyphs for a range of a text node's data, one per line box,
+    /// in the coordinate space of the Document. This is used to implement `Range.getClientRects()`.
+    ///
+    /// See <https://drafts.csswg.org/cssom-view/#dom-range-getclientrects>.
+    #[servo_tracing::instrument(skip_all)]
+    fn query_text_range_rects(
+        &self,
+        node: TrustedNodeAddress,
+        utf16_range: Range<usize>,
+    ) -> CSSPixelRectVec {
+        with_layout_state(|| {
+            let node = unsafe { ServoLayoutNode::new(&node) };
             let stacking_context_tree = self.stacking_context_tree.borrow();
             let stacking_context_tree = stacking_context_tree.as_ref()?;
-            Some(process_box_areas_request(
+            Some(process_text_range_rects_request(
                 self,
                 stacking_context_tree,
                 node,
-                area,
+                utf16_range,
             ))
         })
         .unwrap_or_default()
@@ -515,9 +554,18 @@ impl Layout for LayoutThread {
     fn query_offset_parent(&self, node: TrustedNodeAddress) -> OffsetParentResponse {
         with_layout_state(|| {
             let node = unsafe { ServoLayoutNode::new(&node) };
+            // The stacking context tree only contributes sticky offsets here.
+            let stacking_context_tree_is_stale = self.need_new_stacking_context_tree.get() ||
+                self.stacking_context_tree.borrow().is_none();
+            if stacking_context_tree_is_stale && has_sticky_inclusive_ancestor(node) {
+                self.build_stacking_context_tree(self.viewport_details.get());
+            }
             let stacking_context_tree = self.stacking_context_tree.borrow();
-            let stacking_context_tree = stacking_context_tree.as_ref()?;
-            process_offset_parent_query(self, &stacking_context_tree.paint_info.scroll_tree, node)
+            let scroll_tree = stacking_context_tree
+                .as_ref()
+                .filter(|_| !self.need_new_stacking_context_tree.get())
+                .map(|tree| &tree.paint_info.scroll_tree);
+            process_offset_parent_query(self, scroll_tree, node)
         })
         .unwrap_or_default()
     }
@@ -629,6 +677,18 @@ impl Layout for LayoutThread {
     }
 
     #[servo_tracing::instrument(skip_all)]
+    fn query_caret_stops(&self, node: TrustedNodeAddress) -> Vec<CaretLine> {
+        with_layout_state(|| {
+            let node = unsafe { ServoLayoutNode::new(&node) };
+            let stacking_context_tree = self.stacking_context_tree.borrow();
+            let Some(stacking_context_tree) = stacking_context_tree.as_ref() else {
+                return Vec::new();
+            };
+            process_caret_stops_query(&node, stacking_context_tree)
+        })
+    }
+
+    #[servo_tracing::instrument(skip_all)]
     fn query_elements_from_point(
         &self,
         point: webrender_api::units::LayoutPoint,
@@ -716,17 +776,6 @@ impl Layout for LayoutThread {
         )
     }
 
-    fn ensure_stacking_context_tree(&self, viewport_details: ViewportDetails) {
-        with_layout_state(|| {
-            if self.stacking_context_tree.borrow().is_some() &&
-                !self.need_new_stacking_context_tree.get()
-            {
-                return;
-            }
-            self.build_stacking_context_tree(viewport_details);
-        })
-    }
-
     fn register_paint_worklet_modules(
         &mut self,
         _name: Atom,
@@ -752,10 +801,22 @@ impl Layout for LayoutThread {
     }
 
     fn scroll_offset(&self, id: ExternalScrollId) -> Option<LayoutVector2D> {
-        self.stacking_context_tree
-            .borrow_mut()
-            .as_mut()
-            .and_then(|tree| tree.paint_info.scroll_tree.scroll_offset(id))
+        let scroll_offset = || {
+            self.stacking_context_tree
+                .borrow()
+                .as_ref()
+                .and_then(|tree| tree.paint_info.scroll_tree.scroll_offset(id))
+        };
+        let offset = scroll_offset();
+        // A rebuilt tree clamps the offsets it carries over to the new scrollable sizes, which
+        // leaves zero offsets alone, so only a nonzero one needs the tree rebuilt.
+        if !self.need_new_stacking_context_tree.get() ||
+            offset.is_none_or(|offset| offset == LayoutVector2D::zero())
+        {
+            return offset;
+        }
+        with_layout_state(|| self.build_stacking_context_tree(self.viewport_details.get()));
+        scroll_offset()
     }
 
     fn needs_new_display_list(&self) -> bool {
@@ -764,6 +825,10 @@ impl Layout for LayoutThread {
 
     fn set_needs_new_display_list(&self) {
         self.need_new_display_list.set(true);
+    }
+
+    fn stylist(&self) -> &Stylist {
+        &self.stylist
     }
 
     /// <https://drafts.css-houdini.org/css-properties-values-api-1/#the-registerproperty-function>
@@ -845,10 +910,14 @@ impl LayoutThread {
             last_display_list_was_empty: Cell::new(true),
             device_has_changed: false,
             need_containing_block_calculation: Cell::new(false),
+            containing_blocks_calculated_for: Default::default(),
+            viewport_details: Cell::new(config.viewport_details),
             need_new_display_list: Cell::new(false),
             container_sizes: Default::default(),
+            container_slots: Default::default(),
             uses_container_queries: Cell::new(false),
             need_new_stacking_context_tree: Cell::new(false),
+            top_layer_order: Default::default(),
             box_tree: Default::default(),
             fragment_tree: Default::default(),
             stacking_context_tree: Default::default(),
@@ -857,6 +926,7 @@ impl LayoutThread {
             resolved_images_cache: Default::default(),
             debug: opts::get().debug.clone(),
             previously_highlighted_dom_node: Cell::new(None),
+            previously_painted_selection: Default::default(),
             paint_timing_handler: Default::default(),
             user_stylesheets: config.user_stylesheets,
             accessibility_active: Cell::new(false),
@@ -990,6 +1060,7 @@ impl LayoutThread {
 
     fn handle_accessibility_tree_update(
         &self,
+        document: ServoDangerousStyleDocument,
         root_element: &ServoLayoutNode,
         reflow_request: &mut ReflowRequest,
     ) -> bool {
@@ -1005,7 +1076,11 @@ impl LayoutThread {
         let rooted_nodes =
             std::mem::take(&mut reflow_request.rooted_nodes_for_accessibility_integrity_check);
 
-        if let Some(tree_update) = accessibility_tree.update_tree(root_element, rooted_nodes) {
+        if let Some(tree_update) = accessibility_tree.update_tree(
+            root_element,
+            rooted_nodes,
+            document.blocking_modal_dialog_and_ancestors(),
+        ) {
             // FIXME: Handle send error. Could have a method on accessibility tree to
             // finalise after sending, removing accessibility damage? On fail, retain damage
             // for next reflow, as well as retaining document.needs_accessibility_update.
@@ -1048,6 +1123,16 @@ impl LayoutThread {
             return None;
         };
 
+        let top_layer_order: Vec<OpaqueNode> = document
+            .top_layer_elements()
+            .map(|element| element.as_node().opaque())
+            .collect();
+        if *self.top_layer_order.borrow() != top_layer_order {
+            *self.top_layer_order.borrow_mut() = top_layer_order;
+            self.need_new_stacking_context_tree.set(true);
+            self.need_new_display_list.set(true);
+        }
+
         let image_resolver = Arc::new(ImageResolver {
             origin: reflow_request.origin.clone(),
             image_cache: self.image_cache.clone(),
@@ -1060,12 +1145,17 @@ impl LayoutThread {
         });
         let mut reflow_statistics = Default::default();
 
+        self.viewport_details.set(reflow_request.viewport_details);
         let (mut reflow_phases_run, iframe_sizes) = self.restyle_and_build_trees(
             &mut reflow_request,
             document,
             root_element,
             &image_resolver,
         );
+        if reflow_phases_run.contains(ReflowPhasesRun::RanLayout) {
+            self.need_containing_block_calculation.set(true);
+            self.containing_blocks_calculated_for.borrow_mut().clear();
+        }
         if self.build_stacking_context_tree_for_reflow(&reflow_request) {
             reflow_phases_run.insert(ReflowPhasesRun::BuiltStackingContextTree);
         }
@@ -1075,7 +1165,11 @@ impl LayoutThread {
         if self.handle_update_scroll_node_request(&reflow_request) {
             reflow_phases_run.insert(ReflowPhasesRun::UpdatedScrollNodeOffset);
         }
-        if self.handle_accessibility_tree_update(&root_element.as_node(), &mut reflow_request) {
+        if self.handle_accessibility_tree_update(
+            document,
+            &root_element.as_node(),
+            &mut reflow_request,
+        ) {
             reflow_phases_run.insert(ReflowPhasesRun::UpdatedAccessibilityTree);
         }
 
@@ -1201,7 +1295,9 @@ impl LayoutThread {
                 .collect()
         };
         *self.container_sizes.borrow_mut() = sizes;
-        if changed.is_empty() || !mark_container_descendants_for_restyle(root_element, &changed) {
+        if changed.is_empty() ||
+            !mark_container_descendants_for_restyle(root_element, &changed, &mut changed.len())
+        {
             return;
         }
 
@@ -1215,6 +1311,7 @@ impl LayoutThread {
             return;
         }
         let dirty_root = driver::traverse_dom(&traversal, token, rayon_pool).as_node();
+        self.register_styled_containers(layout_context);
 
         let mut box_tree = self.box_tree.borrow_mut();
         let mut layout_roots = Vec::new();
@@ -1259,21 +1356,39 @@ impl LayoutThread {
         *self.container_sizes.borrow_mut() = self.container_box_sizes();
     }
 
-    /// The content box sizes of the `container-type` boxes in the current fragment tree.
+    fn register_styled_containers(&self, layout_context: &LayoutContext) {
+        self.container_slots
+            .borrow_mut()
+            .extend(layout_context.styled_containers.lock().drain(..));
+    }
+
+    /// The content box sizes of the `container-type` boxes in the last layout, measured like
+    /// container queries measure them (`DOMLayoutData::content_box_size`).
     fn container_box_sizes(&self) -> FxHashMap<OpaqueNode, euclid::default::Size2D<Au>> {
         let mut sizes = FxHashMap::default();
-        if let Some(fragment_tree) = &*self.fragment_tree.borrow() {
-            fragment_tree.find(|fragment, _, _| {
-                if let Fragment::Box(box_fragment) | Fragment::Float(box_fragment) = fragment &&
-                    let Some(tag) = box_fragment.base.tag &&
-                    tag.pseudo_element_chain.primary.is_none() &&
-                    box_fragment.style().clone_container_type() != ContainerType::NORMAL
-                {
-                    sizes.insert(tag.node, box_fragment.content_rect().size.to_untyped());
-                }
-                None::<()>
-            });
-        }
+        self.container_slots.borrow_mut().retain(|node, slot| {
+            let Some(slot) = slot.upgrade() else {
+                return false;
+            };
+            let slot = slot.borrow();
+            let Some(layout_box) = &*slot else {
+                return false;
+            };
+            layout_box
+                .with_base(|base| {
+                    if base.style.clone_container_type() == ContainerType::NORMAL {
+                        return false;
+                    }
+                    let size = base.fragments().iter().find_map(|fragment| {
+                        Some(fragment.retrieve_box_fragment()?.content_rect().size.to_untyped())
+                    });
+                    if let Some(size) = size {
+                        sizes.insert(*node, size);
+                    }
+                    true
+                })
+                .unwrap_or(false)
+        });
         sizes
     }
 
@@ -1319,7 +1434,10 @@ impl LayoutThread {
         self.prepare_stylist_for_reflow(reflow_request, document, &guards, &user_agent_stylesheets)
             .process_style(dangerous_root_element, Some(&snapshot_map));
 
-        if self.previously_highlighted_dom_node.get() != reflow_request.highlighted_dom_node {
+        if self.previously_highlighted_dom_node.get() != reflow_request.highlighted_dom_node ||
+            *self.previously_painted_selection.borrow() !=
+                reflow_request.document_selection
+        {
             // Need to manually force layout to build a new display list regardless of whether the box tree
             // changed or not.
             self.need_new_display_list.set(true);
@@ -1344,6 +1462,7 @@ impl LayoutThread {
             parallelism_job_count_minimum: pref!(layout_parallelism_job_count_minimum) as usize,
             parallelism_job_size_minimum: pref!(layout_parallelism_job_size_minimum) as usize,
             device_size: reflow_request.viewport_details.device_size.cast_unit(),
+            styled_containers: Default::default(),
         };
 
         let restyle = reflow_request
@@ -1371,12 +1490,32 @@ impl LayoutThread {
                 RecalcStyle::pre_traverse(original_dirty_root, shared)
             };
 
-            if !token.should_traverse() {
+            // A deferred layout still has damage to process below the dirty root.
+            let should_traverse = token.should_traverse();
+            if !should_traverse && !restyle.reason.contains(RestyleReason::LayoutDeferred) {
                 layout_context.style_context.stylist.rule_tree().maybe_gc();
                 return Default::default();
             }
 
-            dirty_root = driver::traverse_dom(&recalc_style_traversal, token, rayon_pool).as_node();
+            dirty_root = if should_traverse {
+                let dirty_root =
+                    driver::traverse_dom(&recalc_style_traversal, token, rayon_pool).as_node();
+                self.register_styled_containers(&layout_context);
+                dirty_root
+            } else {
+                original_dirty_root.as_node()
+            };
+        }
+
+        // The restyle damage stays on the elements, and the dirty descendant bits leading to
+        // them, until a reflow that needs layout processes it. Styles that query containers
+        // depend on the sizes the containers get from that layout.
+        if !device_has_changed &&
+            !self.uses_container_queries.get() &&
+            !ReflowPhases::needs_layout(&reflow_request.reflow_goal)
+        {
+            layout_context.style_context.stylist.rule_tree().maybe_gc();
+            return (ReflowPhasesRun::DeferredLayout, IFrameSizes::default());
         }
 
         let root_node = root_element.as_node();
@@ -1530,6 +1669,7 @@ impl LayoutThread {
         // applicable spatial and clip nodes.
         let mut new_stacking_context_tree = StackingContextTree::new(
             fragment_tree,
+            &self.top_layer_order.borrow(),
             viewport_details,
             self.id.into(),
             !self.have_ever_generated_display_list.get(),
@@ -1618,6 +1758,7 @@ impl LayoutThread {
             self.webview_id,
             self.device().device_pixel_ratio(),
             reflow_request.highlighted_dom_node,
+            reflow_request.document_selection.as_ref(),
             &self.debug,
             paint_timing_handler,
             reflow_statistics,
@@ -1650,6 +1791,8 @@ impl LayoutThread {
         self.need_new_display_list.set(false);
         self.previously_highlighted_dom_node
             .set(reflow_request.highlighted_dom_node);
+        *self.previously_painted_selection.borrow_mut() =
+            reflow_request.document_selection.clone();
         true
     }
 
@@ -1710,6 +1853,7 @@ impl LayoutThread {
         self.box_tree.borrow_mut().take();
         self.fragment_tree.borrow_mut().take();
         self.stacking_context_tree.borrow_mut().take();
+        self.need_containing_block_calculation.set(false);
 
         // Send empty display list.
         let paint_info = PaintDisplayListInfo::new(
@@ -1736,6 +1880,143 @@ impl LayoutThread {
             reflow_phases_run: ReflowPhasesRun::BuiltDisplayList,
             ..Default::default()
         })
+    }
+
+    /// The transform from the coordinate space of `node`'s first box fragment to the root
+    /// coordinate space, or `None` if it has no box fragment.
+    pub(crate) fn root_transform_for_query(
+        &self,
+        node: ServoLayoutNode<'_>,
+    ) -> Option<FastLayoutTransform> {
+        node.fragments_for_pseudo(None)
+            .first()
+            .and_then(Fragment::retrieve_box_fragment)?;
+        if self.need_new_stacking_context_tree.get() ||
+            self.stacking_context_tree.borrow().is_none()
+        {
+            if let Some(transform) = self.root_transform_without_stacking_context_tree(node) {
+                return Some(transform);
+            }
+            self.build_stacking_context_tree(self.viewport_details.get());
+        }
+        let stacking_context_tree = self.stacking_context_tree.borrow();
+        root_transform_for_layout_node(
+            &stacking_context_tree.as_ref()?.paint_info.scroll_tree,
+            node,
+        )
+    }
+
+    /// Rebuilding the stacking context tree walks every fragment, which made each layout
+    /// query after a DOM change scale with the size of the page. When nothing but scrolling
+    /// moves `node`, its transform follows from the scroll offsets the rebuilt tree would
+    /// carry over from the stale one. Returns `None` when that doesn't hold.
+    fn root_transform_without_stacking_context_tree(
+        &self,
+        node: ServoLayoutNode<'_>,
+    ) -> Option<FastLayoutTransform> {
+        let fixed = is_fixed_to_untransformed_viewport(node)?;
+        let stacking_context_tree = self.stacking_context_tree.borrow();
+        let paint_info = &stacking_context_tree.as_ref()?.paint_info;
+        let scroll_tree = &paint_info.scroll_tree;
+        let root_scroll_node = scroll_tree.get_node(paint_info.root_scroll_node_id);
+        let mut root_scroll_offset = LayoutVector2D::zero();
+        for scroll_tree_node in &scroll_tree.nodes {
+            let SpatialTreeNodeInfo::Scroll(info) = &scroll_tree_node.info else {
+                continue;
+            };
+            if std::ptr::eq(scroll_tree_node, root_scroll_node) {
+                root_scroll_offset = info.offset;
+            } else if info.offset != LayoutVector2D::zero() {
+                // Only layout knows the new scrollable sizes these get clamped to.
+                return None;
+            }
+        }
+        if fixed || root_scroll_offset == LayoutVector2D::zero() {
+            return Some(FastLayoutTransform::Offset(LayoutVector2D::zero()));
+        }
+
+        // Carry the viewport's offset over the way `StackingContextTree::new` does.
+        let fragment_tree = self.fragment_tree.borrow();
+        let fragment_tree = fragment_tree.as_ref()?;
+        let scroll_area = fragment_tree
+            .scrollable_overflow()
+            .union(&fragment_tree.initial_containing_block)
+            .size;
+        let viewport_size = self.viewport_details.get().layout_size();
+        let sensitivity = fragment_tree.viewport_scroll_sensitivity;
+        let carry_over = |offset: f32, scrollable: f32, sensitivity: ScrollType| {
+            if scrollable > 0. && sensitivity.contains(ScrollType::Script) {
+                offset.clamp(0., scrollable)
+            } else {
+                0.
+            }
+        };
+        let offset = LayoutVector2D::new(
+            carry_over(
+                root_scroll_offset.x,
+                scroll_area.width.to_f32_px() - viewport_size.width,
+                sensitivity.x,
+            ),
+            carry_over(
+                root_scroll_offset.y,
+                scroll_area.height.to_f32_px() - viewport_size.height,
+                sensitivity.y,
+            ),
+        );
+        Some(FastLayoutTransform::Offset(-offset))
+    }
+
+    /// Calculates the cumulative containing blocks that a layout query about `node` reads: those
+    /// of the fragments of `node` and of its ancestors. Only the fragments that can contain them
+    /// are walked, which keeps the query from scaling with the size of the page.
+    pub(crate) fn ensure_containing_block_calculation_for_node(&self, node: ServoLayoutNode<'_>) {
+        if !self.need_containing_block_calculation.get() {
+            return;
+        }
+        let opaque_node = node.opaque();
+        if self
+            .containing_blocks_calculated_for
+            .borrow()
+            .contains(&opaque_node)
+        {
+            return;
+        }
+
+        let mut ancestors = FxHashSet::default();
+        let mut current = unsafe { node.dangerous_flat_tree_parent() };
+        while let Some(ancestor) = current {
+            ancestors.insert(ancestor.opaque());
+            current = unsafe { ancestor.dangerous_flat_tree_parent() };
+        }
+        // Fragments of a node nest inside the fragments of its flat tree ancestors, with only
+        // anonymous fragments in between.
+        let may_contain_node = |fragment: &Fragment| {
+            fragment
+                .base()
+                .is_none_or(|base| base.tag.is_none_or(|tag| ancestors.contains(&tag.node)))
+        };
+        let mut reached_node = false;
+        self.fragment_tree
+            .borrow()
+            .as_ref()
+            .expect("missing fragment tree")
+            .find_descending_into(&may_contain_node, |fragment, _level, containing_block| {
+                fragment.set_containing_block(containing_block);
+                reached_node |= fragment.base().is_some_and(|base| {
+                    base.tag.is_some_and(|tag| {
+                        tag.node == opaque_node && tag.pseudo_element_chain.primary.is_none()
+                    })
+                });
+                None::<()>
+            });
+        if !reached_node {
+            // `node` has no fragments, or they nest some other way: walk them all.
+            self.ensure_containing_block_calculation();
+            return;
+        }
+        self.containing_blocks_calculated_for
+            .borrow_mut()
+            .insert(opaque_node);
     }
 
     pub(crate) fn ensure_containing_block_calculation(&self) {
@@ -1928,6 +2209,10 @@ impl FontMetricsProvider for LayoutFontMetricsProvider {
             cap_height: None,
             ic_width,
             ascent: first_font_metrics.ascent.into(),
+            average_char_width: Some(first_font_metrics.average_advance.into()),
+            max_char_width: Some(first_font_metrics.max_advance.into()),
+            // `line_gap` holds the whole normal line height, not the font's line gap.
+            normal_line_height: Some(first_font_metrics.line_gap.into()),
             script_percent_scale_down: None,
             script_script_percent_scale_down: None,
         }
@@ -2009,9 +2294,25 @@ bitflags! {
 }
 
 impl ReflowPhases {
+    /// Whether the given [`ReflowGoal`] needs layout, beyond styles. Like other browsers, a
+    /// query about styles alone only restyles, which kept scripts that alternate style changes
+    /// and `getComputedStyle()` from laying out the whole page each time.
+    fn needs_layout(reflow_goal: &ReflowGoal) -> bool {
+        match reflow_goal {
+            ReflowGoal::LayoutQuery(QueryMsg::StyleQuery | QueryMsg::ResolvedFontStyleQuery) => {
+                false
+            },
+            ReflowGoal::LayoutQuery(QueryMsg::ResolvedStyleQuery(property)) => {
+                resolved_value_depends_on_layout(property)
+            },
+            _ => true,
+        }
+    }
+
     /// Return the necessary phases of layout for the given [`ReflowGoal`]. Note that all
     /// [`ReflowGoals`] need the basic restyle + box tree layout + fragment tree layout,
-    /// so [`ReflowPhases::empty()`] implies that.
+    /// unless [`ReflowPhases::needs_layout`] says otherwise, so [`ReflowPhases::empty()`]
+    /// implies that.
     fn necessary(reflow_goal: &ReflowGoal) -> Self {
         let is_inset_longhand = |longhand: LonghandId| {
             matches!(
@@ -2048,13 +2349,16 @@ impl ReflowPhases {
                 QueryMsg::NodesFromPointQuery => {
                     Self::StackingContextTreeConstruction | Self::DisplayListConstruction
                 },
-                QueryMsg::BoxArea |
-                QueryMsg::BoxAreas |
                 QueryMsg::ElementsFromPoint |
                 QueryMsg::FlushForUpdateTheRenderingQuery |
+                QueryMsg::TextIndexQuery |
+                QueryMsg::CaretStopsQuery => Self::StackingContextTreeConstruction,
+                // These build the stacking context tree themselves, only when the queried node
+                // needs it. See `LayoutThread::root_transform_for_query`.
+                QueryMsg::BoxArea |
+                QueryMsg::BoxAreas |
                 QueryMsg::OffsetParentQuery |
                 QueryMsg::ScrollingAreaOrOffsetQuery |
-                QueryMsg::TextIndexQuery => Self::StackingContextTreeConstruction,
                 QueryMsg::ClientRectQuery |
                 QueryMsg::CurrentCSSZoomQuery |
                 QueryMsg::EffectiveOverflow |
@@ -2072,13 +2376,69 @@ impl ReflowPhases {
     }
 }
 
+/// Whether the resolved value of `property` can be a used value, which needs layout. This
+/// should be kept in sync with `process_resolved_style_request()`.
+/// <https://drafts.csswg.org/cssom/#resolved-values>
+fn resolved_value_depends_on_layout(property: &PropertyId) -> bool {
+    let depends_on_layout = |longhand: LonghandId| {
+        matches!(
+            longhand,
+            LonghandId::Width |
+                LonghandId::Height |
+                LonghandId::InlineSize |
+                LonghandId::BlockSize |
+                LonghandId::MinWidth |
+                LonghandId::MinHeight |
+                LonghandId::MinInlineSize |
+                LonghandId::MinBlockSize |
+                LonghandId::Top |
+                LonghandId::Right |
+                LonghandId::Bottom |
+                LonghandId::Left |
+                LonghandId::InsetBlockStart |
+                LonghandId::InsetBlockEnd |
+                LonghandId::InsetInlineStart |
+                LonghandId::InsetInlineEnd |
+                LonghandId::MarginTop |
+                LonghandId::MarginRight |
+                LonghandId::MarginBottom |
+                LonghandId::MarginLeft |
+                LonghandId::MarginBlockStart |
+                LonghandId::MarginBlockEnd |
+                LonghandId::MarginInlineStart |
+                LonghandId::MarginInlineEnd |
+                LonghandId::PaddingTop |
+                LonghandId::PaddingRight |
+                LonghandId::PaddingBottom |
+                LonghandId::PaddingLeft |
+                LonghandId::PaddingBlockStart |
+                LonghandId::PaddingBlockEnd |
+                LonghandId::PaddingInlineStart |
+                LonghandId::PaddingInlineEnd |
+                LonghandId::Transform |
+                LonghandId::GridTemplateRows |
+                LonghandId::GridTemplateColumns
+        )
+    };
+    match property {
+        PropertyId::NonCustom(property) => match property.longhand_or_shorthand() {
+            Ok(longhand) => depends_on_layout(longhand),
+            Err(ShorthandId::All) => true,
+            Err(shorthand) => shorthand.longhands().any(depends_on_layout),
+        },
+        PropertyId::Custom(_) => false,
+    }
+}
+
 /// Marks the descendants of the elements in `containers` for restyle, and their ancestors as
 /// having dirty descendants so the style traversal reaches them. Returns whether any container
-/// was found under `element`.
+/// was found under `element`. `unmarked` counts the containers not found yet; the walk stops
+/// once it reaches zero.
 #[expect(unsafe_code)]
 fn mark_container_descendants_for_restyle(
     element: ServoDangerousStyleElement<'_>,
     containers: &FxHashSet<OpaqueNode>,
+    unmarked: &mut usize,
 ) -> bool {
     let mut marked = false;
     if containers.contains(&element.as_node().opaque()) &&
@@ -2086,10 +2446,14 @@ fn mark_container_descendants_for_restyle(
     {
         data.hint.insert(RestyleHint::RESTYLE_DESCENDANTS);
         marked = true;
+        *unmarked -= 1;
     }
     for child in element.traversal_children() {
+        if *unmarked == 0 {
+            break;
+        }
         if let Some(child) = child.as_element() &&
-            mark_container_descendants_for_restyle(child, containers)
+            mark_container_descendants_for_restyle(child, containers, unmarked)
         {
             unsafe { element.set_dirty_descendants() };
             marked = true;

@@ -7,7 +7,10 @@ use std::rc::Rc;
 
 use cssparser::{Parser, ParserInput};
 use dom_struct::dom_struct;
-use fonts::{FontContext, FontContextWebFontMethods, FontTemplate, LowercaseFontFamilyName};
+use fonts::{
+    CSSFontFaceDescriptors, FontContext, FontContextWebFontMethods, FontTemplate,
+    LowercaseFontFamilyName, UnloadedFontFaceId,
+};
 use js::context::JSContext;
 use js::rust::HandleObject;
 use script_bindings::cell::DomRefCell;
@@ -66,6 +69,11 @@ pub struct FontFace {
     /// <https://drafts.csswg.org/css-font-loading/#dom-fontface-fontstatuspromise-slot>
     #[conditional_malloc_size_of]
     font_status_promise: Rc<Promise>,
+
+    /// Set while this unloaded `FontFace` is in the document's `FontFaceSet` and so takes part
+    /// in font matching, see [`FontContext::add_unloaded_script_face`].
+    #[no_trace]
+    unloaded_font_face_id: Cell<Option<UnloadedFontFaceId>>,
 }
 
 /// Given the various font face descriptors, construct the equivalent `@font-face` css rule as a
@@ -187,16 +195,22 @@ impl FontFace {
     /// Construct a [`FontFace`] to be used in the case of failure in parsing the
     /// font face descriptors.
     fn new_failed_font_face(cx: &mut JSContext, global: &GlobalScope) -> Self {
-        let font_status_promise = Promise::new(cx, global);
         // If any of them fail to parse correctly, reject font face’s [[FontStatusPromise]] with a
         // DOMException named "SyntaxError"
-        font_status_promise.reject_error(cx, Error::Syntax(None));
+        //
+        // The rejection is deferred to `Self::font_status_promise`, so that it happens when
+        // script first observes the promise. Rejecting here would report an unhandled rejection
+        // for every such face, while Chrome only reports one when script takes the promise
+        // (through `loaded` or `load()`) and does not handle it; pages build faces with an empty
+        // source as placeholders for local fonts.
+        let font_status_promise = Promise::new(cx, global);
 
         // set font face’s corresponding attributes to the empty string, and set font face’s status
         // attribute to "error"
         Self {
             reflector: Reflector::new(),
             font_face_set: MutNullableDom::default(),
+            unloaded_font_face_id: Cell::new(None),
             font_status_promise,
             family_name: DomRefCell::default(),
             urls: Default::default(),
@@ -260,6 +274,7 @@ impl FontFace {
             )),
 
             font_face_set: MutNullableDom::default(),
+            unloaded_font_face_id: Cell::new(None),
             family_name: DomRefCell::new(family_name),
             urls: DomRefCell::new(sources),
             template: RefCell::default(),
@@ -409,6 +424,64 @@ impl FontFace {
         self.template.borrow().clone()
     }
 
+    /// The [[FontStatusPromise]], rejecting it first if construction failed to parse the
+    /// descriptors (see `Self::new_failed_font_face`).
+    fn font_status_promise(&self, cx: &mut JSContext) -> Rc<Promise> {
+        if self.status.get() == FontFaceLoadStatus::Error && self.font_status_promise.is_pending()
+        {
+            self.font_status_promise
+                .reject_error(cx, Error::Syntax(None));
+        }
+        self.font_status_promise.clone()
+    }
+
+    /// The parsed descriptors of this `FontFace`, or `None` if they failed to parse when it was
+    /// constructed.
+    pub(super) fn css_font_face_descriptors(&self) -> Option<CSSFontFaceDescriptors> {
+        self.font_face_rule(&self.global())
+            .ok()
+            .map(|rule| (&rule).into())
+    }
+
+    /// Let font matching use this face while it is unloaded and in the document's `FontFaceSet`.
+    pub(super) fn add_to_font_matching(&self, window: &Window) {
+        if self.status.get() != FontFaceLoadStatus::Unloaded || self.urls.borrow().is_none() {
+            return;
+        }
+        let descriptors = self
+            .css_font_face_descriptors()
+            .expect("An unloaded FontFace has valid descriptors");
+        let id = window.font_context().add_unloaded_script_face(&descriptors);
+        self.unloaded_font_face_id.set(Some(id));
+        window.Document().dirty_all_nodes();
+    }
+
+    pub(super) fn remove_from_font_matching(&self) {
+        let Some(id) = self.unloaded_font_face_id.take() else {
+            return;
+        };
+        self.global()
+            .as_window()
+            .font_context()
+            .remove_unloaded_script_face(id);
+    }
+
+    /// Returns true if font matching selected this unloaded face since the last call.
+    pub(super) fn take_font_matching_load_request(&self, font_context: &FontContext) -> bool {
+        self.unloaded_font_face_id
+            .get()
+            .is_some_and(|id| font_context.take_unloaded_script_face_load_request(id))
+    }
+
+    /// Re-register with font matching after a descriptor changed, so matching uses the new values.
+    fn refresh_font_matching(&self) {
+        if self.unloaded_font_face_id.get().is_none() {
+            return;
+        }
+        self.remove_from_font_matching();
+        self.add_to_font_matching(&self.global().as_window());
+    }
+
     /// Implements the body of the setter for the descriptor attributes of the [`FontFace`] interface.
     ///
     /// <https://drafts.csswg.org/css-font-loading/#fontface-interface>:
@@ -426,6 +499,7 @@ impl FontFace {
 
         *self.descriptors.borrow_mut() =
             serialize_parsed_descriptors(&parsed_font_face_rule.descriptors);
+        self.refresh_font_matching();
         Ok(())
     }
 
@@ -453,6 +527,7 @@ impl FontFaceMethods<crate::DomTypeHolder> for FontFace {
         let global = self.global();
         let _ = parse_font_face_descriptors(&global, &family_name, None, &descriptors)?;
         *self.family_name.borrow_mut() = family_name;
+        self.refresh_font_matching();
         Ok(())
     }
 
@@ -590,8 +665,11 @@ impl FontFaceMethods<crate::DomTypeHolder> for FontFace {
             // Step 2. If font face’s [[Urls]] slot is null, or its status attribute is anything
             // other than "unloaded", return font face’s [[FontStatusPromise]] and abort these
             // steps.
-            return self.font_status_promise.clone();
+            return self.font_status_promise(cx);
         };
+
+        // Once loading starts the face reaches font matching through its template instead.
+        self.remove_from_font_matching();
 
         // FontFace must not be loaded at this point as `self.urls` is not None, implying `Load`
         // wasn't called already. In our implementation, `urls` is set after parsing, so it
@@ -681,8 +759,8 @@ impl FontFaceMethods<crate::DomTypeHolder> for FontFace {
     }
 
     /// <https://drafts.csswg.org/css-font-loading/#dom-fontface-loaded>
-    fn Loaded(&self) -> Rc<Promise> {
-        self.font_status_promise.clone()
+    fn Loaded(&self, cx: &mut JSContext) -> Rc<Promise> {
+        self.font_status_promise(cx)
     }
 
     /// <https://drafts.csswg.org/css-font-loading/#font-face-constructor>

@@ -272,6 +272,13 @@ impl WeakLayoutBox {
 #[derive(Default, MallocSizeOf)]
 pub struct DOMLayoutData(AtomicRefCell<InnerDOMLayoutData>);
 
+impl DOMLayoutData {
+    /// The slot holding the box of the node itself (not of its pseudo-elements).
+    pub(crate) fn self_box(&self) -> ArcRefCell<Option<LayoutBox>> {
+        self.0.borrow().self_box.clone()
+    }
+}
+
 // The implementation of this trait allows the data to be stored in the DOM.
 impl LayoutDataTrait for DOMLayoutData {}
 impl GenericLayoutDataTrait for DOMLayoutData {
@@ -284,11 +291,8 @@ impl GenericLayoutDataTrait for DOMLayoutData {
             .borrow()
             .fragments()
             .iter()
-            .find_map(|fragment| match fragment {
-                Fragment::Box(box_fragment) | Fragment::Float(box_fragment) => {
-                    Some(box_fragment.content_rect().size.to_untyped())
-                },
-                _ => None,
+            .find_map(|fragment| {
+                Some(fragment.retrieve_box_fragment()?.content_rect().size.to_untyped())
             })
     }
 }
@@ -360,6 +364,8 @@ pub(crate) trait NodeExt<'dom> {
     fn rendering_type(&self) -> NodeRenderingType;
 
     fn fragments_for_pseudo(&self, pseudo_element: Option<PseudoElement>) -> Vec<Fragment>;
+    /// The [`TextRun`] holding this text node's text, if it is rendered.
+    fn text_run(&self) -> Option<ArcRefCell<TextRun>>;
     fn with_layout_box_base(&self, callback: impl FnMut(&LayoutBoxBase));
     fn with_layout_box_base_including_pseudos(&self, callback: impl FnMut(&LayoutBoxBase));
 
@@ -582,6 +588,13 @@ impl<'dom> NodeExt<'dom> for ServoLayoutNode<'dom> {
         }
     }
 
+    fn text_run(&self) -> Option<ArcRefCell<TextRun>> {
+        match &*self.inner_layout_data()?.self_box.borrow() {
+            Some(LayoutBox::Text(text_run)) => Some(text_run.clone()),
+            _ => None,
+        }
+    }
+
     fn repair_style(&self, context: &SharedStyleContext) {
         if let Some(layout_data) = self.inner_layout_data() {
             layout_data.repair_style(self, context);
@@ -645,6 +658,14 @@ impl<'dom> NodeExt<'dom> for ServoLayoutNode<'dom> {
             let Some(mut inner_layout_data) = self.inner_layout_data_mut() else {
                 return false;
             };
+            // The ::backdrop box of a top layer element is a sibling built by the parent, which
+            // has to rebuild to drop it.
+            if inner_layout_data
+                .pseudo_layout_data(PseudoElement::Backdrop)
+                .is_some()
+            {
+                return false;
+            }
             inner_layout_data.pseudo_boxes.clear();
             inner_layout_data.self_box.clone()
         };
@@ -655,6 +676,11 @@ impl<'dom> NodeExt<'dom> for ServoLayoutNode<'dom> {
         };
 
         let info = NodeAndStyleInfo::new(*self, self.style(&layout_context.style_context));
+        // Likewise the parent has to build the ::backdrop box of an element entering the top
+        // layer.
+        if info.style.in_top_layer() {
+            return false;
+        }
         let box_style = info.style.get_box();
         let Display::GeneratingBox(display) = box_style.display.into() else {
             return false;

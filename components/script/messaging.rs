@@ -61,6 +61,7 @@ impl MixedMessage {
                     .or(Some(new_pipeline_info.new_pipeline_id)),
                 ScriptThreadMessage::Resize(id, ..) => Some(*id),
                 ScriptThreadMessage::ThemeChange(id, ..) => Some(*id),
+                ScriptThreadMessage::ScreenGeometryChanged(id) => Some(*id),
                 ScriptThreadMessage::ResizeInactive(id, ..) => Some(*id),
                 ScriptThreadMessage::UnloadDocument(id) => Some(*id),
                 ScriptThreadMessage::ExitPipeline(_webview_id, id, ..) => Some(*id),

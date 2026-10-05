@@ -250,6 +250,18 @@ impl<'dom> LayoutNode<'dom> for ServoLayoutNode<'dom> {
         self.node.selection()
     }
 
+    fn is_editable(&self) -> bool {
+        self.node.is_editable_for_layout()
+    }
+
+    fn is_editing_host(&self) -> bool {
+        self.node.is_editable_for_layout() &&
+            !self
+                .node
+                .parent_node_ref()
+                .is_some_and(|parent| parent.is_editable_for_layout())
+    }
+
     fn image_url(&self) -> Option<ServoUrl> {
         self.node.image_url()
     }

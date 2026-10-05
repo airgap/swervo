@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use layout_api::{
     DangerousStyleElement, DangerousStyleNode, LayoutDamage, LayoutElement, LayoutNode,
-    svg_paint_signature,
+    NodeRenderingType, svg_paint_signature,
 };
 use script::layout_dom::ServoLayoutNode;
 use style::context::{SharedStyleContext, StyleContext};
@@ -14,6 +14,7 @@ use style::data::ElementData;
 use style::dom::{NodeInfo, TElement, TNode};
 use style::selector_parser::RestyleDamage;
 use style::traversal::{DomTraversal, PerLevelTraversalData, recalc_style_at};
+use style::values::computed::ContainerType;
 
 use crate::BoxTree;
 use crate::context::LayoutContext;
@@ -70,6 +71,20 @@ where
             &mut element_data,
             note_child,
         );
+
+        if element_data.styles.primary().clone_container_type() != ContainerType::NORMAL {
+            let layout_data = node
+                .layout_node()
+                .layout_data()
+                .expect("Layout data was initialized above")
+                .as_any()
+                .downcast_ref::<DOMLayoutData>()
+                .unwrap();
+            self.context
+                .styled_containers
+                .lock()
+                .push((node.opaque(), layout_data.self_box().downgrade()));
+        }
     }
 
     #[inline]
@@ -580,6 +595,13 @@ impl<'a> ElementDamageSet<'a> {
         damage_for_parent: &mut LayoutDamage,
         inline_size_depends_on_content: bool,
     ) {
+        // A `display: contents` element (including a `<slot>`) has no box of its own, so the
+        // contents of its children contribute directly to the intrinsic size of its parent's box.
+        let inline_size_depends_on_content = inline_size_depends_on_content ||
+            matches!(
+                self.node.rendering_type(),
+                NodeRenderingType::DelegatesRendering
+            );
         let children_need_inline_content_size_recalculation = self
             .from_children
             .contains(LayoutDamage::RecomputeInlineContentSizes) &&

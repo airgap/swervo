@@ -16,7 +16,7 @@ use app_units::Au;
 use cssparser::match_ignore_ascii_case;
 use devtools_traits::{AttrInfo, DomMutation, ScriptToDevtoolsControlMsg};
 use dom_struct::dom_struct;
-use euclid::Rect;
+use euclid::{Rect, SideOffsets2D};
 use html5ever::serialize::TraversalScope;
 use html5ever::serialize::TraversalScope::{ChildrenOnly, IncludeNode};
 use html5ever::{LocalName, Namespace, Prefix, QualName, local_name, namespace_prefix, ns};
@@ -49,19 +49,20 @@ use style::properties::{
     parse_style_attribute,
 };
 use style::rule_tree::{CascadeLevel, CascadeOrigin};
-use style::selector_parser::{RestyleDamage, SelectorParser, Snapshot};
+use style::selector_parser::{RestyleDamage, Snapshot};
 use style::shared_lock::Locked;
 use style::stylesheets::layer_rule::LayerOrder;
 use style::stylesheets::{CssRuleType, UrlExtraData};
-use style::values::computed::Overflow;
+use style::values::computed::{Overflow, ScrollSnapStrictness, ScrollSnapType};
 use style::values::generics::NonNegative;
 use style::values::generics::position::PreferredRatio;
 use style::values::generics::ratio::Ratio;
-use style::values::{AtomIdent, AtomString, CSSFloat, GenericAtomIdent, computed, specified};
+use style::values::{AtomIdent, AtomString, GenericAtomIdent, computed, specified};
 use style::{ArcSlice, CaseSensitivityExt, dom_apis, thread_state};
 use style_traits::CSSPixel;
 use stylo_atoms::Atom;
 use stylo_dom::ElementState;
+use webrender_api::units::LayoutVector2D;
 use xml5ever::serialize::TraversalScope::{
     ChildrenOnly as XmlChildrenOnly, IncludeNode as XmlIncludeNode,
 };
@@ -377,52 +378,6 @@ impl Element {
 
     pub(crate) fn clean_up_style_data(&self) {
         self.style_data.borrow_mut().take();
-    }
-
-    /// Restyle the `:has()` anchors whose match may depend on a change at this element: a state
-    /// or attribute change here, or a change to its children. Matching a `:has()` selector flags
-    /// the anchor and every element its search visits (ancestor direction for descendant
-    /// arguments, sibling direction for `+`/`~` ones), so the anchors are found by walking up
-    /// from a visited element and, where the search ran along siblings, back over preceding
-    /// siblings. Each anchor restyles with its subtree, as selectors like `.a:has(.b) .c` style
-    /// its descendants. stylo's precise relative-selector invalidation is driven by Gecko's
-    /// restyle manager, which servo doesn't have. Elements no `:has()` search reached carry
-    /// none of these flags, so pages without `:has()` never walk.
-    pub(crate) fn invalidate_relative_selector_anchors(&self) {
-        const ANCHORS: ElementSelectorFlags = ElementSelectorFlags::ANCHORS_RELATIVE_SELECTOR
-            .union(ElementSelectorFlags::ANCHORS_RELATIVE_SELECTOR_NON_SUBJECT);
-        let searched = ElementSelectorFlags::RELATIVE_SELECTOR_SEARCH_DIRECTION_ANCESTOR_SIBLING;
-        if !self.get_selector_flags().intersects(searched | ANCHORS) {
-            return;
-        }
-        let document = self.owner_document();
-        let restyle_if_anchor = |element: &Element| {
-            if element.get_selector_flags().intersects(ANCHORS) {
-                document
-                    .ensure_pending_restyle(element)
-                    .hint
-                    .insert(RestyleHint::restyle_subtree());
-            }
-        };
-        for ancestor in self
-            .upcast::<Node>()
-            .inclusive_ancestors(ShadowIncluding::No)
-            .filter_map(DomRoot::downcast::<Element>)
-        {
-            restyle_if_anchor(&ancestor);
-            if ancestor
-                .get_selector_flags()
-                .intersects(ElementSelectorFlags::RELATIVE_SELECTOR_SEARCH_DIRECTION_SIBLING)
-            {
-                for sibling in ancestor
-                    .upcast::<Node>()
-                    .preceding_siblings()
-                    .filter_map(DomRoot::downcast::<Element>)
-                {
-                    restyle_if_anchor(&sibling);
-                }
-            }
-        }
     }
 
     pub(crate) fn restyle(&self, damage: NodeDamage) {
@@ -932,6 +887,28 @@ impl Element {
             .scrolling_box_query(Some(self.upcast()), flags)
     }
 
+    /// The border box outset by scroll-margin, in the coordinate space of
+    /// `getBoundingClientRect()`, or `None` without a box.
+    /// <https://drafts.csswg.org/css-scroll-snap-1/#scroll-snap-area>
+    pub(crate) fn scroll_snap_area(&self) -> Option<Rect<Au, CSSPixel>> {
+        let border_box = self.upcast::<Node>().border_box()?;
+        let style = self.style()?;
+        let margin = style.get_margin();
+        Some(border_box.outer_rect(SideOffsets2D::new(
+            Au::from_f32_px(margin.scroll_margin_top.px()),
+            Au::from_f32_px(margin.scroll_margin_right.px()),
+            Au::from_f32_px(margin.scroll_margin_bottom.px()),
+            Au::from_f32_px(margin.scroll_margin_left.px()),
+        )))
+    }
+
+    /// This element's `scroll-snap-type`, or `None` if it does not make it a snap container.
+    /// For the root element this is the viewport's snap type.
+    pub(crate) fn scroll_snap_type(&self) -> Option<ScrollSnapType> {
+        let snap_type = self.style()?.get_box().scroll_snap_type;
+        (snap_type.strictness != ScrollSnapStrictness::None).then_some(snap_type)
+    }
+
     /// <https://drafts.csswg.org/cssom-view/#scroll-a-target-into-view>
     pub(crate) fn scroll_into_view_with_options(
         &self,
@@ -943,7 +920,8 @@ impl Element {
         inner_target_rect: Option<Rect<Au, CSSPixel>>,
     ) {
         let get_target_rect = || match inner_target_rect {
-            None => self.upcast::<Node>().border_box().unwrap_or_default(),
+            // The snap area, not the bare border box, is what gets aligned.
+            None => self.scroll_snap_area().unwrap_or_default(),
             Some(inner_target_rect) => inner_target_rect.translate(
                 self.upcast::<Node>()
                     .content_box()
@@ -974,9 +952,9 @@ impl Element {
 
             // Step 1.3: If `position` is not the same as `scrolling box`’s current scroll position, or
             // `scrolling box` has an ongoing smooth scroll,
-            //
-            // TODO: Handle smooth scrolling.
-            if position != scrolling_box.scroll_position() {
+            if position != scrolling_box.scroll_position() ||
+                scrolling_box.has_ongoing_smooth_scroll()
+            {
                 //  ↪ If `scrolling box` is associated with an element
                 //    Perform a scroll of the element’s scrolling box to `position`,
                 //    with the `element` as the associated element and `behavior` as the
@@ -1062,8 +1040,8 @@ impl Element {
 
     /// The element's style from the last restyle, without the reflow [`Self::style`] forces.
     /// For code that already runs right after layout (inline-SVG serialization), where a
-    /// re-entrant reflow is both unnecessary and unsafe. `None` for unstyled elements, e.g.
-    /// descendants of a `display: none` element.
+    /// re-entrant reflow is both unnecessary and unsafe, or that just forced one (`innerText`).
+    /// `None` for unstyled elements, e.g. descendants of a `display: none` element.
     pub(crate) fn style_from_last_restyle(&self) -> Option<ServoArc<ComputedValues>> {
         self.style_data
             .borrow()
@@ -1478,6 +1456,10 @@ impl<'dom> LayoutDom<'dom, Element> {
                     Some("hidden") | Some("range") | Some("color") | Some("checkbox") |
                     Some("radio") | Some("file") | Some("submit") | Some("image") |
                     Some("reset") | Some("button") => None,
+                    // <https://html.spec.whatwg.org/multipage/#attr-input-size> does not apply to
+                    // these; the UA sheet sizes them like Chrome does.
+                    Some("date") | Some("time") | Some("datetime-local") | Some("month") |
+                    Some("week") => None,
                     // Others
                     _ => match input_element.size_for_layout() {
                         0 => None,
@@ -1486,13 +1468,16 @@ impl<'dom> LayoutDom<'dom, Element> {
                 }
             });
 
+        let text_control_size = |value: specified::NoCalcLength| {
+            style::values::generics::length::LengthPercentageOrAuto::LengthPercentage(NonNegative(
+                specified::LengthPercentage::Length(value),
+            ))
+        };
         if let Some(size) = size {
             let value = specified::NoCalcLength::from_servo_character_width(size);
-            push(PropertyDeclaration::Width(
-                specified::Size::LengthPercentage(NonNegative(
-                    specified::LengthPercentage::Length(value),
-                )),
-            ));
+            push(PropertyDeclaration::ServoTextControlWidth(text_control_size(
+                value,
+            )));
         }
 
         let width = if let Some(this) = self.downcast::<HTMLIFrameElement>() {
@@ -1608,17 +1593,11 @@ impl<'dom> LayoutDom<'dom, Element> {
         if let Some(cols) = cols {
             let cols = cols as i32;
             if cols > 0 {
-                // TODO(mttr) ServoCharacterWidth uses the size math for <input type="text">, but
-                // the math for <textarea> is a little different since we need to take
-                // scrollbar size into consideration (but we don't have a scrollbar yet!)
-                //
                 // https://html.spec.whatwg.org/multipage/#textarea-effective-width
-                let value = specified::NoCalcLength::from_servo_character_width(cols);
-                push(PropertyDeclaration::Width(
-                    specified::Size::LengthPercentage(NonNegative(
-                        specified::LengthPercentage::Length(value),
-                    )),
-                ));
+                let value = specified::NoCalcLength::from_servo_textarea_columns(cols);
+                push(PropertyDeclaration::ServoTextControlWidth(text_control_size(
+                    value,
+                )));
             }
         }
 
@@ -1628,15 +1607,11 @@ impl<'dom> LayoutDom<'dom, Element> {
         if let Some(rows) = rows {
             let rows = rows as i32;
             if rows > 0 {
-                // TODO(mttr) This should take scrollbar size into consideration.
-                //
                 // https://html.spec.whatwg.org/multipage/#textarea-effective-height
-                let value = specified::NoCalcLength::from_em(rows as CSSFloat);
-                push(PropertyDeclaration::Height(
-                    specified::Size::LengthPercentage(NonNegative(
-                        specified::LengthPercentage::Length(value),
-                    )),
-                ));
+                let value = specified::NoCalcLength::from_servo_textarea_rows(rows);
+                push(PropertyDeclaration::ServoTextControlHeight(text_control_size(
+                    value,
+                )));
             }
         }
 
@@ -2778,7 +2753,16 @@ impl Element {
     ///
     /// TODO(stevennovaryo): Need to update the scroll API to follow the spec since it is
     /// quite outdated.
-    pub(crate) fn scroll(&self, cx: &mut JSContext, x: f64, y: f64, behavior: ScrollBehavior) {
+    ///
+    /// `origin` is where the scroll started if it is directional, as `scrollBy()` is.
+    pub(crate) fn scroll(
+        &self,
+        cx: &mut JSContext,
+        x: f64,
+        y: f64,
+        behavior: ScrollBehavior,
+        origin: Option<LayoutVector2D>,
+    ) {
         // Step 1.2 or 2.3
         let x = if x.is_finite() { x } else { 0.0 } as f32;
         let y = if y.is_finite() { y } else { 0.0 } as f32;
@@ -2802,7 +2786,7 @@ impl Element {
         // Step 7
         if *self.root_element() == *self {
             if doc.quirks_mode() != QuirksMode::Quirks {
-                win.scroll(cx, x, y, behavior);
+                win.scroll(cx, x, y, behavior, origin);
             }
 
             return;
@@ -2813,7 +2797,7 @@ impl Element {
             doc.quirks_mode() == QuirksMode::Quirks &&
             !self.is_potentially_scrollable_body()
         {
-            win.scroll(cx, x, y, behavior);
+            win.scroll(cx, x, y, behavior, origin);
             return;
         }
 
@@ -2823,7 +2807,7 @@ impl Element {
         }
 
         // Step 11
-        win.scroll_an_element(cx, self, x, y, behavior);
+        win.scroll_an_element(cx, self, x, y, behavior, origin);
     }
 
     /// <https://html.spec.whatwg.org/multipage/#fragment-parsing-algorithm-steps>
@@ -2992,7 +2976,7 @@ impl Element {
     }
 
     #[inline]
-    fn get_selector_flags(&self) -> ElementSelectorFlags {
+    pub(crate) fn get_selector_flags(&self) -> ElementSelectorFlags {
         ElementSelectorFlags::from_bits_retain(self.selector_flags.load(Ordering::Relaxed))
     }
 
@@ -3431,12 +3415,12 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
         // Step 1
         let left = options.left.unwrap_or(self.ScrollLeft());
         let top = options.top.unwrap_or(self.ScrollTop());
-        self.scroll(cx, left, top, options.parent.behavior);
+        self.scroll(cx, left, top, options.parent.behavior, None);
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-element-scroll>
     fn Scroll_(&self, cx: &mut JSContext, x: f64, y: f64) {
-        self.scroll(cx, x, y, ScrollBehavior::Auto);
+        self.scroll(cx, x, y, ScrollBehavior::Auto, None);
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-element-scrollto>
@@ -3461,6 +3445,7 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
             left + delta_left,
             top + delta_top,
             options.parent.behavior,
+            Some(LayoutVector2D::new(left as f32, top as f32)),
         );
     }
 
@@ -3468,7 +3453,13 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
     fn ScrollBy_(&self, cx: &mut JSContext, x: f64, y: f64) {
         let left = self.ScrollLeft();
         let top = self.ScrollTop();
-        self.scroll(cx, left + x, top + y, ScrollBehavior::Auto);
+        self.scroll(
+            cx,
+            left + x,
+            top + y,
+            ScrollBehavior::Auto,
+            Some(LayoutVector2D::new(left as f32, top as f32)),
+        );
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-element-scrolltop>
@@ -3544,7 +3535,7 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
         // Step 7
         if self.is_document_element() {
             if doc.quirks_mode() != QuirksMode::Quirks {
-                win.scroll(cx, win.ScrollX() as f32, y, behavior);
+                win.scroll(cx, win.ScrollX() as f32, y, behavior, None);
             }
 
             return;
@@ -3555,7 +3546,7 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
             doc.quirks_mode() == QuirksMode::Quirks &&
             !self.is_potentially_scrollable_body()
         {
-            win.scroll(cx, win.ScrollX() as f32, y, behavior);
+            win.scroll(cx, win.ScrollX() as f32, y, behavior, None);
             return;
         }
 
@@ -3565,7 +3556,7 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
         }
 
         // Step 11
-        win.scroll_an_element(cx, self, self.ScrollLeft() as f32, y, behavior);
+        win.scroll_an_element(cx, self, self.ScrollLeft() as f32, y, behavior, None);
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-element-scrollleft>
@@ -3643,7 +3634,7 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
                 return;
             }
 
-            win.scroll(cx, x, win.ScrollY() as f32, behavior);
+            win.scroll(cx, x, win.ScrollY() as f32, behavior, None);
             return;
         }
 
@@ -3652,7 +3643,7 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
             doc.quirks_mode() == QuirksMode::Quirks &&
             !self.is_potentially_scrollable_body()
         {
-            win.scroll(cx, x, win.ScrollY() as f32, behavior);
+            win.scroll(cx, x, win.ScrollY() as f32, behavior, None);
             return;
         }
 
@@ -3662,7 +3653,7 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
         }
 
         // Step 11
-        win.scroll_an_element(cx, self, x, self.ScrollTop() as f32, behavior);
+        win.scroll_an_element(cx, self, x, self.ScrollTop() as f32, behavior, None);
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-element-scrollintoview>
@@ -4069,14 +4060,7 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
     #[cfg_attr(crown, allow(crown::unrooted_must_root))]
     fn Matches(&self, selectors: DOMString) -> Fallible<bool> {
         let document = self.owner_document();
-        let url = document.url();
-        let selectors = match SelectorParser::parse_author_origin_no_namespace(
-            &selectors.str(),
-            &UrlExtraData(url.get_arc()),
-        ) {
-            Err(_) => return Err(Error::Syntax(None)),
-            Ok(selectors) => selectors,
-        };
+        let selectors = document.parse_selector_list(&selectors.str())?;
 
         // SAFETY: traced_self is unrooted, but we have a reference to "self" so it won't be freed.
         let traced_self = Dom::from_ref(self);
@@ -4101,14 +4085,7 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
     #[cfg_attr(crown, allow(crown::unrooted_must_root))]
     fn Closest(&self, selectors: DOMString) -> Fallible<Option<DomRoot<Element>>> {
         let document = self.owner_document();
-        let url = document.url();
-        let selectors = match SelectorParser::parse_author_origin_no_namespace(
-            &selectors.str(),
-            &UrlExtraData(url.get_arc()),
-        ) {
-            Err(_) => return Err(Error::Syntax(None)),
-            Ok(selectors) => selectors,
-        };
+        let selectors = document.parse_selector_list(&selectors.str())?;
 
         // SAFETY: traced_self is unrooted, but we have a reference to "self" so it won't be freed.
         let traced_self = Dom::from_ref(self);
@@ -4927,6 +4904,8 @@ impl VirtualMethods for Element {
                 }
             },
         };
+        // After the match: matching reads the id from `id_attribute`, updated above.
+        self.invalidate_relative_selectors_for_attribute(attr.local_name(), attr.namespace());
 
         // TODO: This should really only take into account the actual attributes that are used
         // for the content attribute property.
@@ -5028,7 +5007,7 @@ impl VirtualMethods for Element {
             s.children_changed(cx, mutation);
         }
 
-        self.invalidate_relative_selector_anchors();
+        self.invalidate_relative_selectors_for_child_list_change(mutation, cx.no_gc());
         let flags = self.get_selector_flags();
         if flags.intersects(ElementSelectorFlags::HAS_SLOW_SELECTOR) {
             // All children of this node need to be restyled when any child changes.
@@ -5295,9 +5274,9 @@ impl Element {
                 snapshot.state = Some(self.state());
             }
         }
-        self.invalidate_relative_selector_anchors();
 
         self.state.set(state);
+        self.invalidate_relative_selectors_for_state(previous_state ^ state);
     }
 
     /// <https://html.spec.whatwg.org/multipage/#concept-selector-active>

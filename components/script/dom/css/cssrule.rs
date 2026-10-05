@@ -21,6 +21,7 @@ use super::cssmediarule::CSSMediaRule;
 use super::cssnamespacerule::CSSNamespaceRule;
 use super::cssnesteddeclarations::CSSNestedDeclarations;
 use super::csspropertyrule::CSSPropertyRule;
+use super::cssstartingstylerule::CSSStartingStyleRule;
 use super::cssstylerule::CSSStyleRule;
 use super::cssstylesheet::CSSStyleSheet;
 use super::csssupportsrule::CSSSupportsRule;
@@ -77,6 +78,8 @@ impl CSSRule {
             rule as &dyn SpecificCSSRule
         } else if let Some(rule) = self.downcast::<CSSContainerRule>() {
             rule as &dyn SpecificCSSRule
+        } else if let Some(rule) = self.downcast::<CSSStartingStyleRule>() {
+            rule as &dyn SpecificCSSRule
         } else {
             unreachable!()
         }
@@ -132,7 +135,9 @@ impl CSSRule {
             },
             StyleCssRule::Margin(_) => unimplemented!(), // TODO
             StyleCssRule::Scope(_) => unimplemented!(),  // TODO
-            StyleCssRule::StartingStyle(_) => unimplemented!(), // TODO
+            StyleCssRule::StartingStyle(s) => {
+                DomRoot::upcast(CSSStartingStyleRule::new(cx, window, parent_stylesheet, s))
+            },
             StyleCssRule::PositionTry(_) => unimplemented!(), // TODO
             StyleCssRule::CustomMedia(_) => unimplemented!(), // TODO
             StyleCssRule::NestedDeclarations(s) => {
@@ -230,7 +235,11 @@ impl CSSRule {
             },
             StyleCssRule::Margin(_) => unimplemented!(), // TODO
             StyleCssRule::Scope(_) => unimplemented!(),  // TODO
-            StyleCssRule::StartingStyle(_) => unimplemented!(), // TODO
+            StyleCssRule::StartingStyle(s) => {
+                if let Some(rule) = self.downcast::<CSSStartingStyleRule>() {
+                    rule.update_rule(s.clone(), guard);
+                }
+            },
             StyleCssRule::PositionTry(_) => unimplemented!(), // TODO
             StyleCssRule::CustomMedia(_) => unimplemented!(), // TODO
             StyleCssRule::NestedDeclarations(s) => {

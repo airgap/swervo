@@ -132,6 +132,15 @@ impl DragDataStore {
         self.mode = mode;
     }
 
+    /// <https://html.spec.whatwg.org/multipage/#drag-data-store-allowed-effects-state>
+    pub(crate) fn allowed_effects_state(&self) -> &str {
+        &self.allowed_effects_state
+    }
+
+    pub(crate) fn set_allowed_effects_state(&mut self, allowed_effects_state: String) {
+        self.allowed_effects_state = allowed_effects_state;
+    }
+
     pub(crate) fn set_bitmap(&mut self, image: Option<Arc<RasterImage>>, x: i32, y: i32) {
         self.bitmap = Some(Bitmap { image, x, y });
     }

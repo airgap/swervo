@@ -2451,18 +2451,22 @@ pub(crate) fn get_read_promise_bytes(
     .ok_or(Error::Type(c"Promise has no value property.".to_owned()))
 }
 
-/// Convert a raw stream `chunk` JS value to `Vec<u8>`.
-/// This mirrors the conversion used inside `get_read_promise_bytes`,
-/// but operates on the raw chunk (no `{ value, done }` wrapper).
+/// The bytes of a `chunk` read by <https://streams.spec.whatwg.org/#read-loop>, which must be a
+/// `Uint8Array`. Copying the array's buffer directly matters: converting it as a JS sequence
+/// iterates it one element at a time, which made `response.text()`/`json()` on a large body
+/// take seconds.
 pub(crate) fn bytes_from_chunk_jsval(
     cx: &mut JSContext,
     chunk: &RootedTraceableBox<Heap<JSVal>>,
 ) -> Result<Vec<u8>, Error> {
-    match Vec::<u8>::safe_from_jsval(cx, chunk.handle(), ConversionBehavior::EnforceRange) {
-        Ok(ConversionResult::Success(vec)) => Ok(vec),
-        Ok(ConversionResult::Failure(error)) => Err(Error::Type(error.into_owned())),
-        _ => Err(Error::Type(c"Unknown format for bytes read.".to_owned())),
+    let chunk = chunk.get();
+    if !chunk.is_object() {
+        return Err(Error::Type(c"Chunk is not a Uint8Array.".to_owned()));
     }
+    typedarray!(&in(cx) let array: Uint8Array = chunk.to_object());
+    array
+        .map(|array| array.to_vec())
+        .map_err(|_| Error::Type(c"Chunk is not a Uint8Array.".to_owned()))
 }
 
 /// <https://streams.spec.whatwg.org/#rs-transfer>

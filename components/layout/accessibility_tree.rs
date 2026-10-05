@@ -93,6 +93,9 @@ pub struct AccessibilityTree {
     /// Maps an element's `id` attribute to its accessibility [`NodeId`], rebuilt each update while
     /// walking the tree. Used to resolve `aria-labelledby` idrefs to their target nodes (LYK-1378).
     element_id_to_node_id: FxHashMap<Box<str>, NodeId>,
+    /// The modal dialog that blocks the document followed by its flat tree ancestors, as of the
+    /// current update. Everything else is inert while it is open.
+    modal_dialog_and_ancestors: Vec<OpaqueNode>,
     /// Sent with each [`accesskit::TreeUpdate`]. This allows this tree to be
     /// [grafted](https://docs.rs/accesskit/latest/accesskit/struct.Node.html#method.tree_id) into
     /// an application's tree.
@@ -149,6 +152,7 @@ impl AccessibilityTree {
             opaque_node_to_id: FxHashMap::default(),
             id_to_opaque_node: FxHashMap::default(),
             element_id_to_node_id: FxHashMap::default(),
+            modal_dialog_and_ancestors: Vec::new(),
             tree_id,
             root_node_id: None,
             embedder_epoch,
@@ -162,8 +166,10 @@ impl AccessibilityTree {
         &mut self,
         root_dom_node: &ServoLayoutNode<'_>,
         rooted_nodes: Option<FxHashSet<OpaqueNode>>,
+        modal_dialog_and_ancestors: Vec<OpaqueNode>,
     ) -> Option<accesskit::TreeUpdate> {
         let mut update = AccessibilityUpdate::new(rooted_nodes);
+        self.modal_dialog_and_ancestors = modal_dialog_and_ancestors;
         // Rebuilt fresh each walk (ids can be added/removed/changed between reflows).
         self.element_id_to_node_id.clear();
         let (root_node_id, root_node) = self.get_or_create_node(root_dom_node, &mut update);
@@ -273,6 +279,28 @@ impl AccessibilityTree {
         }
 
         damage
+    }
+
+    /// Whether `dom_child` of `dom_node` is inert, which hides it and its subtree from assistive
+    /// technology. <https://html.spec.whatwg.org/multipage/#inert-subtrees>
+    fn is_inert_child(&self, dom_node: &ServoLayoutNode<'_>, dom_child: &ServoLayoutNode<'_>) -> bool {
+        let leads_to_modal_dialog = self.modal_dialog_and_ancestors.contains(&dom_child.opaque());
+        // Ancestors of the modal dialog are inert themselves, but stay in the tree to hold it.
+        if self
+            .modal_dialog_and_ancestors
+            .get(1..)
+            .is_some_and(|ancestors| ancestors.contains(&dom_node.opaque())) &&
+            !leads_to_modal_dialog
+        {
+            return true;
+        }
+        // The modal dialog escapes the inertness of inert ancestors.
+        !leads_to_modal_dialog &&
+            dom_child.as_html_element().is_some_and(|element| {
+                element
+                    .attribute_as_str(&ns!(), &local_name!("inert"))
+                    .is_some()
+            })
     }
 
     fn get_or_create_node(
@@ -650,7 +678,10 @@ impl AccessibilityNode {
     ) -> LocalAccessibilityDamage {
         let mut damage = LocalAccessibilityDamage::empty();
 
-        let dom_children: Vec<ServoLayoutNode> = dom_node.flat_tree_children().collect();
+        let dom_children: Vec<ServoLayoutNode> = dom_node
+            .flat_tree_children()
+            .filter(|dom_child| !tree.is_inert_child(dom_node, dom_child))
+            .collect();
 
         let mut damage_from_children = LocalAccessibilityDamage::empty();
         let new_child_ids = dom_children

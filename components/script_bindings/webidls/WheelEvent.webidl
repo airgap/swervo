@@ -15,12 +15,22 @@ interface WheelEvent : MouseEvent {
     readonly    attribute unsigned long  deltaMode;
 };
 
+// Legacy members that Blink and WebKit still expose; pages that do not detect Gecko listen
+// for `mousewheel` and read these.
+partial interface WheelEvent {
+    readonly    attribute long           wheelDeltaX;
+    readonly    attribute long           wheelDeltaY;
+    readonly    attribute long           wheelDelta;
+};
+
 // https://w3c.github.io/pointerevents/#dom-wheeleventinit
 dictionary WheelEventInit : MouseEventInit {
     double deltaX = 0.0;
     double deltaY = 0.0;
     double deltaZ = 0.0;
     unsigned long deltaMode = 0;
+    long wheelDeltaX = 0;
+    long wheelDeltaY = 0;
 };
 
 // https://w3c.github.io/uievents/#idl-interface-WheelEvent-initializers

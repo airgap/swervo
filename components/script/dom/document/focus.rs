@@ -526,9 +526,24 @@ impl DocumentFocusHandler {
             .is_some_and(|value_at_focus| *value_at_focus != value);
         *self.focused_text_control_value.borrow_mut() = Some(value);
         if edited {
+            // <https://html.spec.whatwg.org/multipage/#common-input-element-events>: committing
+            // a change sets user validity to true before change fires.
+            element
+                .as_maybe_validatable()
+                .expect("Text controls are validatable")
+                .validity_state(cx)
+                .set_user_validity(cx, true);
             element
                 .upcast::<EventTarget>()
                 .fire_bubbling_event(cx, atom!("change"));
+        }
+    }
+
+    /// Notes that a `change` event fired for `element` committed its current value, so that
+    /// blurring it does not fire another one.
+    pub(crate) fn note_change_committed(&self, element: &Element) {
+        if self.focused_text_control.get().as_deref() == Some(element) {
+            *self.focused_text_control_value.borrow_mut() = Self::text_control_value(element);
         }
     }
 

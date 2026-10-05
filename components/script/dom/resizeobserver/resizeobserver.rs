@@ -200,7 +200,13 @@ fn create_and_populate_a_resizeobserverentry(
     }
 
     // Step 7. If target is not an SVG element or target is an SVG element with an associated CSS layout box do these steps:
-    let use_padding = *target.namespace() != ns!(svg) || target.has_css_layout_box();
+    // An element without a box of its own (such as a non-replaced inline) reports an empty
+    // content box, and Chrome places that empty rect at the origin rather than at its padding.
+    let use_padding = (*target.namespace() != ns!(svg) || target.has_css_layout_box()) &&
+        target
+            .owner_window()
+            .box_area_query(target.upcast(), BoxAreaType::Content, true)
+            .is_some();
     let (padding_top, padding_left) = if use_padding {
         // Step 7.1. Set this.contentRect.top to target.padding top.
         // Step 7.2. Set this.contentRect.left to target.padding left.
@@ -415,11 +421,15 @@ fn calculate_box_size(
                 .unwrap_or_else(Rect::zero);
 
             let to_device_px = |length: Au| (length.to_f64_px() * device_pixel_ratio).round();
+            // The size is snapped from both edges, as painting does, so a fractional position
+            // can grow or shrink it by a pixel (matching Chrome).
+            let snapped_length =
+                |start: Au, length: Au| to_device_px(start + length) - to_device_px(start);
             Rect::new(
                 content_box.origin.map(to_device_px),
                 Size2D::new(
-                    to_device_px(content_box.size.width),
-                    to_device_px(content_box.size.height),
+                    snapped_length(content_box.origin.x, content_box.size.width),
+                    snapped_length(content_box.origin.y, content_box.size.height),
                 ),
             )
         },

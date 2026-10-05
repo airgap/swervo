@@ -39,14 +39,12 @@ use style::stylesheets::scope_rule::ImplicitScopeRoot;
 use style::values::computed::{Display, Image};
 use style::values::generics::counters::{Content, ContentItem, GenericContentItems};
 use style::values::specified::align::AlignFlags;
-use style::values::specified::box_::{DisplayInside, DisplayOutside};
+use style::values::specified::box_::{Contain, DisplayInside, DisplayOutside};
 use style::values::{AtomIdent, AtomString};
 use stylo_atoms::Atom;
 use stylo_dom::ElementState;
 
-use crate::dom::bindings::inheritance::{
-    CharacterDataTypeId, DocumentFragmentTypeId, ElementTypeId, HTMLElementTypeId, NodeTypeId,
-};
+use crate::dom::bindings::inheritance::{CharacterDataTypeId, DocumentFragmentTypeId, NodeTypeId};
 use crate::dom::bindings::root::LayoutDom;
 use crate::dom::element::Element;
 use crate::dom::html::htmlslotelement::HTMLSlotElement;
@@ -538,7 +536,9 @@ impl<'dom> style::dom::TElement for ServoDangerousStyleElement<'dom> {
 
             if old_box.display != new_box.display ||
                 old_box.float != new_box.float ||
-                old_box.position != new_box.position
+                old_box.position != new_box.position ||
+                old_box._servo_top_layer != new_box._servo_top_layer ||
+                old_box.overlay != new_box.overlay
             {
                 return true;
             }
@@ -592,7 +592,9 @@ impl<'dom> style::dom::TElement for ServoDangerousStyleElement<'dom> {
                     old_column.is_multicol() != new_column.is_multicol() ||
                     old_column.column_span != new_column.column_span ||
                     alignment_establishes_new_block_formatting_context(old) !=
-                        alignment_establishes_new_block_formatting_context(new)
+                        alignment_establishes_new_block_formatting_context(new) ||
+                    old_box.contain.intersects(Contain::LAYOUT | Contain::PAINT) !=
+                        new_box.contain.intersects(Contain::LAYOUT | Contain::PAINT)
                 {
                     return true;
                 }
@@ -852,19 +854,18 @@ impl<'dom> ::selectors::Element for ServoDangerousStyleElement<'dom> {
 
     #[inline]
     fn is_link(&self) -> bool {
-        match self.as_node().node.type_id_for_layout() {
-            // https://html.spec.whatwg.org/multipage/#selector-link
-            NodeTypeId::Element(ElementTypeId::HTMLElement(
-                HTMLElementTypeId::HTMLAnchorElement,
-            )) |
-            NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLAreaElement)) |
-            NodeTypeId::Element(ElementTypeId::HTMLElement(HTMLElementTypeId::HTMLLinkElement)) => {
-                self.element
-                    .get_attr_val_for_layout(&ns!(), &local_name!("href"))
-                    .is_some()
-            },
-            _ => false,
-        }
+        // https://html.spec.whatwg.org/multipage/#selector-link
+        // Selector matching asks this of every element it visits. The HTML element type
+        // follows from the name, which is cheaper to read than the type id, which lives in
+        // the element's JS reflector.
+        *self.element.namespace() == ns!(html) &&
+            matches!(
+                *self.element.local_name(),
+                local_name!("a") | local_name!("area") | local_name!("link")
+            ) &&
+            self.element
+                .get_attr_val_for_layout(&ns!(), &local_name!("href"))
+                .is_some()
     }
 
     #[inline]

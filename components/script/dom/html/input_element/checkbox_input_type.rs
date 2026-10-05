@@ -13,6 +13,7 @@ use crate::dom::htmlinputelement::text_value_widget::TextValueWidget;
 use crate::dom::input_element::input_type::{SpecificInputActivationType, SpecificInputType};
 use crate::dom::input_element::{HTMLInputElement, InputActivationState};
 use crate::dom::node::Node;
+use crate::dom::validation::Validatable;
 
 #[derive(Default, JSTraceable, MallocSizeOf, PartialEq)]
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
@@ -91,6 +92,11 @@ impl SpecificInputActivationType for CheckboxInputActivation {
             EventCancelable::NotCancelable,
             EventComposed::Composed,
         );
+
+        // Chrome sets user validity whenever the user commits a change, as the spec does for
+        // controls with an explicit commit action.
+        // <https://html.spec.whatwg.org/multipage/#common-input-element-events>
+        input.validity_state(cx).set_user_validity(cx, true);
 
         // Step 3: Fire an event named change at the element with the bubbles attribute
         // initialized to true.

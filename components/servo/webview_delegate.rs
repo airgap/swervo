@@ -974,6 +974,13 @@ pub trait WebViewDelegate {
     }
     /// A pipeline in the webview panicked. First string is the reason, second one is the backtrace.
     fn notify_crashed(&self, _webview: WebView, _reason: String, _backtrace: Option<String>) {}
+    /// The content process rendering this [`WebView`] died (killed by a signal such as SIGSEGV,
+    /// the OOM killer's SIGKILL, or an unexpected exit), so there is no panic backtrace. Servo
+    /// has already replaced the dead pipeline with its crash page. `reason` describes how the
+    /// process ended. Embedders that do not distinguish this from a panic get [`Self::notify_crashed`].
+    fn notify_content_process_terminated(&self, webview: WebView, reason: String) {
+        self.notify_crashed(webview, reason, None);
+    }
     /// Notifies the embedder about media session events
     /// (i.e. when there is metadata for the active media session, playback state changes...).
     fn notify_media_session_event(&self, _webview: WebView, _event: MediaSessionEvent) {}

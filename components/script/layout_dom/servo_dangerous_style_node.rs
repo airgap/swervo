@@ -6,17 +6,13 @@
 #![deny(missing_docs)]
 
 use layout_api::DangerousStyleNode;
-use script_bindings::error::Fallible;
-use servo_arc::Arc;
+use selectors::parser::SelectorList;
 use style;
 use style::dom::{NodeInfo, TNode};
 use style::dom_apis::{MayUseInvalidation, SelectorQuery, query_selector};
-use style::selector_parser::SelectorParser;
-use style::stylesheets::UrlExtraData;
-use url::Url;
+use style::selector_parser::SelectorImpl;
 
 use super::{ServoDangerousStyleDocument, ServoDangerousStyleShadowRoot};
-use crate::dom::bindings::error::Error;
 use crate::dom::bindings::root::LayoutDom;
 use crate::dom::node::{Node, NodeFlags};
 use crate::layout_dom::{ServoDangerousStyleElement, ServoLayoutDomTypeBundle, ServoLayoutNode};
@@ -34,37 +30,28 @@ unsafe impl Send for ServoDangerousStyleNode<'_> {}
 unsafe impl Sync for ServoDangerousStyleNode<'_> {}
 
 impl<'dom> ServoDangerousStyleNode<'dom> {
-    /// <https://dom.spec.whatwg.org/#scope-match-a-selectors-string>
-    pub(crate) fn scope_match_a_selectors_string<Query>(
+    /// Step 3 of <https://dom.spec.whatwg.org/#scope-match-a-selectors-string>; the caller
+    /// parses the selectors (steps 1 and 2).
+    pub(crate) fn scope_match_a_selector_list<Query>(
         self,
-        document_url: Arc<Url>,
-        selector: &str,
-    ) -> Fallible<Query::Output>
+        selector_list: &SelectorList<SelectorImpl>,
+    ) -> Query::Output
     where
         Query: SelectorQuery<ServoDangerousStyleElement<'dom>>,
         Query::Output: Default,
     {
         let mut result = Query::Output::default();
 
-        // Step 1. Let selector be the result of parse a selector selectors.
-        let selector_or_error =
-            SelectorParser::parse_author_origin_no_namespace(selector, &UrlExtraData(document_url));
-
-        // Step 2. If selector is failure, then throw a "SyntaxError" DOMException.
-        let Ok(selector_list) = selector_or_error else {
-            return Err(Error::Syntax(None));
-        };
-
         // Step 3. Return the result of match a selector against a tree with selector
         // and node’s root using scoping root node.
         query_selector::<ServoDangerousStyleElement<'dom>, Query>(
             self,
-            &selector_list,
+            selector_list,
             &mut result,
             MayUseInvalidation::No,
         );
 
-        Ok(result)
+        result
     }
 }
 

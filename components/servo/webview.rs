@@ -513,6 +513,18 @@ impl WebView {
             ))
     }
 
+    /// Notify this [`WebView`] that its window moved or resized, or that the screen it is on
+    /// changed. Script caches what [`WebViewDelegate::screen_geometry`] reports and only asks
+    /// again after this call (or after a viewport resize).
+    pub fn notify_screen_geometry_changed(&self) {
+        self.inner()
+            .servo
+            .constellation_proxy()
+            .send(EmbedderToConstellationMessage::ScreenGeometryChanged(
+                self.id(),
+            ))
+    }
+
     /// Load the given URL into this [`WebView`] using the default request headers.
     ///
     /// This pushes a new entry onto the navigation history, so the user can navigate

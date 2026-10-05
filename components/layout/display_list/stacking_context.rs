@@ -19,13 +19,16 @@ use servo_base::print_tree::PrintTree;
 use servo_config::opts::{DiagnosticsLogging, DiagnosticsLoggingOption};
 use servo_geometry::MaxRect;
 use style::Zero;
+use style::dom::OpaqueNode;
 use style::color::AbsoluteColor;
 use style::computed_values::overflow_x::T as ComputedOverflow;
 use style::computed_values::position::T as ComputedPosition;
 use style::computed_values::text_decoration_style::T as TextDecorationStyle;
+use style::properties::ComputedValues;
 use style::values::computed::angle::Angle;
 use style::values::computed::{ClipRectOrAuto, Length, TextDecorationLine};
 use style::values::generics::box_::{OverflowClipMarginBox, Perspective};
+use style::values::generics::text::GenericTextDecorationLength;
 use style::values::generics::transform::{
     self, GenericRotate, GenericScale, GenericTranslate, get_normalized_vector_and_angle,
 };
@@ -126,6 +129,11 @@ pub(crate) struct StackingContextTree {
     /// for things like `overflow`. More clips may be created later during WebRender
     /// display list construction, but they are never added here.
     pub clip_store: StackingContextTreeClipStore,
+
+    /// Hoisted fragments of boxes in the top layer, found at their placeholders and built later
+    /// as children of the root stacking context, above everything else.
+    /// <https://drafts.csswg.org/css-position-4/#painting-order>
+    top_layer_fragments: Vec<Fragment>,
 }
 
 impl StackingContextTree {
@@ -133,6 +141,7 @@ impl StackingContextTree {
     /// pipeline id.
     pub fn new(
         fragment_tree: &FragmentTree,
+        top_layer_order: &[OpaqueNode],
         viewport_details: ViewportDetails,
         pipeline_id: wr::PipelineId,
         first_reflow: bool,
@@ -190,6 +199,7 @@ impl StackingContextTree {
             root_stacking_context: StackingContext::root(root_scroll_node_id),
             paint_info,
             clip_store: Default::default(),
+            top_layer_fragments: Vec::new(),
         };
 
         let text_decorations = Default::default();
@@ -206,6 +216,48 @@ impl StackingContextTree {
             );
         }
 
+        // Top layer boxes are stacking contexts on the root stacking context, painted after every
+        // other descendant. Building one may find further top layer boxes nested inside of it.
+        let mut top_layer_stacking_contexts = Vec::new();
+        let mut index = 0;
+        while let Some(fragment) = stacking_context_tree
+            .top_layer_fragments
+            .get(index)
+            .cloned()
+        {
+            let first_child_index = root_stacking_context.children.len();
+            fragment.build_stacking_context_tree(
+                &mut stacking_context_tree,
+                &containing_block_info,
+                &mut root_stacking_context,
+                StackingContextBuildMode::IncludeHoisted,
+                &text_decorations,
+            );
+            let mut stacking_contexts = root_stacking_context.children.split_off(first_child_index);
+            for stacking_context in &mut stacking_contexts {
+                stacking_context.z_index = i32::MAX;
+            }
+            // > The top layer is an ordered set of elements, rendered in the order they appear in
+            // > the set. The last element in the set is rendered last, and thus appears on top.
+            // A ::backdrop shares the position of its element and was found just before it.
+            // Elements layout does not know the position of, like the fullscreen element, go
+            // last.
+            let position = fragment
+                .tag()
+                .and_then(|tag| top_layer_order.iter().position(|node| *node == tag.node))
+                .unwrap_or(usize::MAX);
+            top_layer_stacking_contexts.push((position, stacking_contexts));
+            index += 1;
+        }
+        top_layer_stacking_contexts.sort_by_key(|(position, _)| *position);
+        root_stacking_context.children.extend(
+            top_layer_stacking_contexts
+                .into_iter()
+                .flat_map(|(_, stacking_contexts)| stacking_contexts),
+        );
+
+        // The sort is stable, so top layer stacking contexts keep their order after every
+        // other stacking context, including those with the maximum z-index.
         root_stacking_context.sort();
         stacking_context_tree.root_stacking_context = root_stacking_context;
 
@@ -326,6 +378,19 @@ pub(crate) struct FragmentTextDecoration {
     pub line: TextDecorationLine,
     pub color: AbsoluteColor,
     pub style: TextDecorationStyle,
+    /// An author `text-decoration-thickness` length, resolved against the decorating box's
+    /// font size; `None` uses the font's own underline or strikeout thickness.
+    pub thickness: Option<Au>,
+}
+
+/// <https://drafts.csswg.org/css-text-decor-4/#text-decoration-width-property>
+pub(crate) fn decoration_thickness_override(style: &ComputedValues) -> Option<Au> {
+    match style.clone_text_decoration_thickness() {
+        GenericTextDecorationLength::LengthPercentage(length) => {
+            Some(length.to_used_value(style.get_font().font_size.computed_size().into()))
+        },
+        GenericTextDecorationLength::Auto | GenericTextDecorationLength::FromFont => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, MallocSizeOf, PartialEq)]
@@ -534,6 +599,16 @@ impl Fragment {
                         return;
                     },
                 };
+
+                if fragment_ref
+                    .retrieve_box_fragment()
+                    .is_some_and(|box_fragment| box_fragment.style().in_top_layer())
+                {
+                    stacking_context_tree
+                        .top_layer_fragments
+                        .push(fragment_ref.clone());
+                    return;
+                }
 
                 fragment_ref.build_stacking_context_tree(
                     stacking_context_tree,
@@ -917,6 +992,7 @@ impl BoxFragmentWithStyle<'_> {
                         .clone_text_decoration_color()
                         .resolve_to_absolute(color),
                     style: style.clone_text_decoration_style(),
+                    thickness: decoration_thickness_override(style),
                 });
                 new_text_decoration = Rc::new(new_vector);
                 &new_text_decoration

@@ -137,6 +137,10 @@ impl taffy::LayoutPartialTree for TaffyContainerContext<'_> {
     ) -> taffy::LayoutOutput {
         let mut child = (*self.source_child_nodes[usize::from(node_id)]).borrow_mut();
         let child = &mut *child;
+        let is_absolutely_positioned = matches!(
+            child.taffy_level_box,
+            TaffyItemBoxInner::OutOfFlowAbsolutelyPositionedBox(_)
+        );
 
         with_independent_formatting_context(
             &mut child.taffy_level_box,
@@ -173,11 +177,8 @@ impl taffy::LayoutPartialTree for TaffyContainerContext<'_> {
 
                 // Compute inline size
                 let inline_size = content_box_known_dimensions.width.unwrap_or_else(|| {
-                    let constraint_space = ConstraintSpace {
-                        block_size: tentative_block_size,
-                        style,
-                        preferred_aspect_ratio,
-                    };
+                    let constraint_space =
+                        ConstraintSpace::new(tentative_block_size, style, preferred_aspect_ratio);
 
                     // TODO: pass min- and max- size
                     let result = independent_context
@@ -205,6 +206,7 @@ impl taffy::LayoutPartialTree for TaffyContainerContext<'_> {
                     size: ContainingBlockSize {
                         inline: Au::from_f32_px(inline_size),
                         block: tentative_block_size,
+                        table_cell: None,
                     },
                     style,
                 };
@@ -216,7 +218,7 @@ impl taffy::LayoutPartialTree for TaffyContainerContext<'_> {
                 };
 
                 child.positioning_context = PositioningContext::default();
-                let layout = independent_context.layout(
+                let (layout, is_cached) = independent_context.layout_and_is_cached(
                     self.layout_context,
                     &mut child.positioning_context,
                     &content_box_size_override,
@@ -224,6 +226,14 @@ impl taffy::LayoutPartialTree for TaffyContainerContext<'_> {
                     preferred_aspect_ratio,
                     &lazy_block_size,
                 );
+                // An absolutely positioned item is laid out again once hoisted, and that
+                // layout reuses the box fragment of the previous layout whenever its layout
+                // result is cached. A fresh layout here has just refilled that cache, so the
+                // previous fragment no longer matches it: drop the fragment, or the hoisted
+                // layout paints stale content (such as an image from before it loaded).
+                if is_absolutely_positioned && !is_cached {
+                    independent_context.base.clear_fragments();
+                }
 
                 child.child_fragments = layout.fragments;
                 self.child_specific_layout_infos[usize::from(node_id)] =
@@ -301,9 +311,10 @@ impl ComputeInlineContentSizes for TaffyContainer {
     ) -> InlineContentSizesResult {
         let style = &self.style;
 
+        // These are content sizes: the container's own sizing properties are applied by the caller.
         let max_content_inputs = taffy::LayoutInput {
             run_mode: taffy::RunMode::ComputeSize,
-            sizing_mode: taffy::SizingMode::InherentSize,
+            sizing_mode: taffy::SizingMode::ContentSize,
             axis: taffy::RequestedAxis::Horizontal,
             vertical_margins_are_collapsible: taffy::Line::FALSE,
 
@@ -321,6 +332,7 @@ impl ComputeInlineContentSizes for TaffyContainer {
             size: ContainingBlockSize {
                 inline: Au::zero(),
                 block: SizeConstraint::default(),
+                table_cell: None,
             },
             style,
         };
@@ -414,9 +426,13 @@ impl TaffyContainer {
             height: containing_block.size.block.to_definite().map(Au::to_f32_px),
         };
 
+        // The caller has already resolved the preferred size into `known_dimensions` and resolves
+        // the final block size from our content block size. Letting Taffy apply the container's
+        // own `height` would make an indefinite block size (as in the intrinsic block size pass
+        // of a column flex item) report the specified height as the content size.
         let layout_input = taffy::LayoutInput {
             run_mode: taffy::RunMode::PerformLayout,
-            sizing_mode: taffy::SizingMode::InherentSize,
+            sizing_mode: taffy::SizingMode::ContentSize,
             axis: taffy::RequestedAxis::Vertical,
             vertical_margins_are_collapsible: taffy::Line::FALSE,
 

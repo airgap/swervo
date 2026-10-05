@@ -46,6 +46,11 @@ partial interface mixin WindowOrWorkerGlobalScope {
   readonly attribute boolean isSecureContext;
 };
 
+// https://html.spec.whatwg.org/multipage/#dom-crossoriginisolated
+partial interface mixin WindowOrWorkerGlobalScope {
+  readonly attribute boolean crossOriginIsolated;
+};
+
 // https://www.w3.org/TR/trusted-types/#extensions-to-the-windoworworkerglobalscope-interface
 partial interface mixin WindowOrWorkerGlobalScope {
   readonly attribute TrustedTypePolicyFactory trustedTypes;

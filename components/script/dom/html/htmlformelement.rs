@@ -64,6 +64,7 @@ use crate::dom::formdataevent::FormDataEvent;
 use crate::dom::html::htmlbuttonelement::HTMLButtonElement;
 use crate::dom::html::htmlcollection::CollectionFilter;
 use crate::dom::html::htmldatalistelement::HTMLDataListElement;
+use crate::dom::html::htmldialogelement::HTMLDialogElement;
 use crate::dom::html::htmlelement::HTMLElement;
 use crate::dom::html::htmlfieldsetelement::HTMLFieldSetElement;
 use crate::dom::html::htmlformcontrolscollection::HTMLFormControlsCollection;
@@ -748,6 +749,26 @@ impl HTMLFormElement {
             }
             // Step 6.2
             self.firing_submission_events.set(true);
+            // For each element field in form's submittable elements, set field's user validity
+            // to true. (:user-valid and :user-invalid only match input, select and textarea.)
+            let fields: Vec<_> = self
+                .controls
+                .borrow()
+                .iter()
+                .filter(|field| {
+                    field.is::<HTMLInputElement>() ||
+                        field.is::<HTMLSelectElement>() ||
+                        field.is::<HTMLTextAreaElement>()
+                })
+                .map(|field| field.as_rooted())
+                .collect();
+            for field in fields {
+                field
+                    .as_maybe_validatable()
+                    .expect("Input, select and textarea elements are validatable")
+                    .validity_state(cx)
+                    .set_user_validity(cx, true);
+            }
             // Step 6.3
             if !submitter.no_validate(self) && self.interactive_validation(cx).is_err() {
                 self.firing_submission_events.set(false);
@@ -809,7 +830,43 @@ impl HTMLFormElement {
         // Step 10. Let method be the submitter element's method.
         let method = submitter.method();
         // Step 11. If method is dialog, then:
-        // TODO
+        if matches!(method, FormMethod::Dialog) {
+            // Step 11.1. If form does not have an ancestor dialog element, return.
+            // Step 11.2. Let subject be form's nearest ancestor dialog element.
+            let Some(subject) = self
+                .upcast::<Node>()
+                .ancestors()
+                .find_map(DomRoot::downcast::<HTMLDialogElement>)
+            else {
+                return;
+            };
+            // Step 11.3. Let result be null.
+            // Step 11.4. If submitter is an input element whose type attribute is in the Image
+            // Button state, then set result to the string formed by concatenating the selected
+            // coordinate's x-component, ",", and the selected coordinate's y-component.
+            // Step 11.5. Otherwise, if submitter has a value, then set result to that value.
+            // A submission without a submitter (requestSubmit(), submit()) sets the empty string,
+            // matching Chrome.
+            let result = match submitter {
+                FormSubmitterElement::Form(_) => Some(DOMString::new()),
+                FormSubmitterElement::Input(input) => {
+                    if matches!(*input.input_type(), InputType::Image(_)) {
+                        // The selected coordinate is not tracked yet; (0, 0) is its default.
+                        Some(DOMString::from("0,0"))
+                    } else {
+                        input
+                            .upcast::<Element>()
+                            .get_attribute_string_value(&local_name!("value"))
+                            .map(DOMString::from)
+                    }
+                },
+                FormSubmitterElement::Button(button) => button.optional_value(),
+            };
+            // Step 11.6. Close the dialog subject with result and null.
+            subject.close_the_dialog(cx, result, None);
+            // Step 11.7. Return.
+            return;
+        }
 
         // Step 12. Let action be the submitter element's action.
         let mut action = submitter.action();
@@ -890,10 +947,7 @@ impl HTMLFormElement {
         // Then, select the appropriate cell on that row based on method as given in the first cell of each column.
         // Then, jump to the steps named in that cell and defined below the table.
         match (&*scheme, method) {
-            (_, FormMethod::Dialog) => {
-                // TODO: Submit dialog
-                // https://html.spec.whatwg.org/multipage/#submit-dialog
-            },
+            (_, FormMethod::Dialog) => unreachable!("Handled in step 11"),
             // https://html.spec.whatwg.org/multipage/#submit-mutate-action
             ("http", FormMethod::Get) | ("https", FormMethod::Get) | ("data", FormMethod::Get) => {
                 load_data
@@ -1419,6 +1473,30 @@ impl HTMLFormElement {
             }
         }
         self.update_validity(cx);
+        self.update_default_button();
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#selector-default>: the form's default button,
+    /// its first submit button in tree order, matches `:default`.
+    pub(crate) fn update_default_button(&self) {
+        let mut found_default_button = false;
+        for control in self.controls.borrow().iter() {
+            if !Self::is_submit_button(control) {
+                continue;
+            }
+            control.set_state(ElementState::DEFAULT, !found_default_button);
+            found_default_button = true;
+        }
+    }
+
+    fn is_submit_button(element: &Element) -> bool {
+        if let Some(input) = element.downcast::<HTMLInputElement>() {
+            input.is_submit_button()
+        } else if let Some(button) = element.downcast::<HTMLButtonElement>() {
+            button.is_submit_button()
+        } else {
+            false
+        }
     }
 
     fn remove_control<T: ?Sized + FormControl>(&self, cx: &mut JSContext, control: &T) {
@@ -1436,8 +1514,13 @@ impl HTMLFormElement {
             // from that map."
             let mut past_names_map = self.past_names_map.borrow_mut();
             past_names_map.0.retain(|_k, v| v.0 != control);
+
+            if Self::is_submit_button(control) {
+                control.set_state(ElementState::DEFAULT, false);
+            }
         }
         self.update_validity(cx);
+        self.update_default_button();
     }
 }
 
@@ -1461,6 +1544,11 @@ impl Element {
     pub(crate) fn reset(&self, cx: &mut JSContext) {
         if !self.is_resettable() {
             return;
+        }
+
+        // The reset algorithms of input, select and textarea set user validity to false.
+        if let Some(validatable) = self.as_maybe_validatable() {
+            validatable.validity_state(cx).set_user_validity(cx, false);
         }
 
         if let Some(input_element) = self.downcast::<HTMLInputElement>() {

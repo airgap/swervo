@@ -120,6 +120,7 @@ fn create_http_state(fc: Option<GenericEmbedderProxy<NetToEmbedderMsg>>) -> Http
             false, /* ignore_certificate_errors */
             override_manager.clone(),
         )),
+        connection_limiter: Default::default(),
         override_manager,
         embedder_proxy: fc.unwrap_or_else(|| create_generic_embedder_proxy()),
     }

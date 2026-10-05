@@ -50,7 +50,7 @@ pub(crate) struct SVGElement {
 }
 
 impl SVGElement {
-    fn new_inherited(
+    pub(crate) fn new_inherited(
         tag_name: LocalName,
         prefix: Option<Prefix>,
         document: &Document,
@@ -117,6 +117,22 @@ impl SVGElement {
             .filter_map(DomRoot::downcast::<SVGSVGElement>)
         {
             svg_root.invalidate_cached_serialized_subtree_and_rasterization_result();
+        }
+
+        // Other svgs may have inlined an enclosing element by id (`<use href="#icon">`
+        // with the `<symbol id="icon">` defined elsewhere); their copies are stale too.
+        let document = self.owner_document();
+        if !document.has_svg_id_reference_listeners() {
+            return;
+        }
+        for ancestor in self
+            .upcast::<Node>()
+            .inclusive_ancestors(ShadowIncluding::No)
+            .filter_map(DomRoot::downcast::<SVGElement>)
+        {
+            if let Some(id) = ancestor.as_element().get_id() {
+                document.invalidate_svgs_referencing_id(&id);
+            }
         }
     }
 }
@@ -287,7 +303,7 @@ impl SVGElementMethods<crate::DomTypeHolder> for SVGElement {
             };
             self.upcast::<Element>().scroll_into_view_with_options(
                 cx,
-                ScrollBehavior::Smooth,
+                ScrollBehavior::Auto,
                 scroll_axis,
                 scroll_axis,
                 None,

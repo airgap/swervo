@@ -10,6 +10,7 @@ use html5ever::{LocalName, Prefix, QualName, local_name, ns};
 use js::context::JSContext;
 use js::rust::HandleObject;
 use script_bindings::cell::DomRefCell;
+use style::selector_parser::PseudoElement;
 use stylo_dom::ElementState;
 
 use crate::dom::bindings::codegen::Bindings::HTMLMeterElementBinding::HTMLMeterElementMethods;
@@ -23,7 +24,7 @@ use crate::dom::element::attributes::storage::AttrRef;
 use crate::dom::element::{AttributeMutation, Element};
 use crate::dom::html::htmlelement::HTMLElement;
 use crate::dom::node::virtualmethods::VirtualMethods;
-use crate::dom::node::{BindContext, ChildrenMutation, Node, NodeTraits};
+use crate::dom::node::{BindContext, ChildrenMutation, Node, NodeDamage, NodeTraits};
 use crate::dom::nodelist::NodeList;
 use crate::script_runtime::CanGc;
 
@@ -76,6 +77,15 @@ impl HTMLMeterElement {
         let document = self.owner_document();
         let root = self.upcast::<Element>().attach_ua_shadow_root(cx, true);
 
+        let meter_bar = Element::create(
+            cx,
+            QualName::new(None, ns!(html), local_name!("div")),
+            None,
+            &document,
+            crate::dom::element::ElementCreator::ScriptCreated,
+            crate::dom::element::CustomElementCreationMode::Asynchronous,
+            None,
+        );
         let meter_value = Element::create(
             cx,
             QualName::new(None, ns!(html), local_name!("div")),
@@ -86,8 +96,18 @@ impl HTMLMeterElement {
             None,
         );
         root.upcast::<Node>()
+            .AppendChild(cx, meter_bar.upcast::<Node>())
+            .unwrap();
+        meter_bar
+            .upcast::<Node>()
             .AppendChild(cx, meter_value.upcast::<Node>())
             .unwrap();
+        meter_bar
+            .upcast::<Node>()
+            .set_implemented_pseudo_element(PseudoElement::WebkitMeterBar);
+        meter_value
+            .upcast::<Node>()
+            .set_implemented_pseudo_element(PseudoElement::WebkitMeterOptimumValue);
 
         let _ = self.shadow_tree.borrow_mut().insert(ShadowTree {
             meter_value: meter_value.as_traced(),
@@ -154,8 +174,22 @@ impl HTMLMeterElement {
             .set_state(ElementState::METER_OPTIMUM_STATES, false);
         self.upcast::<Element>().set_state(element_state, true);
 
+        // Chrome tells the value regions apart by which pseudo-element the value bar is.
+        let value_pseudo = if element_state == ElementState::OPTIMUM {
+            PseudoElement::WebkitMeterOptimumValue
+        } else if element_state == ElementState::SUB_OPTIMUM {
+            PseudoElement::WebkitMeterSuboptimumValue
+        } else {
+            PseudoElement::WebkitMeterEvenLessGoodValue
+        };
+
         // Update the visual width of the meter
         let shadow_tree = self.shadow_tree(cx);
+        let value_node = shadow_tree.meter_value.upcast::<Node>();
+        if value_node.implemented_pseudo_element() != Some(value_pseudo) {
+            value_node.set_implemented_pseudo_element(value_pseudo);
+            value_node.dirty(NodeDamage::Other);
+        }
         let position = (value - min) / (max - min) * 100.0;
         let style = format!("width: {position}%");
         shadow_tree

@@ -5,9 +5,15 @@
 use std::cell::Cell;
 use std::cmp::Ordering;
 
+use app_units::Au;
 use dom_struct::dom_struct;
+use euclid::Point2D;
 use js::context::{JSContext, NoGC};
+use layout_api::{QueryMsg, RestyleReason};
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
+use style::Zero;
+use style::values::computed::UserSelect;
+use style_traits::CSSPixel;
 
 use crate::dom::abstractrange::bp_position;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::{GetRootNodeOptions, NodeMethods};
@@ -23,6 +29,29 @@ use crate::dom::document::Document;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::node::{Node, NodeTraits};
 use crate::dom::range::Range;
+use crate::dom::element::Element;
+use crate::dom::html::htmlbrelement::HTMLBRElement;
+use crate::dom::iterators::ShadowIncluding;
+use crate::dom::text::Text;
+use crate::dom::window::{LaidOutCaretLine, LaidOutCaretStop, Window};
+
+/// What a press of the primary button selects, by its click count.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum PointerSelection {
+    Character,
+    Word,
+    Paragraph,
+}
+
+/// The unit a caret moves by, as in `Selection.modify()`.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum CaretMovement {
+    Character,
+    Word,
+    Line,
+    LineBoundary,
+    DocumentBoundary,
+}
 
 #[derive(Clone, Copy, JSTraceable, MallocSizeOf)]
 enum Direction {
@@ -39,6 +68,12 @@ pub(crate) struct Selection {
     direction: Cell<Direction>,
     /// <https://w3c.github.io/selection-api/#dfn-has-scheduled-selectionchange-event>
     has_scheduled_selectionchange_event: Cell<bool>,
+    /// The horizontal position in the viewport that consecutive caret movements by lines aim
+    /// for, which is where the first of them started, and the offset in
+    /// [`Self::line_movement_goal_node`] where the last of them left the focus.
+    #[no_trace]
+    line_movement_goal: Cell<Option<(Au, u32)>>,
+    line_movement_goal_node: MutNullableDom<Node>,
 }
 
 impl Selection {
@@ -49,6 +84,8 @@ impl Selection {
             range: MutNullableDom::new(None),
             direction: Cell::new(Direction::Directionless),
             has_scheduled_selectionchange_event: Cell::new(false),
+            line_movement_goal: Cell::new(None),
+            line_movement_goal_node: MutNullableDom::new(None),
         }
     }
 
@@ -93,6 +130,9 @@ impl Selection {
         // > selection changes to something different, the state override and value
         // > override must be unset for every command.
         self.document.clear_command_overrides();
+
+        // Layout paints the caret and selected text of editing hosts.
+        self.document.add_restyle_reason(RestyleReason::SelectionChanged);
 
         // Step 1. If target's has scheduled selectionchange event is true, abort these steps.
         if self.has_scheduled_selectionchange_event.get() {
@@ -194,6 +234,646 @@ impl Selection {
             })
             .unwrap_or(0)
     }
+
+    /// Selects for a press of the primary button at `point` (in the viewport) over `hit_node`:
+    /// puts the caret at the closest caret position, or selects the word or the paragraph there.
+    /// With `extend` only the focus moves to the closest caret position, as when dragging or
+    /// pressing with Shift.
+    pub(crate) fn select_at_point(
+        &self,
+        cx: &mut JSContext,
+        hit_node: &Node,
+        point: Point2D<Au, CSSPixel>,
+        granularity: PointerSelection,
+        extend: bool,
+    ) {
+        let extend = extend && self.range.get().is_some();
+        let window = self.document.window();
+        // As in Blink, `user-select: all` content is selected as a whole: a press in it selects
+        // all of it and dragging from there leaves that selection alone.
+        if extend &&
+            self.anchor_node()
+                .is_some_and(|anchor| user_select_all_root(&anchor).is_some())
+        {
+            return;
+        }
+        if !extend && let Some(root) = user_select_all_root(hit_node) {
+            let lines = selectable_lines(window.caret_stops_query(root.upcast()));
+            let result = match (lines.first(), lines.last()) {
+                (Some(first), Some(last)) => {
+                    let (start, start_offset) = first_position_in(root.upcast(), &first.stops[0]);
+                    let end = &last.stops[last.stops.len() - 1];
+                    self.SetBaseAndExtent(cx, &start, start_offset, &end.node, end.offset)
+                },
+                // Without text, such as for an image, the element itself is selected.
+                _ => {
+                    let parent = root
+                        .upcast::<Node>()
+                        .GetParentNode()
+                        .expect("Laid out elements have a parent");
+                    let index = root.upcast::<Node>().index();
+                    self.SetBaseAndExtent(cx, &parent, index, &parent, index + 1)
+                },
+            };
+            result.expect("Laid out caret positions are valid boundary points");
+            return;
+        }
+
+        // Like in other browsers, a selection stays in the editing host it starts in, and one
+        // that starts outside editing hosts does not enter them.
+        let editing_host = if extend {
+            self.anchor_node().and_then(|anchor| anchor.editing_host_of())
+        } else {
+            hit_node.editing_host_of()
+        };
+        let lines = match &editing_host {
+            Some(editing_host) => selectable_lines(window.caret_stops_query(editing_host)),
+            None => caret_stops_around(window, hit_node, true),
+        };
+        let Some((_, mut stop)) = closest_caret_stop(&lines, point) else {
+            return;
+        };
+        // Dragged above or below the editing host it stays in, the focus goes to its start or end.
+        if let Some(editing_host) = &editing_host &&
+            !editing_host.is_inclusive_ancestor_of(hit_node)
+        {
+            let (first, last) = (&lines[0], &lines[lines.len() - 1]);
+            if point.y < first.top {
+                stop = &first.stops[0];
+            } else if point.y >= last.bottom {
+                stop = &last.stops[last.stops.len() - 1];
+            }
+        }
+
+        let result = match granularity {
+            PointerSelection::Character => {
+                let (node, offset) = if editing_host.is_none() {
+                    self.position_outside_editing_hosts(&stop.node, stop.offset, extend)
+                } else {
+                    (stop.node.clone(), stop.offset)
+                };
+                // A selection extended into `user-select: all` content takes in all of it.
+                let (node, offset) = match user_select_all_root(&node) {
+                    Some(root) if extend => {
+                        let lines = selectable_lines(window.caret_stops_query(root.upcast()));
+                        let forward = self.anchor_node().is_some_and(|anchor| {
+                            bp_position(&anchor, self.anchor_offset(), &node, offset) ==
+                                Some(Ordering::Less)
+                        });
+                        if forward {
+                            match lines.last().and_then(|line| line.stops.last()) {
+                                Some(stop) => (stop.node.clone(), stop.offset),
+                                None => (node, offset),
+                            }
+                        } else {
+                            match lines.first().and_then(|line| line.stops.first()) {
+                                Some(stop) => first_position_in(root.upcast(), stop),
+                                None => (node, offset),
+                            }
+                        }
+                    },
+                    _ => (node, offset),
+                };
+                if extend {
+                    self.Extend(cx, &node, offset)
+                } else {
+                    self.Collapse(cx, Some(&node), offset)
+                }
+            },
+            // Like in other browsers, this selects what follows the closest caret position.
+            PointerSelection::Word => {
+                match stop
+                    .node
+                    .downcast::<Text>()
+                    .and_then(|text| word_around(&text.data(), stop.offset))
+                {
+                    Some(word) => self.SetBaseAndExtent(
+                        cx,
+                        &stop.node,
+                        word.start,
+                        &stop.node,
+                        word.end,
+                    ),
+                    None => self.Collapse(cx, Some(&stop.node), stop.offset),
+                }
+            },
+            PointerSelection::Paragraph => {
+                let ((start, start_offset), (end, end_offset)) =
+                    paragraph_around(&stop.node, stop.offset, editing_host.as_deref());
+                self.SetBaseAndExtent(cx, &start, start_offset, &end, end_offset)
+            },
+        };
+        result.expect("Laid out caret positions are valid boundary points");
+    }
+
+    /// A selection made outside editing hosts ends before or after an editing host instead of
+    /// at a position in it: before it when the focus moves forward from the anchor.
+    fn position_outside_editing_hosts(
+        &self,
+        node: &Node,
+        offset: u32,
+        extend: bool,
+    ) -> (DomRoot<Node>, u32) {
+        let Some(editing_host) = node.editing_host_of() else {
+            return (DomRoot::from_ref(node), offset);
+        };
+        let parent = editing_host
+            .GetParentNode()
+            .expect("Editing hosts have a parent");
+        let index = editing_host.index();
+        let backward = extend &&
+            self.anchor_node().is_some_and(|anchor| {
+                bp_position(&parent, index, &anchor, self.anchor_offset()) ==
+                    Some(Ordering::Less)
+            });
+        (parent, if backward { index + 1 } else { index })
+    }
+
+    /// <https://w3c.github.io/selection-api/#dom-selection-modify>, for selections in
+    /// editable content, using the caret positions of the laid out text.
+    pub(crate) fn modify_in_editable_content(
+        &self,
+        cx: &mut JSContext,
+        extend: bool,
+        forward: bool,
+        movement: CaretMovement,
+    ) {
+        let (Some(range), Some(focus_node)) = (self.range.get(), self.focus_node()) else {
+            return;
+        };
+        let Some(editing_host) = focus_node.editing_host_of() else {
+            return;
+        };
+
+        // Moving a non-collapsed selection by a character collapses it to the side it moves to.
+        let (start_node, start_offset) = if !extend && !range.collapsed() {
+            if movement == CaretMovement::Character {
+                let result = if forward {
+                    self.CollapseToEnd(cx)
+                } else {
+                    self.CollapseToStart(cx)
+                };
+                result.expect("The selection has a range");
+                return;
+            }
+            if forward {
+                (range.end_container(), range.end_offset())
+            } else {
+                (range.start_container(), range.start_offset())
+            }
+        } else {
+            (focus_node, self.focus_offset())
+        };
+
+        let lines = self.document.window().caret_stops_query(&editing_host);
+        let positions: Vec<(usize, usize)> = lines
+            .iter()
+            .enumerate()
+            .flat_map(|(line_index, line)| {
+                (0..line.stops.len()).map(move |stop_index| (line_index, stop_index))
+            })
+            .collect();
+        let stop_at =
+            |(line_index, stop_index): (usize, usize)| &lines[line_index].stops[stop_index];
+        let Some(current) = positions
+            .iter()
+            .position(|&position| {
+                let stop = stop_at(position);
+                *stop.node == *start_node && stop.offset == start_offset
+            })
+            .or_else(|| {
+                positions.iter().position(|&position| {
+                    let stop = stop_at(position);
+                    bp_position(&stop.node, stop.offset, &start_node, start_offset) !=
+                        Some(Ordering::Less)
+                })
+            })
+            .or(positions.len().checked_sub(1))
+        else {
+            return;
+        };
+        let (current_line, _) = positions[current];
+
+        // Whether the character between two consecutive positions is part of a word; a line
+        // break is not.
+        let is_word_character_between = |first: usize, second: usize| {
+            let (first, second) = (positions[first], positions[second]);
+            first.0 == second.0 &&
+                character_before(stop_at(second))
+                    .is_some_and(is_word_character)
+        };
+
+        let mut line_goal_x = None;
+        let target = match movement {
+            CaretMovement::Character if forward => (current + 1).min(positions.len() - 1),
+            CaretMovement::Character => current.saturating_sub(1),
+            // Like other browsers on Linux, words are left at their end going forward and at their
+            // start going backward.
+            CaretMovement::Word if forward => {
+                let mut target = current;
+                while target + 1 < positions.len() && !is_word_character_between(target, target + 1)
+                {
+                    target += 1;
+                }
+                while target + 1 < positions.len() &&
+                    is_word_character_between(target, target + 1)
+                {
+                    target += 1;
+                }
+                target
+            },
+            CaretMovement::Word => {
+                let mut target = current;
+                while target > 0 && !is_word_character_between(target - 1, target) {
+                    target -= 1;
+                }
+                while target > 0 && is_word_character_between(target - 1, target) {
+                    target -= 1;
+                }
+                target
+            },
+            CaretMovement::Line => {
+                // Like in other browsers, consecutive movements by lines keep aiming for the
+                // horizontal position where the first one started.
+                let x = match self.line_movement_goal.get() {
+                    Some((x, offset))
+                        if offset == start_offset &&
+                            self.line_movement_goal_node
+                                .get()
+                                .is_some_and(|node| node == start_node) =>
+                    {
+                        x
+                    },
+                    _ => stop_at(positions[current]).x,
+                };
+                line_goal_x = Some(x);
+                let target_line = if forward {
+                    Some(current_line + 1).filter(|line| *line < lines.len())
+                } else {
+                    current_line.checked_sub(1)
+                };
+                match target_line {
+                    Some(target_line) => {
+                        let line_start = positions
+                            .iter()
+                            .position(|position| position.0 == target_line)
+                            .expect("Every line has a position");
+                        let (closest, _) = lines[target_line]
+                            .stops
+                            .iter()
+                            .enumerate()
+                            .min_by_key(|(_, stop)| (stop.x - x).abs())
+                            .expect("Every line has a position");
+                        line_start + closest
+                    },
+                    // There is no line to move to, so go to the start or end of this one.
+                    None if forward => positions.len() - 1,
+                    None => 0,
+                }
+            },
+            CaretMovement::LineBoundary => {
+                let mut on_line = positions
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, position)| position.0 == current_line)
+                    .map(|(index, _)| index);
+                if forward {
+                    on_line.last()
+                } else {
+                    on_line.next()
+                }
+                .expect("The current line has a position")
+            },
+            CaretMovement::DocumentBoundary if forward => positions.len() - 1,
+            CaretMovement::DocumentBoundary => 0,
+        };
+        let target = stop_at(positions[target]);
+        self.move_to_stop(cx, target, extend);
+        self.line_movement_goal
+            .set(line_goal_x.map(|x| (x, target.offset)));
+        self.line_movement_goal_node
+            .set(line_goal_x.map(|_| &*target.node));
+    }
+
+    fn move_to_stop(&self, cx: &mut JSContext, stop: &LaidOutCaretStop, extend: bool) {
+        let result = if extend && self.range.get().is_some() {
+            self.Extend(cx, &stop.node, stop.offset)
+        } else {
+            self.Collapse(cx, Some(&stop.node), stop.offset)
+        };
+        result.expect("Caret stops are valid boundary points");
+    }
+}
+
+/// The character just before a caret position in a text node, if any.
+fn character_before(stop: &LaidOutCaretStop) -> Option<char> {
+    let text = stop.node.downcast::<Text>()?;
+    let offset = stop.offset as usize;
+    let units: Vec<u16> = text.data().encode_utf16().take(offset).collect();
+    char::decode_utf16(units.iter().rev().take(2).rev().copied())
+        .last()?
+        .ok()
+}
+
+/// The caret positions, by line, of the nearest block around `node` that has laid out text, or
+/// with `selectable_only`, laid out text that can be selected.
+pub(crate) fn caret_stops_around(
+    window: &Window,
+    node: &Node,
+    selectable_only: bool,
+) -> Vec<LaidOutCaretLine> {
+    let mut block = node.block_node_of();
+    while let Some(current) = block.filter(|block| block.is::<Element>()) {
+        let mut lines = window.caret_stops_query(&current);
+        if selectable_only {
+            lines = selectable_lines(lines);
+        }
+        if !lines.is_empty() {
+            return lines;
+        }
+        block = current
+            .GetParentNode()
+            .and_then(|parent| parent.block_node_of());
+    }
+    Vec::new()
+}
+
+/// The lines with only their caret positions where a selection can end, leaving out lines
+/// without any.
+fn selectable_lines(lines: Vec<LaidOutCaretLine>) -> Vec<LaidOutCaretLine> {
+    lines
+        .into_iter()
+        .filter_map(|mut line| {
+            line.stops.retain(|stop| stop.selectable);
+            (!line.stops.is_empty()).then_some(line)
+        })
+        .collect()
+}
+
+/// The `user-select` of an element, or of the parent element of another node, which inherits
+/// it. `None` for nodes that are not styled.
+fn user_select(node: &Node) -> Option<UserSelect> {
+    let element = match node.downcast::<Element>() {
+        Some(element) => DomRoot::from_ref(element),
+        None => node.GetParentElement()?,
+    };
+    Some(element.style()?.clone_user_select())
+}
+
+/// Whether pressing the primary button over `node` can start a selection: as in Blink, not in
+/// `user-select: none` content unless it is editable, where `text` and `all` override the
+/// value of an ancestor. <https://drafts.csswg.org/css-ui-4/#content-selection>
+pub(crate) fn can_start_selection(node: &Node) -> bool {
+    for ancestor in node.inclusive_ancestors(ShadowIncluding::Yes) {
+        if ancestor.is_editable_or_editing_host() {
+            return true;
+        }
+        if !ancestor.is::<Element>() {
+            continue;
+        }
+        match user_select(&ancestor) {
+            Some(UserSelect::None) => return false,
+            Some(UserSelect::Text | UserSelect::All) => return true,
+            Some(UserSelect::Auto) | None => {},
+        }
+    }
+    true
+}
+
+/// The outermost of the elements with `user-select: all` that `node` is in without other
+/// `user-select` values between them, which is selected as a whole.
+fn user_select_all_root(node: &Node) -> Option<DomRoot<Element>> {
+    if node.is_editable_or_editing_host() {
+        return None;
+    }
+    let mut root = None;
+    for ancestor in node.inclusive_ancestors(ShadowIncluding::Yes) {
+        let Some(element) = ancestor.downcast::<Element>() else {
+            continue;
+        };
+        if user_select(&ancestor) != Some(UserSelect::All) {
+            break;
+        }
+        root = Some(DomRoot::from_ref(element));
+    }
+    root
+}
+
+/// The position of the first caret position `stop` of the text of `root` in `root`. Laid out
+/// positions where two nodes meet are at the end of the first, which for the first position of
+/// `root` is before it; the start of the first text in `root` that is not only white space is
+/// the same place.
+fn first_position_in(root: &Node, stop: &LaidOutCaretStop) -> (DomRoot<Node>, u32) {
+    if root.is_inclusive_ancestor_of(&stop.node) {
+        return (stop.node.clone(), stop.offset);
+    }
+    root.traverse_preorder(ShadowIncluding::No)
+        .find(|node| {
+            node.downcast::<Text>().is_some_and(|text| {
+                !text
+                    .data()
+                    .chars()
+                    .all(|character| character.is_ascii_whitespace())
+            })
+        })
+        .map_or((stop.node.clone(), stop.offset), |text| (text, 0))
+}
+
+/// Whether text in `text` can be part of what a selection stringifies to: as in Blink, text
+/// with `user-select: none` cannot, unless it is editable. Styles must be up to date.
+pub(crate) fn is_selectable_text(text: &Node) -> bool {
+    text.is_editable_or_editing_host() ||
+        text.GetParentElement()
+            .and_then(|parent| parent.style_from_last_restyle())
+            .is_none_or(|style| style.clone_user_select() != UserSelect::None)
+}
+
+/// The caret position closest to `point` (in the viewport) and its line: on the closest line,
+/// or at the end of the line past either end of it, like in other browsers.
+pub(crate) fn closest_caret_stop(
+    lines: &[LaidOutCaretLine],
+    point: Point2D<Au, CSSPixel>,
+) -> Option<(&LaidOutCaretLine, &LaidOutCaretStop)> {
+    let distance_to_line =
+        |line: &LaidOutCaretLine| (line.top - point.y).max(point.y - line.bottom).max(Au::zero());
+    let line = lines.iter().min_by_key(|line| distance_to_line(line))?;
+    let stop = line
+        .stops
+        .iter()
+        .min_by_key(|stop| (stop.x - point.x).abs())
+        .expect("Laid out lines have caret positions");
+    Some((line, stop))
+}
+
+/// Whether a character is part of a word, for moving and selecting by words.
+fn is_word_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
+/// The UTF-16 range of what a double click at `offset` in `text` selects, as in other browsers
+/// on Linux: the word there, the run of white space there, or the other character there. At the
+/// end of the text it is what ends there.
+fn word_around(text: &str, offset: u32) -> Option<std::ops::Range<u32>> {
+    let mut characters = Vec::new();
+    let mut start = 0;
+    for character in text.chars() {
+        characters.push((start, character));
+        start += character.len_utf16() as u32;
+    }
+    let index = match characters.iter().position(|(start, _)| *start >= offset) {
+        Some(index) if characters[index].0 == offset => index,
+        Some(index) => index.checked_sub(1)?,
+        None => characters.len().checked_sub(1)?,
+    };
+    let class = |character: char| {
+        if is_word_character(character) {
+            0
+        } else if character.is_whitespace() {
+            1
+        } else {
+            2
+        }
+    };
+    let (word_start, character) = characters[index];
+    let range_end = |index: usize| {
+        characters
+            .get(index + 1)
+            .map_or(start, |(start, _)| *start)
+    };
+    if class(character) == 2 {
+        return Some(word_start..range_end(index));
+    }
+    let first = characters[..index]
+        .iter()
+        .rposition(|(_, other)| class(*other) != class(character))
+        .map_or(0, |other| other + 1);
+    let last = characters[index..]
+        .iter()
+        .position(|(_, other)| class(*other) != class(character))
+        .map_or(characters.len() - 1, |other| index + other - 1);
+    Some(characters[first].0..range_end(last))
+}
+
+/// A piece of the content of a block, in tree order, for finding its paragraphs.
+enum BlockContent {
+    Text(DomRoot<Node>),
+    LineBreak(DomRoot<Node>),
+    /// A nested block, which is not part of the paragraphs around it.
+    Block(DomRoot<Node>),
+}
+
+fn collect_block_content(node: &Node, content: &mut Vec<BlockContent>) {
+    for child in node.children() {
+        if child.is::<Text>() {
+            content.push(BlockContent::Text(child));
+        } else if child.is::<HTMLBRElement>() {
+            content.push(BlockContent::LineBreak(child));
+        } else if child.is::<Element>() {
+            if child.is_block_node() {
+                content.push(BlockContent::Block(child));
+            } else {
+                collect_block_content(&child, content);
+            }
+        }
+    }
+}
+
+/// The start and end of what a triple click at (`node`, `offset`) selects, as in other
+/// browsers: the paragraph there with the line break that ends it, or up to the start of the
+/// next block. A paragraph in an editing host does not extend out of it.
+fn paragraph_around(
+    node: &Node,
+    offset: u32,
+    editing_host: Option<&Node>,
+) -> ((DomRoot<Node>, u32), (DomRoot<Node>, u32)) {
+    let block = node
+        .block_node_of()
+        .expect("Laid out caret positions are in a block");
+    let mut content = Vec::new();
+    collect_block_content(&block, &mut content);
+
+    // The node at the position, or the last one when the position is at the end of its parent.
+    let position_node = if node.is::<Text>() {
+        DomRoot::from_ref(node)
+    } else {
+        node.children()
+            .nth(offset as usize)
+            .or_else(|| node.children().last())
+            .unwrap_or_else(|| DomRoot::from_ref(node))
+    };
+    let content_node = |piece: &BlockContent| match piece {
+        BlockContent::Text(node) | BlockContent::LineBreak(node) | BlockContent::Block(node) => {
+            node.clone()
+        },
+    };
+    let Some(index) = content
+        .iter()
+        .position(|piece| position_node.is_inclusive_ancestor_of(&content_node(piece)))
+    else {
+        return (
+            (DomRoot::from_ref(node), offset),
+            (DomRoot::from_ref(node), offset),
+        );
+    };
+
+    let is_text = |piece: &BlockContent| matches!(piece, BlockContent::Text(_));
+    let first = content[..index]
+        .iter()
+        .rposition(|piece| !is_text(piece))
+        .map_or(0, |other| other + 1);
+    let end_index = content[index..]
+        .iter()
+        .position(|piece| !is_text(piece))
+        .map(|other| index + other);
+
+    let start = match &content[first] {
+        BlockContent::Text(text) => (text.clone(), 0),
+        BlockContent::LineBreak(node) | BlockContent::Block(node) => (
+            node.GetParentNode().expect("Content of a block has a parent"),
+            node.index(),
+        ),
+    };
+    // The end of the last text of the paragraph, if it has text.
+    let end_of_text = |end_index: usize| {
+        (end_index > first).then(|| {
+            let last = content_node(&content[end_index - 1]);
+            let length = last.len();
+            (last, length)
+        })
+    };
+    let end = match end_index {
+        Some(end_index) => match &content[end_index] {
+            BlockContent::LineBreak(line_break) => (
+                line_break
+                    .GetParentNode()
+                    .expect("Content of a block has a parent"),
+                line_break.index() + 1,
+            ),
+            _ => end_of_text(end_index).unwrap_or_else(|| start.clone()),
+        },
+        None => start_of_next_block(&block, editing_host)
+            .or_else(|| end_of_text(content.len()))
+            .unwrap_or_else(|| start.clone()),
+    };
+    (start, end)
+}
+
+/// The start of the first block or text after `block` in tree order, without leaving
+/// `editing_host`, or entering editing hosts when it is `None`.
+fn start_of_next_block(block: &Node, editing_host: Option<&Node>) -> Option<(DomRoot<Node>, u32)> {
+    let document = block.owner_document();
+    let root = editing_host.unwrap_or(document.upcast::<Node>());
+    block
+        .following_nodes(root, ShadowIncluding::No)
+        .filter(|node| !block.is_ancestor_of(node))
+        .find(|node| {
+            let is_start = match node.downcast::<Text>() {
+                Some(text) => !text.is_whitespace_node(),
+                None => node.is::<Element>() && node.is_block_node(),
+            };
+            is_start && node.editing_host_of().as_deref() == editing_host
+        })
+        .map(|node| (node, 0))
 }
 
 impl SelectionMethods<crate::DomTypeHolder> for Selection {
@@ -590,6 +1270,61 @@ impl SelectionMethods<crate::DomTypeHolder> for Selection {
         Ok(())
     }
 
+    /// <https://w3c.github.io/selection-api/#dom-selection-modify>
+    fn Modify(
+        &self,
+        cx: &mut JSContext,
+        alter: DOMString,
+        direction: DOMString,
+        granularity: DOMString,
+    ) {
+        // Step 1. If alter is not ASCII case-insensitive match with "extend" or "move", abort
+        // these steps.
+        let extend = match &*alter.str().to_ascii_lowercase() {
+            "extend" => true,
+            "move" => false,
+            _ => return,
+        };
+        // Step 2. If direction is not ASCII case-insensitive match with "forward", "backward",
+        // "left", or "right", abort these steps.
+        // TODO: "left" and "right" depend on the direction of the text; only left-to-right
+        // text is handled.
+        let forward = match &*direction.str().to_ascii_lowercase() {
+            "forward" | "right" => true,
+            "backward" | "left" => false,
+            _ => return,
+        };
+        // Step 3. If granularity is not ASCII case-insensitive match with "character", "word",
+        // "sentence", "line", "paragraph", "lineboundary", "sentenceboundary",
+        // "paragraphboundary", "documentboundary", abort these steps.
+        // TODO: Sentences and paragraphs are not supported.
+        let movement = match &*granularity.str().to_ascii_lowercase() {
+            "character" => CaretMovement::Character,
+            "word" => CaretMovement::Word,
+            "line" => CaretMovement::Line,
+            "lineboundary" => CaretMovement::LineBoundary,
+            "documentboundary" => CaretMovement::DocumentBoundary,
+            _ => return,
+        };
+        // Step 4. If this selection is empty, abort these steps.
+        // Step 5. Let effectiveDirection be backwards.
+        // Step 6. If direction is ASCII case-insensitive match with "forward", set
+        // effectiveDirection to forwards.
+        // Step 7. If direction is ASCII case-insensitive match with "right" and inline base
+        // direction of this selection's focus is ltr, set effectiveDirection to forwards.
+        // Step 8. If direction is ASCII case-insensitive match with "left" and inline base
+        // direction of this selection's focus is rtl, set effectiveDirection to forwards.
+        // Step 9. Set this selection's direction to effectiveDirection.
+        // Step 10. If alter is ASCII case-insensitive match with "extend", set this
+        // selection's focus to the location as if the user had requested to extend selection
+        // by granularity.
+        // Step 11. Otherwise, set this selection's focus and anchor to the location as if the
+        // user had requested to move selection by granularity.
+        //
+        // TODO: Only caret positions in editable content are known.
+        self.modify_in_editable_content(cx, extend, forward, movement);
+    }
+
     /// <https://w3c.github.io/selection-api/#dom-selection-selectallchildren>
     fn SelectAllChildren(&self, cx: &mut JSContext, node: &Node) -> ErrorResult {
         // Step 1. If node is a DocumentType, throw an InvalidNodeTypeError exception and
@@ -695,7 +1430,9 @@ impl SelectionMethods<crate::DomTypeHolder> for Selection {
         // into account `display: none`. The case for textarea and input elements is
         // completely unhandled here.
         if let Some(range) = self.range.get() {
-            range.Stringifier(no_gc)
+            // As in Blink, text that cannot be selected is left out.
+            self.document.window().layout_reflow(QueryMsg::StyleQuery);
+            range.stringify(no_gc, is_selectable_text)
         } else {
             DOMString::from("")
         }

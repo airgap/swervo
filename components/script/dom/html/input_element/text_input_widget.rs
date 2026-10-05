@@ -58,6 +58,18 @@ impl TextInputWidget {
             .update(cx, element)
     }
 
+    /// The element holding the text and the placeholder, which `<input type=number>` also
+    /// puts its spin button in.
+    pub(crate) fn inner_container(
+        &self,
+        cx: &mut JSContext,
+        element: &impl TextControlElement,
+    ) -> DomRoot<Element> {
+        self.get_or_create_shadow_tree(cx, element)
+            .inner_container
+            .as_rooted()
+    }
+
     pub(crate) fn update_placeholder_contents(
         &self,
         cx: &mut JSContext,
@@ -136,7 +148,7 @@ impl TextInputWidgetShadowTree {
         element: &impl TextControlElement,
     ) -> Option<DomRoot<Element>> {
         if let Some(placeholder_container) = &*self.placeholder_container.borrow() {
-            return Some(placeholder_container.root_element());
+            return Some(placeholder_container.as_rooted());
         }
         // If there is no placeholder text and we haven't already created one then it is
         // not necessary to initialize a new placeholder container.

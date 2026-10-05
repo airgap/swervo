@@ -42,7 +42,7 @@ pub use webrender_api::ExternalImageSource;
 use webrender_api::units::{DevicePixel, LayoutVector2D, TexelRect};
 use webrender_api::{
     BuiltDisplayList, BuiltDisplayListDescriptor, ExternalImage, ExternalImageData,
-    ExternalImageHandler, ExternalImageId, ExternalScrollId, FontInstanceFlags, FontInstanceKey,
+    ExternalImageHandler, ExternalImageId, ExternalScrollId, FontInstanceKey, FontInstanceOptions,
     FontKey, ImageData, ImageDescriptor, ImageKey, NativeFontHandle,
     PipelineId as WebRenderPipelineId,
 };
@@ -172,7 +172,7 @@ pub enum PaintMessage {
         FontInstanceKey,
         FontKey,
         f32,
-        FontInstanceFlags,
+        FontInstanceOptions,
         Vec<FontVariation>,
     ),
     /// Remove the given font resources from our WebRender instance.
@@ -474,7 +474,7 @@ impl CrossProcessPaintApi {
         font_instance_key: FontInstanceKey,
         font_key: FontKey,
         size: f32,
-        flags: FontInstanceFlags,
+        options: FontInstanceOptions,
         variations: Vec<FontVariation>,
     ) {
         let _x = self.0.send(PaintMessage::AddFontInstance(
@@ -482,7 +482,7 @@ impl CrossProcessPaintApi {
             font_instance_key,
             font_key,
             size,
-            flags,
+            options,
             variations,
         ));
     }

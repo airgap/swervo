@@ -21,22 +21,6 @@ use crate::layout_box_base::LayoutBoxBase;
 use crate::style_ext::{AspectRatio, Clamp, ComputedValuesExt, ContentBoxSizesAndPBM, LayoutStyle};
 use crate::{ConstraintSpace, IndefiniteContainingBlock, LogicalVec2};
 
-#[derive(PartialEq)]
-pub(crate) enum IntrinsicSizingMode {
-    /// Used to refer to a min-content contribution or max-content contribution.
-    /// This is the size that a box contributes to its containing block’s min-content
-    /// or max-content size. Note this is based on the outer size of the box,
-    /// and takes into account the relevant sizing properties of the element.
-    /// <https://drafts.csswg.org/css-sizing-3/#contributions>
-    Contribution,
-    /// Used to refer to a min-content size or max-content size.
-    /// This is the size based on the contents of an element, without regard for its context.
-    /// Note this is usually based on the inner (content-box) size of the box,
-    /// and ignores the relevant sizing properties of the element.
-    /// <https://drafts.csswg.org/css-sizing-3/#intrinsic>
-    Size,
-}
-
 #[derive(Clone, Copy, Debug, Default, MallocSizeOf)]
 pub(crate) struct ContentSizes {
     pub min_content: Au,
@@ -138,6 +122,7 @@ pub(crate) fn outer_inline(
     get_inline_content_size: impl FnOnce(&ConstraintSpace) -> InlineContentSizesResult,
     get_tentative_block_content_size: impl FnOnce(Option<AspectRatio>) -> Option<ContentSizes>,
 ) -> InlineContentSizesResult {
+    let containing_block = &containing_block.for_child_sizing(is_replaced);
     let ContentBoxSizesAndPBM {
         content_box_sizes,
         pbm,
@@ -196,11 +181,14 @@ pub(crate) fn outer_inline(
             // This assumes that there is no preferred aspect ratio, or that there is no
             // block size constraint to be transferred so the ratio is irrelevant.
             // We only get into here for anonymous blocks, for which the assumption holds.
-            ConstraintSpace::new(
-                containing_block.size.block.into(),
-                containing_block.style,
-                None,
-            )
+            ConstraintSpace {
+                replaced_percentage_block_size: containing_block.replaced_percentage_block_size,
+                ..ConstraintSpace::new(
+                    containing_block.size.block.into(),
+                    containing_block.style,
+                    None,
+                )
+            }
         };
         get_inline_content_size(&constraint_space)
     });
@@ -767,6 +755,89 @@ impl Sizes {
     }
 }
 
+/// <https://drafts.csswg.org/css-sizing-4/#aspect-ratio-size-transfers>: the content sizes of a
+/// non-replaced box with a preferred aspect ratio, given the block size constraint it is laid
+/// out with. A definite block size gives the inline size through the ratio, but no narrower
+/// than the min-content size; otherwise the min and max block sizes are transferred through the
+/// ratio and clamp both content sizes. Returns `None` when nothing is transferred.
+pub(crate) fn content_sizes_with_aspect_ratio(
+    content_sizes: ContentSizes,
+    preferred_aspect_ratio: AspectRatio,
+    block_size: SizeConstraint,
+) -> Option<ContentSizes> {
+    match block_size {
+        SizeConstraint::Definite(block_size) => Some(
+            preferred_aspect_ratio
+                .compute_dependent_size(Direction::Inline, block_size)
+                .max(content_sizes.min_content)
+                .into(),
+        ),
+        SizeConstraint::MinMax(min, None) if min.is_zero() => None,
+        SizeConstraint::MinMax(min, max) => {
+            let (min, max) = transferred_inline_extremums(preferred_aspect_ratio, min, max);
+            Some(content_sizes.map(|size| size.clamp_between_extremums(min, max)))
+        },
+    }
+}
+
+/// <https://drafts.csswg.org/css-sizing-4/#aspect-ratio-size-transfers>: the automatic inline
+/// size of a non-replaced box with a preferred aspect ratio. If it would stretch, a definite
+/// block size instead gives the inline size through the ratio (which the content sizes carry,
+/// see [`content_sizes_with_aspect_ratio`]), and otherwise the stretch size is clamped by the
+/// min and max block sizes transferred through the ratio: `width: auto; max-height: 200px;
+/// aspect-ratio: 1 / 2` is 100px wide.
+pub(crate) fn automatic_inline_size_with_aspect_ratio(
+    automatic_size: Size<Au>,
+    preferred_aspect_ratio: Option<AspectRatio>,
+    is_replaced: bool,
+    block_size: SizeConstraint,
+    stretch_size: Au,
+) -> Size<Au> {
+    let (false, Size::Stretch, Some(ratio)) =
+        (is_replaced, &automatic_size, preferred_aspect_ratio)
+    else {
+        return automatic_size;
+    };
+    match block_size {
+        SizeConstraint::Definite(_) => Size::FitContent,
+        SizeConstraint::MinMax(min, max) => {
+            let (min, max) = transferred_inline_extremums(ratio, min, max);
+            Size::Numeric(stretch_size.clamp_between_extremums(min, max))
+        },
+    }
+}
+
+/// The min and max block sizes transferred to the inline axis through the ratio. A zero minimum
+/// stays zero, like in Blink, so that `box-sizing: border-box` doesn't turn it into a
+/// non-zero inline minimum.
+fn transferred_inline_extremums(ratio: AspectRatio, min: Au, max: Option<Au>) -> (Au, Option<Au>) {
+    let transfer = |size| ratio.compute_dependent_size(Direction::Inline, size);
+    let min = if min.is_zero() { min } else { transfer(min) };
+    (min, max.map(transfer))
+}
+
+/// <https://drafts.csswg.org/css-sizing-4/#aspect-ratio>: the block size that a non-replaced box
+/// with a preferred aspect ratio and an `auto` block size takes from its inline size, clamped by
+/// its min and max block sizes. Its content can still make it taller.
+pub(crate) fn block_size_from_aspect_ratio(
+    preferred_aspect_ratio: Option<AspectRatio>,
+    is_replaced: bool,
+    block_sizes: &Sizes,
+    block_stretch_size: Option<Au>,
+    inline_size: Au,
+) -> Option<Au> {
+    if is_replaced || !block_sizes.preferred.is_initial() {
+        return None;
+    }
+    let (_, min, max) =
+        block_sizes.resolve_each_extrinsic(Size::FitContent, Au::zero(), block_stretch_size);
+    Some(
+        preferred_aspect_ratio?
+            .compute_dependent_size(Direction::Block, inline_size)
+            .clamp_between_extremums(min, max),
+    )
+}
+
 struct LazySizeData<'a> {
     sizes: &'a Sizes,
     axis: Direction,
@@ -774,6 +845,17 @@ struct LazySizeData<'a> {
     get_automatic_minimum_size: fn() -> Au,
     stretch_size: Option<Au>,
     is_table: bool,
+}
+
+/// See [`LazySize::kind`].
+#[derive(Clone, Copy, Debug, MallocSizeOf, PartialEq)]
+pub(crate) enum LazySizeKind {
+    /// Created from an [`Au`]: the size does not depend on the contents.
+    Fixed(Au),
+    /// [`LazySize::intrinsic`]: the size is that of the contents.
+    Intrinsic,
+    /// [`LazySize::new`]: the size of the contents, adjusted by sizing properties.
+    Constrained,
 }
 
 /// Represents a size that can't be fully resolved until the intrinsic size
@@ -817,6 +899,16 @@ impl<'a> LazySize<'a> {
         Self {
             result: OnceCell::new(),
             data: None,
+        }
+    }
+
+    /// How this [`LazySize`] determines the size, for keying layout caches. Must be read
+    /// before [`Self::resolve`], which also fills in the result of an intrinsic [`LazySize`].
+    pub(crate) fn kind(&self) -> LazySizeKind {
+        match (&self.data, self.result.get()) {
+            (Some(_), _) => LazySizeKind::Constrained,
+            (None, Some(size)) => LazySizeKind::Fixed(*size),
+            (None, None) => LazySizeKind::Intrinsic,
         }
     }
 

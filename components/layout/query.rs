@@ -4,17 +4,18 @@
 
 //! Utilities for querying the layout, as needed by layout.
 use std::cell::LazyCell;
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use app_units::Au;
 use embedder_traits::UntrustedNodeAddress;
-use euclid::{Point2D, Rect, Size2D};
+use euclid::{Point2D, Rect, Size2D, Vector2D};
 use itertools::Itertools;
 use layout_api::{
-    AxesOverflow, BoxAreaType, CSSPixelRectVec, DangerousStyleElementOf, LayoutElement,
-    LayoutElementType, LayoutNode, LayoutNodeType, OffsetParentResponse, PhysicalSides,
-    ScrollContainerQueryFlags, ScrollContainerResponse,
+    AxesOverflow, BoxAreaType, CSSPixelRectVec, CaretLine, CaretStop, DangerousStyleElementOf,
+    LayoutElement, LayoutElementType, LayoutNode, LayoutNodeType, OffsetParentResponse,
+    PhysicalSides, ScrollContainerQueryFlags, ScrollContainerResponse,
 };
 use paint_api::display_list::ScrollTree;
 use script::layout_dom::ServoLayoutNode;
@@ -27,7 +28,7 @@ use style::computed_values::position::T as Position;
 use style::computed_values::visibility::T as Visibility;
 use style::computed_values::white_space_collapse::T as WhiteSpaceCollapseValue;
 use style::context::{QuirksMode, SharedStyleContext, StyleContext, ThreadLocalStyleContext};
-use style::dom::NodeInfo;
+use style::dom::{NodeInfo, OpaqueNode};
 use style::properties::style_structs::Font;
 use style::properties::{
     ComputedValues, Importance, LonghandId, PropertyDeclarationBlock, PropertyDeclarationId,
@@ -49,10 +50,11 @@ use style_traits::{CSSPixel, ParsingMode, ToCss};
 
 use crate::cell::RefOrAtomicRef;
 use crate::display_list::{StackingContextTree, au_rect_to_length_rect};
-use crate::dom::NodeExt;
+use crate::dom::{NodeExt, WeakLayoutBox};
 use crate::flow::inline::construct::{TextTransformation, WhitespaceCollapse, capitalize_string};
 use crate::fragment_tree::{
-    BoxFragment, Fragment, FragmentFlags, FragmentTree, SpecificLayoutInfo, TextFragment,
+    BoxFragment, ContainingBlockCalculation, Fragment, FragmentFlags, FragmentTree,
+    SpecificLayoutInfo, Tag, TextFragment,
 };
 use crate::layout_impl::LayoutThread;
 use crate::style_ext::ComputedValuesExt;
@@ -60,7 +62,7 @@ use crate::taffy::SpecificTaffyGridInfo;
 
 /// Get a scroll node that would represents this [`ServoLayoutNode`]'s transform and
 /// calculate its cumulative transform from its root scroll node to the scroll node.
-fn root_transform_for_layout_node(
+pub(crate) fn root_transform_for_layout_node(
     scroll_tree: &ScrollTree,
     node: ServoLayoutNode<'_>,
 ) -> Option<FastLayoutTransform> {
@@ -93,7 +95,6 @@ pub(crate) fn process_padding_request(node: ServoLayoutNode<'_>) -> Option<Physi
 
 pub(crate) fn process_box_area_request(
     layout_thread: &LayoutThread,
-    stacking_context_tree: &StackingContextTree,
     node: ServoLayoutNode<'_>,
     area: BoxAreaType,
     exclude_transform_and_inline: bool,
@@ -107,7 +108,15 @@ pub(crate) fn process_box_area_request(
                     .retrieve_box_fragment()
                     .is_none_or(|fragment| !fragment.with_style().is_inline_box())
         })
-        .filter_map(|node| node.cumulative_box_area_rect(area, layout_thread.into()))
+        .filter_map(|fragment| {
+            fragment.cumulative_box_area_rect(
+                area,
+                ContainingBlockCalculation::Lazy {
+                    layout_thread,
+                    node,
+                },
+            )
+        })
         .peekable();
 
     rects.peek()?;
@@ -117,9 +126,7 @@ pub(crate) fn process_box_area_request(
         return Some(rect_union);
     }
 
-    let Some(transform) =
-        root_transform_for_layout_node(&stacking_context_tree.paint_info.scroll_tree, node)
-    else {
+    let Some(transform) = layout_thread.root_transform_for_query(node) else {
         return Some(Rect::new(rect_union.origin, Size2D::zero()));
     };
 
@@ -128,18 +135,23 @@ pub(crate) fn process_box_area_request(
 
 pub(crate) fn process_box_areas_request(
     layout_thread: &LayoutThread,
-    stacking_context_tree: &StackingContextTree,
     node: ServoLayoutNode<'_>,
     area: BoxAreaType,
 ) -> CSSPixelRectVec {
     let fragments = node
         .fragments_for_pseudo(None)
         .into_iter()
-        .filter_map(move |fragment| fragment.cumulative_box_area_rect(area, layout_thread.into()));
+        .filter_map(move |fragment| {
+            fragment.cumulative_box_area_rect(
+                area,
+                ContainingBlockCalculation::Lazy {
+                    layout_thread,
+                    node,
+                },
+            )
+        });
 
-    let Some(transform) =
-        root_transform_for_layout_node(&stacking_context_tree.paint_info.scroll_tree, node)
-    else {
+    let Some(transform) = layout_thread.root_transform_for_query(node) else {
         return fragments
             .map(|rect| Rect::new(rect.origin, Size2D::zero()))
             .collect();
@@ -148,6 +160,144 @@ pub(crate) fn process_box_areas_request(
     fragments
         .filter_map(move |rect| transform_au_rectangle(rect, transform))
         .collect()
+}
+
+/// Get the rectangles of the glyphs for the part of a text node's data in `utf16_range`, one per
+/// text fragment (so one per line box), in the same coordinate space as
+/// [`process_box_areas_request`]. This is used to implement `Range.getClientRects()`.
+///
+/// See <https://drafts.csswg.org/cssom-view/#dom-range-getclientrects>.
+pub(crate) fn process_text_range_rects_request(
+    layout_thread: &LayoutThread,
+    stacking_context_tree: &StackingContextTree,
+    node: ServoLayoutNode<'_>,
+    utf16_range: Range<usize>,
+) -> CSSPixelRectVec {
+    let Some(text_run) = node.text_run() else {
+        return Vec::new();
+    };
+    let text_run = text_run.borrow();
+    let Some(parent_box) = text_run.parent_box.as_ref().and_then(WeakLayoutBox::upgrade) else {
+        return Vec::new();
+    };
+    let Some(parent_fragments) = parent_box.with_base(|base| base.fragments().clone()) else {
+        return Vec::new();
+    };
+
+    let mut rects = Vec::new();
+    let mut is_collapsed = false;
+    for fragment in &parent_fragments {
+        let Some(content_rect) = fragment.cumulative_box_area_rect(
+            BoxAreaType::Content,
+            ContainingBlockCalculation::Lazy {
+                layout_thread,
+                node,
+            },
+        ) else {
+            continue;
+        };
+        collect_text_range_rects(
+            fragment,
+            content_rect.origin.to_vector(),
+            text_run.base_fragment_info.tag,
+            node.opaque(),
+            &utf16_range,
+            &mut is_collapsed,
+            &mut rects,
+        );
+    }
+
+    // A collapsed range sits at the end of one line and the start of the next when it is at a
+    // soft wrap opportunity; it only has one position.
+    if is_collapsed {
+        rects.truncate(1);
+    }
+
+    let transform = parent_fragments
+        .first()
+        .and_then(Fragment::retrieve_box_fragment)
+        .and_then(|box_fragment| box_fragment.spatial_tree_node())
+        .map(|scroll_tree_node_id| {
+            stacking_context_tree
+                .paint_info
+                .scroll_tree
+                .cumulative_node_to_root_transform(scroll_tree_node_id)
+        });
+    let Some(transform) = transform else {
+        return rects
+            .into_iter()
+            .map(|rect| Rect::new(rect.origin, Size2D::zero()))
+            .collect();
+    };
+    rects
+        .into_iter()
+        .filter_map(|rect| transform_au_rectangle(rect, transform))
+        .collect()
+}
+
+/// Collect the rectangles for `utf16_range` of the data of the text node `node` in the text
+/// fragments with `tag` that are children of `fragment`, looking through anonymous fragments such
+/// as line boxes. `children_offset` is the origin of the coordinate space of `fragment`'s
+/// children. `is_collapsed` is set when the range covers no laid out characters.
+fn collect_text_range_rects(
+    fragment: &Fragment,
+    children_offset: Vector2D<Au, CSSPixel>,
+    tag: Option<Tag>,
+    node: OpaqueNode,
+    utf16_range: &Range<usize>,
+    is_collapsed: &mut bool,
+    rects: &mut CSSPixelRectVec,
+) {
+    let Some(children) = fragment.children() else {
+        return;
+    };
+    for child in children.iter() {
+        match child {
+            Fragment::Text(text_fragment) if text_fragment.base.tag == tag => {
+                let Some(character_range) = text_fragment
+                    .offsets
+                    .as_ref()
+                    .and_then(|offsets| offsets.text_origins.as_ref())
+                    .and_then(|text_origins| text_origins.character_range(node, utf16_range))
+                else {
+                    continue;
+                };
+                *is_collapsed = character_range.is_empty();
+                let Some(rect) = text_fragment
+                    .rect_for_character_range(&character_range)
+                    .map(|rect| rect.translate(children_offset))
+                else {
+                    continue;
+                };
+                // Line layout may split the text of a line into several fragments (for instance
+                // at every soft wrap opportunity), but the result should have one box per run of
+                // text in a line box, like other engines.
+                match rects.last_mut() {
+                    Some(last)
+                        if last.origin.y == rect.origin.y &&
+                            last.size.height == rect.size.height &&
+                            last.max_x() == rect.min_x() =>
+                    {
+                        last.size.width += rect.size.width;
+                    },
+                    _ => rects.push(rect),
+                }
+            },
+            Fragment::Box(..) | Fragment::Positioning(..) if child.tag().is_none() => {
+                let child_origin = child.base().expect("Has a base").rect().origin;
+                collect_text_range_rects(
+                    child,
+                    children_offset + child_origin.to_vector(),
+                    tag,
+                    node,
+                    utf16_range,
+                    is_collapsed,
+                    rects,
+                );
+            },
+            _ => {},
+        }
+    }
 }
 
 pub fn process_client_rect_request(node: ServoLayoutNode<'_>) -> Rect<i32, CSSPixel> {
@@ -190,7 +340,12 @@ pub fn process_node_scroll_area_request(
         Some(node) => node
             .fragments_for_pseudo(None)
             .first()
-            .map(|fragment| fragment.scrolling_area(layout_thread))
+            .map(|fragment| {
+                fragment.scrolling_area(ContainingBlockCalculation::Lazy {
+                    layout_thread,
+                    node,
+                })
+            })
             .unwrap_or_default(),
         None => tree
             .scrollable_overflow()
@@ -334,8 +489,14 @@ pub fn process_resolved_style_request(
         if let Some(box_fragment) = fragment.retrieve_box_fragment() &&
             style.get_box().position != Position::Static
         {
-            let resolved_insets =
-                || box_fragment.calculate_resolved_insets_if_positioned(layout_thread.into());
+            let resolved_insets = || {
+                box_fragment.calculate_resolved_insets_if_positioned(
+                    ContainingBlockCalculation::Lazy {
+                        layout_thread,
+                        node,
+                    },
+                )
+            };
             match longhand_id {
                 LonghandId::Top => return resolved_insets().top.to_css_string(),
                 LonghandId::Right => {
@@ -688,37 +849,57 @@ fn offset_parent_fragments(node: ServoLayoutNode<'_>) -> Option<OffsetParentFrag
 #[inline]
 pub fn process_offset_parent_query(
     layout_thread: &LayoutThread,
-    scroll_tree: &ScrollTree,
+    scroll_tree: Option<&ScrollTree>,
     node: ServoLayoutNode<'_>,
 ) -> Option<OffsetParentResponse> {
-    // Only consider the first fragment of the node found as per a
+    // The position comes from the first fragment of the node as per a
     // possible interpretation of the specification: "[...] return the
     // y-coordinate of the top border edge of the first CSS layout box
     // associated with the element [...]"
     //
-    // FIXME: Browsers implement this all differently (e.g., [1]) -
-    // Firefox does returns the union of all layout elements of some
-    // sort. Chrome returns the first fragment for a block element (the
-    // same as ours) or the union of all associated fragments in the
-    // first containing block fragment for an inline element. We could
-    // implement Chrome's behavior, but our fragment tree currently
-    // provides insufficient information.
+    // Browsers implement the size differently (e.g., [1]). Like Chrome, an
+    // inline box split across lines takes its `offsetWidth` and `offsetHeight`
+    // from the union of all its fragments, keeping the origin of the first
+    // one; any other box uses its first fragment.
     //
     // [1]: https://github.com/w3c/csswg-drafts/issues/4541
     // > 1. If the element is the HTML body element or does not have any associated CSS
     //      layout box return zero and terminate this algorithm.
-    let fragment = node.fragments_for_pseudo(None).first().cloned()?;
+    let fragments = node.fragments_for_pseudo(None);
+    let fragment = fragments.first().cloned()?;
+    // The fragments of the offset parent and its parent belong to ancestors of `node`, so
+    // this also calculates their containing blocks.
+    let containing_block_computation = || ContainingBlockCalculation::Lazy {
+        layout_thread,
+        node,
+    };
     let mut border_box =
-        fragment.cumulative_box_area_rect(BoxAreaType::Border, layout_thread.into())?;
-    let cumulative_sticky_offsets = fragment
+        fragment.cumulative_box_area_rect(BoxAreaType::Border, containing_block_computation())?;
+    if fragment
         .retrieve_box_fragment()
-        .and_then(|box_fragment| box_fragment.spatial_tree_node())
-        .map(|node_id| {
-            scroll_tree
-                .cumulative_sticky_offsets(node_id)
-                .map(Au::from_f32_px)
-                .cast_unit()
-        });
+        .is_some_and(|box_fragment| box_fragment.with_style().is_inline_box())
+    {
+        border_box.size = fragments
+            .iter()
+            .skip(1)
+            .filter_map(|fragment| {
+                fragment
+                    .cumulative_box_area_rect(BoxAreaType::Border, containing_block_computation())
+            })
+            .fold(border_box, |unioned_rect, rect| rect.union(&unioned_rect))
+            .size;
+    }
+    let cumulative_sticky_offsets = scroll_tree.and_then(|scroll_tree| {
+        fragment
+            .retrieve_box_fragment()
+            .and_then(|box_fragment| box_fragment.spatial_tree_node())
+            .map(|node_id| {
+                scroll_tree
+                    .cumulative_sticky_offsets(node_id)
+                    .map(Au::from_f32_px)
+                    .cast_unit()
+            })
+    });
     border_box = border_box.translate(cumulative_sticky_offsets.unwrap_or_default());
 
     // 2.  If the offsetParent of the element is null return the x-coordinate of the left
@@ -759,20 +940,24 @@ pub fn process_offset_parent_query(
         if let Some(grandparent_fragment) = offset_parent_fragment.grandparent_box_fragment() {
             grandparent_fragment.offset_by_containing_block(
                 &grandparent_fragment.border_rect(),
-                layout_thread.into(),
+                containing_block_computation(),
             )
         } else {
-            parent_fragment
-                .offset_by_containing_block(&parent_fragment.padding_rect(), layout_thread.into())
+            parent_fragment.offset_by_containing_block(
+                &parent_fragment.padding_rect(),
+                containing_block_computation(),
+            )
         }
     } else {
-        parent_fragment
-            .offset_by_containing_block(&parent_fragment.padding_rect(), layout_thread.into())
+        parent_fragment.offset_by_containing_block(
+            &parent_fragment.padding_rect(),
+            containing_block_computation(),
+        )
     }
     .translate(
         cumulative_sticky_offsets
-            .and_then(|_| parent_fragment.spatial_tree_node())
-            .map(|node_id| {
+            .and_then(|_| Some((scroll_tree?, parent_fragment.spatial_tree_node()?)))
+            .map(|(scroll_tree, node_id)| {
                 scroll_tree
                     .cumulative_sticky_offsets(node_id)
                     .map(Au::from_f32_px)
@@ -815,6 +1000,49 @@ fn is_containing_block_for_position(
             ancestor_style.establishes_containing_block_for_all_descendants(ancestor_flags)
         },
     }
+}
+
+/// Whether `node` or one of its ancestors is sticky positioned, which offsets it by an
+/// amount only the stacking context tree knows.
+pub(crate) fn has_sticky_inclusive_ancestor(node: ServoLayoutNode<'_>) -> bool {
+    let mut current = Some(node);
+    while let Some(ancestor) = current {
+        if style_and_flags_for_node(&ancestor)
+            .is_some_and(|(style, _)| style.clone_position() == Position::Sticky)
+        {
+            return true;
+        }
+        #[expect(unsafe_code)]
+        let parent = unsafe { ancestor.dangerous_flat_tree_parent() };
+        current = parent;
+    }
+    false
+}
+
+/// Whether `node` lies in the viewport's coordinate space shifted by nothing but the scroll
+/// offsets of its scroll containers, and if so whether it is fixed to the viewport (and not
+/// moved by viewport scrolling). Returns `None` when a transform, perspective or sticky
+/// positioning applies to `node` or one of its ancestors, or when a fixed positioned box has a
+/// containing block other than the viewport: then only the stacking context tree knows.
+pub(crate) fn is_fixed_to_untransformed_viewport(node: ServoLayoutNode<'_>) -> Option<bool> {
+    let mut fixed = false;
+    let mut current = Some(node);
+    while let Some(ancestor) = current {
+        if let Some((style, flags)) = style_and_flags_for_node(&ancestor) {
+            let position = style.clone_position();
+            if position == Position::Sticky ||
+                style.has_effective_transform_or_perspective(flags) ||
+                (fixed && style.establishes_containing_block_for_all_descendants(flags))
+            {
+                return None;
+            }
+            fixed |= position == Position::Fixed;
+        }
+        #[expect(unsafe_code)]
+        let parent = unsafe { ancestor.dangerous_flat_tree_parent() };
+        current = parent;
+    }
+    Some(fixed)
 }
 
 fn containing_block_for_node<'a>(node: ServoLayoutNode<'a>) -> Option<ServoLayoutNode<'a>> {
@@ -1478,6 +1706,129 @@ pub fn find_character_offset_in_fragment_descendants(
             .fragment
             .character_offset(closest_fragment.point_in_fragment)
     })
+}
+
+/// The caret positions of the text in the fragments of `node`, grouped into lines from top to
+/// bottom, each in left to right order. Positions are in the viewport.
+pub fn process_caret_stops_query(
+    node: &ServoLayoutNode,
+    stacking_context_tree: &StackingContextTree,
+) -> Vec<CaretLine> {
+    fn collect_text_fragments(
+        fragment: &Fragment,
+        origin: Vector2D<Au, CSSPixel>,
+        text_fragments: &mut Vec<(Arc<TextFragment>, Rect<Au, CSSPixel>)>,
+    ) {
+        if let Fragment::Text(text_fragment) = fragment {
+            if text_fragment
+                .offsets
+                .as_ref()
+                .is_some_and(|offsets| offsets.text_origins.is_some())
+            {
+                let rect = text_fragment.base.rect().translate(origin);
+                text_fragments.push((text_fragment.clone(), rect));
+            }
+            return;
+        }
+        let Some(children) = fragment.children() else {
+            return;
+        };
+        let origin = origin +
+            fragment
+                .base()
+                .map(|base| base.rect().origin.to_vector())
+                .unwrap_or_default();
+        for child in children.iter() {
+            collect_text_fragments(child, origin, text_fragments);
+        }
+    }
+
+    let mut text_fragments = Vec::new();
+    for fragment in &node.fragments_for_pseudo(None) {
+        // The children of the editing host are positioned relative to its content box, whose
+        // position in the viewport this finds.
+        let Some(viewport_origin_in_fragment) =
+            stacking_context_tree.offset_in_fragment(fragment, Point2D::zero())
+        else {
+            continue;
+        };
+        let Some(children) = fragment.children() else {
+            continue;
+        };
+        for child in children.iter() {
+            collect_text_fragments(
+                child,
+                -viewport_origin_in_fragment.to_vector(),
+                &mut text_fragments,
+            );
+        }
+    }
+
+    let mut lines: Vec<CaretLine> = Vec::new();
+    text_fragments.sort_by_key(|(_, rect)| rect.min_y());
+    for (text_fragment, rect) in text_fragments {
+        let offsets = text_fragment
+            .offsets
+            .as_ref()
+            .expect("Only collected fragments with offsets");
+        let text_origins = offsets
+            .text_origins
+            .as_ref()
+            .expect("Only collected fragments with editable text");
+
+        let selectable =
+            text_origins.is_selectable(&offsets.character_range, &text_fragment.base.style());
+        let mut stops = Vec::new();
+        let mut push_stop = |character: usize, x: Au| {
+            if let Some((node, offset)) = text_origins.dom_position(character) {
+                stops.push(CaretStop {
+                    node: node.into(),
+                    offset,
+                    x,
+                    selectable,
+                });
+            }
+        };
+        let mut character = offsets.character_range.start;
+        let mut x = rect.min_x();
+        push_stop(character, x);
+        for glyph_store in &text_fragment.glyphs {
+            for glyph in glyph_store.glyphs() {
+                x += glyph.advance();
+                if glyph.char_is_word_separator() {
+                    x += text_fragment.justification_adjustment;
+                }
+                character += glyph.character_count();
+                push_stop(character, x);
+            }
+        }
+
+        // Fragments of one line box can have different heights, but each contains the middle
+        // of the others.
+        let middle = rect.min_y() + rect.height().scale_by(0.5);
+        // Fragments are sorted by their top, so their line is most likely one of the last.
+        match lines
+            .iter_mut()
+            .rev()
+            .find(|line| line.top <= middle && middle < line.bottom)
+        {
+            Some(line) => {
+                line.top = line.top.min(rect.min_y());
+                line.bottom = line.bottom.max(rect.max_y());
+                line.stops.extend(stops);
+            },
+            None => lines.push(CaretLine {
+                top: rect.min_y(),
+                bottom: rect.max_y(),
+                stops,
+            }),
+        }
+    }
+    for line in &mut lines {
+        line.stops.sort_by_key(|stop| stop.x);
+    }
+    lines.sort_by_key(|line| line.top);
+    lines
 }
 
 pub fn process_containing_block_query(node: ServoLayoutNode) -> Option<UntrustedNodeAddress> {
