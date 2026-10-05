@@ -620,6 +620,42 @@ impl ShapedTextSlice {
     pub fn glyphs(&self) -> impl DoubleEndedIterator<Item = GlyphInfo<'_>> + use<'_> {
         self.shaped_text.glyph_slice(self.glyph_range.clone())
     }
+
+    /// The longest leading part of this left-to-right slice whose advance is at most
+    /// `max_advance`, cut between characters (the glyphs of one character stay together).
+    pub fn truncated_to_advance(&self, max_advance: Au) -> Arc<ShapedTextSlice> {
+        assert!(!self.shaped_text.is_rtl, "Only left-to-right text is truncated");
+        let mut glyph_count = 0;
+        let mut character_count = 0;
+        let mut total_advance = Au::zero();
+        let mut total_word_separators = 0;
+        let mut glyphs = self.glyphs().peekable();
+        while let Some(glyph) = glyphs.next() {
+            let mut cluster_advance = glyph.advance();
+            let mut cluster_glyphs = 1;
+            let cluster_word_separators = usize::from(glyph.char_is_word_separator());
+            while let Some(continuation) = glyphs.next_if(|glyph| glyph.character_count() == 0) {
+                cluster_advance += continuation.advance();
+                cluster_glyphs += 1;
+            }
+            if total_advance + cluster_advance > max_advance {
+                break;
+            }
+            glyph_count += cluster_glyphs;
+            character_count += glyph.character_count();
+            total_advance += cluster_advance;
+            total_word_separators += cluster_word_separators;
+        }
+        Arc::new(ShapedTextSlice {
+            shaped_text: self.shaped_text.clone(),
+            glyph_range: self.glyph_range.start..self.glyph_range.start + glyph_count,
+            total_advance,
+            character_count,
+            is_whitespace: self.is_whitespace,
+            ends_with_whitespace: false,
+            total_word_separators,
+        })
+    }
 }
 
 /// A data structure used to efficiently slice up a [`ShapedText`] into [`ShapedTextSlice`]s.

@@ -113,7 +113,7 @@ impl Backend for OhosBackend {
             StreamType::Stream => {
                 todo!("Stream Type currently not supported!")
             },
-            StreamType::Seekable => (),
+            StreamType::Seekable | StreamType::MediaSource => (),
         }
 
         if let Some(_audio_renderer) = audio_renderer {

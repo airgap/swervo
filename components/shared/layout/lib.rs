@@ -57,7 +57,7 @@ use servo_base::id::{BrowsingContextId, PipelineId, WebViewId};
 use servo_url::{ImmutableOrigin, ServoUrl};
 use style::Atom;
 use style::animation::DocumentAnimationSet;
-use style::attr::{AttrValue, parse_integer, parse_unsigned_integer};
+use style::attr::AttrValue;
 use style::context::QuirksMode;
 use style::data::ElementDataWrapper;
 use style::device::Device;
@@ -76,8 +76,18 @@ use style_traits::CSSPixel;
 use webrender_api::units::{DeviceIntSize, LayoutPoint, LayoutVector2D};
 use webrender_api::{ExternalScrollId, ImageKey};
 
+/// Set when styling evaluated a container query or container-relative unit against a container,
+/// which happens only when a page has containers. Layout then checks after each layout whether
+/// a container changed size, see `LayoutThread::relayout_if_container_sizes_changed`.
+pub static CONTAINER_QUERIED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 pub trait GenericLayoutDataTrait: Any + MallocSizeOfTrait + Send + Sync + 'static {
     fn as_any(&self) -> &dyn Any;
+
+    /// The physical size of the content box of the node's first box in the most recent
+    /// layout, if it has one. Container queries evaluate against it.
+    fn content_box_size(&self) -> Option<euclid::default::Size2D<Au>>;
 }
 
 pub trait LayoutDataTrait: GenericLayoutDataTrait + Default {}
@@ -203,24 +213,30 @@ pub struct SVGElementData<'dom> {
     pub view_box: Option<&'dom AttrValue>,
 }
 
+/// A valid `viewBox` value as `[min_x, min_y, width, height]`.
+/// <https://svgwg.org/svg2-draft/coords.html#ViewBoxAttribute>: four numbers (decimals
+/// included, e.g. `0 0 40 19.3`) separated by whitespace and/or a comma, with a positive size.
+pub fn parse_view_box(value: &str) -> Option<[f32; 4]> {
+    let mut numbers = value
+        .split(|c: char| char_is_whitespace(c) || c == ',')
+        .filter(|number| !number.is_empty())
+        .map(str::parse::<f32>);
+    let view_box = [
+        numbers.next()?.ok()?,
+        numbers.next()?.ok()?,
+        numbers.next()?.ok()?,
+        numbers.next()?.ok()?,
+    ];
+    if numbers.next().is_some() || !(view_box[2] > 0.0) || !(view_box[3] > 0.0) {
+        return None;
+    }
+    Some(view_box)
+}
+
 impl SVGElementData<'_> {
     pub fn ratio_from_view_box(&self) -> Option<f32> {
-        let mut iter = self.view_box?.chars();
-        let _min_x = parse_integer(&mut iter).ok()?;
-        let _min_y = parse_integer(&mut iter).ok()?;
-
-        let width = parse_unsigned_integer(&mut iter).ok()?;
-        if width == 0 {
-            return None;
-        }
-
-        let height = parse_unsigned_integer(&mut iter).ok()?;
-        if height == 0 {
-            return None;
-        }
-
-        let mut iter = iter.skip_while(|c| char_is_whitespace(*c));
-        iter.next().is_none().then(|| width as f32 / height as f32)
+        let [_, _, width, height] = parse_view_box(self.view_box?)?;
+        Some(width / height)
     }
 }
 

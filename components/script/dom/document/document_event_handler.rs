@@ -48,6 +48,7 @@ use style::Atom;
 use style_traits::CSSPixel;
 use webrender_api::ExternalScrollId;
 
+use crate::dom::execcommand::basecommand::CommandName;
 #[cfg(feature = "gamepad")]
 use crate::dom::bindings::codegen::Bindings::PermissionStatusBinding::PermissionName;
 use crate::dom::bindings::inheritance::{ElementTypeId, HTMLElementTypeId, NodeTypeId};
@@ -1537,6 +1538,15 @@ impl DocumentEventHandler {
             return flags.into();
         }
 
+        // <https://w3c.github.io/clipboard-apis/#clipboard-actions>: the platform's cut, copy and
+        // paste shortcuts run the clipboard actions, firing cut/copy/paste at the focus, whose
+        // default action edits text controls.
+        if keyboard_event.event.state == KeyState::Down &&
+            let Some(action) = clipboard_action_for_shortcut(&keyboard_event.event)
+        {
+            return self.handle_editing_action(cx, None, action);
+        }
+
         // https://w3c.github.io/uievents/#keys-cancelable-keys
         // it MUST prevent the respective beforeinput and input
         // (and keypress if supported) events from being generated
@@ -1561,6 +1571,19 @@ impl DocumentEventHandler {
             let event = keypress_event.upcast::<Event>();
             event.fire(cx, target);
             flags = event.flags();
+        }
+
+        // Keys typed into an editing host (contenteditable) edit it. Text controls edit
+        // themselves in their keydown handling.
+        if keyboard_event.event.state == KeyState::Down &&
+            !keyboard_event.event.is_composing &&
+            !flags.contains(EventFlags::Canceled) &&
+            target
+                .downcast::<Node>()
+                .is_some_and(|node| node.editing_host_of().is_some()) &&
+            let Some((command, data)) = typing_command(&keyboard_event.event)
+        {
+            self.window.Document().edit_by_typing(cx, command, data);
         }
 
         flags.into()
@@ -3024,4 +3047,44 @@ impl Element {
             .Host()
             .inclusive_ancestor_element_in_non_ua_shadow_root()
     }
+}
+
+/// The clipboard action of a cut, copy or paste shortcut: Ctrl (Command on macOS) with X, C or V.
+fn clipboard_action_for_shortcut(
+    event: &keyboard_types::KeyboardEvent,
+) -> Option<EditingActionEvent> {
+    let command = if cfg!(target_os = "macos") {
+        keyboard_types::Modifiers::META
+    } else {
+        keyboard_types::Modifiers::CONTROL
+    };
+    if !event.modifiers.contains(command) || event.modifiers.contains(keyboard_types::Modifiers::ALT)
+    {
+        return None;
+    }
+    let Key::Character(character) = &event.key else {
+        return None;
+    };
+    match character.to_ascii_lowercase().as_str() {
+        "x" => Some(EditingActionEvent::Cut),
+        "c" => Some(EditingActionEvent::Copy),
+        "v" => Some(EditingActionEvent::Paste),
+        _ => None,
+    }
+}
+
+/// The editing command a key performs in an editing host, with the text it inserts.
+fn typing_command(event: &keyboard_types::KeyboardEvent) -> Option<(CommandName, Option<DOMString>)> {
+    if event
+        .modifiers
+        .intersects(keyboard_types::Modifiers::CONTROL | keyboard_types::Modifiers::META)
+    {
+        return None;
+    }
+    Some(match &event.key {
+        Key::Character(text) => (CommandName::InsertText, Some(DOMString::from(text.as_str()))),
+        Key::Named(NamedKey::Enter) => (CommandName::InsertParagraph, None),
+        Key::Named(NamedKey::Backspace) => (CommandName::Delete, None),
+        _ => return None,
+    })
 }

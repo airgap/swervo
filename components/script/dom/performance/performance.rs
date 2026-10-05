@@ -23,7 +23,7 @@ use super::performanceentry::{EntryType, PerformanceEntry};
 use super::performancemark::PerformanceMark;
 use super::performancemeasure::PerformanceMeasure;
 use super::performancenavigation::PerformanceNavigation;
-use super::performancenavigationtiming::PerformanceNavigationTiming;
+use super::performancetiming::PerformanceTiming;
 use super::performanceobserver::PerformanceObserver as DOMPerformanceObserver;
 use crate::dom::PERFORMANCE_TIMING_ATTRIBUTES;
 use crate::dom::bindings::codegen::Bindings::PerformanceBinding::{
@@ -535,16 +535,8 @@ impl Performance {
 
 impl PerformanceMethods<crate::DomTypeHolder> for Performance {
     /// <https://w3c.github.io/navigation-timing/#dom-performance-timing>
-    fn Timing(&self) -> DomRoot<PerformanceNavigationTiming> {
-        let entries = self.GetEntriesByType(DOMString::from("navigation"));
-        if !entries.is_empty() {
-            return DomRoot::from_ref(
-                entries[0]
-                    .downcast::<PerformanceNavigationTiming>()
-                    .unwrap(),
-            );
-        }
-        unreachable!("Are we trying to expose Performance.timing in workers?");
+    fn Timing(&self) -> DomRoot<PerformanceTiming> {
+        PerformanceTiming::new(&self.global(), CanGc::deprecated_note())
     }
 
     /// <https://w3c.github.io/navigation-timing/#dom-performance-navigation>
@@ -559,7 +551,7 @@ impl PerformanceMethods<crate::DomTypeHolder> for Performance {
 
     /// <https://www.w3.org/TR/hr-time-2/#dom-performance-timeorigin>
     fn TimeOrigin(&self) -> DOMHighResTimeStamp {
-        (self.time_origin - CrossProcessInstant::epoch()).to_dom_high_res_time_stamp()
+        unix_epoch_time_stamp(self.time_origin)
     }
 
     /// <https://www.w3.org/TR/performance-timeline-2/#dom-performance-getentries>
@@ -815,6 +807,15 @@ impl PerformanceMethods<crate::DomTypeHolder> for Performance {
         GetOnresourcetimingbufferfull,
         SetOnresourcetimingbufferfull
     );
+}
+
+/// `instant` in milliseconds since the Unix epoch. `CrossProcessInstant`'s own epoch is
+/// platform-specific (boot time on Linux), but `timeOrigin` and the legacy `performance.timing`
+/// are wall-clock times that pages compare with `Date.now()`.
+/// <https://w3c.github.io/hr-time/#dfn-estimated-monotonic-time-of-the-unix-epoch>
+pub(crate) fn unix_epoch_time_stamp(instant: CrossProcessInstant) -> DOMHighResTimeStamp {
+    let since_unix_epoch = time::OffsetDateTime::now_utc() - time::OffsetDateTime::UNIX_EPOCH;
+    (since_unix_epoch - (CrossProcessInstant::now() - instant)).to_dom_high_res_time_stamp()
 }
 
 pub(crate) trait ToDOMHighResTimeStamp {

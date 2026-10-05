@@ -18,7 +18,13 @@ use crate::dom::bindings::error::{Error, ErrorResult};
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
+use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
+use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
+use crate::dom::bindings::inheritance::Castable;
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::documentfragment::DocumentFragment;
+use crate::dom::node::Node;
+use crate::dom::text::Text;
 use crate::dom::texttrackcue::TextTrackCue;
 use crate::dom::vttregion::VTTRegion;
 use crate::dom::window::Window;
@@ -206,8 +212,19 @@ impl VTTCueMethods<crate::DomTypeHolder> for VTTCue {
     }
 
     /// <https://w3c.github.io/webvtt/#dom-vttcue-getcueashtml>
-    fn GetCueAsHTML(&self) -> DomRoot<DocumentFragment> {
-        todo!()
+    ///
+    /// The cue text with its markup dropped: the WebVTT cue text parser that would turn `<b>`,
+    /// `<c.class>`, `<v name>`, ruby and timestamp tags into elements isn't implemented, but a
+    /// fragment of the plain text is what captions need to be readable.
+    fn GetCueAsHTML(&self, cx: &mut JSContext) -> DomRoot<DocumentFragment> {
+        let document = self.global().as_window().Document();
+        let fragment = DocumentFragment::new(cx, &document);
+        let text = Text::new(cx, DOMString::from(cue_text_without_markup(&self.text.borrow().str())), &document);
+        fragment
+            .upcast::<Node>()
+            .AppendChild(cx, text.upcast())
+            .expect("a fresh fragment accepts a text child");
+        fragment
     }
 }
 
@@ -237,4 +254,25 @@ impl From<LineAndPositionSetting> for VTTCueBinding::LineAndPositionSetting {
             },
         }
     }
+}
+
+/// Cue text without its tags, with the character references WebVTT allows decoded.
+fn cue_text_without_markup(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut in_tag = false;
+    for character in text.chars() {
+        match character {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => plain.push(character),
+            _ => {},
+        }
+    }
+    plain
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&nbsp;", "\u{a0}")
+        .replace("&lrm;", "\u{200e}")
+        .replace("&rlm;", "\u{200f}")
+        .replace("&amp;", "&")
 }

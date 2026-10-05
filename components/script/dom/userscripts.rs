@@ -18,6 +18,12 @@ pub(crate) fn load_script(head: &HTMLHeadElement) {
     let win = DomRoot::from_ref(doc.window());
     doc.add_delayed_task(task!(UserScriptExecute: |cx, win: DomRoot<Window>| {
         let global_scope = win.as_global_scope();
+        // Userscripts are script like the page's own: a document that can't run script
+        // (sandboxed without allow-scripts, or no longer fully active by the time this task
+        // runs) mustn't run them, and evaluation asserts as much.
+        if !global_scope.can_run_script() {
+            return;
+        }
         let mut realm = enter_auto_realm(cx, global_scope);
         let cx = &mut realm.current_realm();
 

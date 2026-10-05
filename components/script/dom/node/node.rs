@@ -114,7 +114,7 @@ use crate::dom::node::virtualmethods::{VirtualMethods, vtable_for};
 use crate::dom::pointerevent::{PointerEvent, PointerId};
 use crate::dom::range::WeakRangeVec;
 use crate::dom::raredata::NodeRareData;
-use crate::dom::servoparser::html::{HtmlSerialize, StylePrefix};
+use crate::dom::servoparser::html::{AttributeRewrite, HtmlSerialize};
 use crate::dom::servoparser::serialize_html_fragment;
 use crate::dom::shadowroot::{IsUserAgentWidget, ShadowRoot};
 use crate::dom::text::Text;
@@ -3233,16 +3233,16 @@ impl Node {
         self.xml_serialize_inner(traversal_scope, HtmlSerialize::new(self))
     }
 
-    /// [`Self::xml_serialize`], with `style_prefix`'s declarations merged into each element's
-    /// `style` attribute in the output.
-    pub(crate) fn xml_serialize_with_style_prefix(
+    /// [`Self::xml_serialize`], with each element's attributes rewritten in the output by
+    /// `attribute_rewrite`.
+    pub(crate) fn xml_serialize_with_attribute_rewrite(
         &self,
         traversal_scope: xml_serialize::TraversalScope,
-        style_prefix: StylePrefix<'_>,
+        attribute_rewrite: AttributeRewrite<'_>,
     ) -> Fallible<DOMString> {
         self.xml_serialize_inner(
             traversal_scope,
-            HtmlSerialize::with_style_prefix(self, style_prefix),
+            HtmlSerialize::with_attribute_rewrite(self, attribute_rewrite),
         )
     }
 

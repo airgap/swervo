@@ -125,7 +125,8 @@ struct FlexItemLayoutResult {
     flex_alignment_baseline_relative_to_margin_box: Option<Au>,
 
     // The content size of this layout in the block axis. This is known before layout
-    // for replaced elements, but for non-replaced it's only known after layout.
+    // for replaced elements, but for non-replaced it's only known after layout. It includes
+    // the minimum an `aspect-ratio` gives a non-replaced item.
     content_block_size: Au,
 
     // The containing block size used to generate this layout.
@@ -386,19 +387,11 @@ impl FlexContext<'_> {
     }
 }
 
-#[derive(Debug, Default)]
-struct DesiredFlexFractionAndGrowOrShrinkFactor {
-    desired_flex_fraction: f32,
-    flex_grow_or_shrink_factor: f32,
-}
-
 #[derive(Default)]
 struct FlexItemBoxInlineContentSizesInfo {
-    outer_flex_base_size: Au,
     outer_min_main_size: Au,
     outer_max_main_size: Option<Au>,
-    min_flex_factors: DesiredFlexFractionAndGrowOrShrinkFactor,
-    max_flex_factors: DesiredFlexFractionAndGrowOrShrinkFactor,
+    content_contribution_sizes: ContentSizes,
     min_content_main_size_for_multiline_container: Au,
     depends_on_block_constraints: bool,
 }
@@ -473,63 +466,25 @@ impl FlexContainer {
         // (and check for ‘writing-mode’?)
         // - TODO: Collapsed flex items need to be skipped for intrinsic size calculation.
 
-        // <https://drafts.csswg.org/css-flexbox-1/#intrinsic-main-sizes>
-        // > It is calculated, considering only non-collapsed flex items, by:
-        // > 1. For each flex item, subtract its outer flex base size from its max-content
-        // > contribution size.
-        let mut chosen_max_flex_fraction = f32::NEG_INFINITY;
-        let mut chosen_min_flex_fraction = f32::NEG_INFINITY;
-        let mut sum_of_flex_grow_factors = 0.0;
-        let mut sum_of_flex_shrink_factors = 0.0;
-        let mut item_infos = vec![];
-
-        for kid in self.children.iter() {
-            let kid = &*kid.borrow();
-            match kid {
-                FlexLevelBox::FlexItem(item) => {
-                    sum_of_flex_grow_factors += item.style().get_position().flex_grow.0;
-                    sum_of_flex_shrink_factors += item.style().get_position().flex_shrink.0;
-
-                    let info = item.main_content_size_info(
-                        layout_context,
-                        containing_block_for_children,
-                        &self.config,
-                        &flex_context_getter,
-                    );
-
-                    // > 2. Place all flex items into lines of infinite length. Within
-                    // > each line, find the greatest (most positive) desired flex
-                    // > fraction among all the flex items. This is the line’s chosen flex
-                    // > fraction.
-                    chosen_max_flex_fraction =
-                        chosen_max_flex_fraction.max(info.max_flex_factors.desired_flex_fraction);
-                    chosen_min_flex_fraction =
-                        chosen_min_flex_fraction.max(info.min_flex_factors.desired_flex_fraction);
-
-                    item_infos.push(info)
-                },
-                FlexLevelBox::OutOfFlowAbsolutelyPositionedBox(_) => {},
-            }
-        }
-
-        let normalize_flex_fraction = |chosen_flex_fraction| {
-            if chosen_flex_fraction > 0.0 && sum_of_flex_grow_factors < 1.0 {
-                // > 3. If the chosen flex fraction is positive, and the sum of the line’s
-                // > flex grow factors is less than 1, > divide the chosen flex fraction by that
-                // > sum.
-                chosen_flex_fraction / sum_of_flex_grow_factors
-            } else if chosen_flex_fraction < 0.0 && sum_of_flex_shrink_factors < 1.0 {
-                // > If the chosen flex fraction is negative, and the sum of the line’s flex
-                // > shrink factors is less than 1, > multiply the chosen flex fraction by that
-                // > sum.
-                chosen_flex_fraction * sum_of_flex_shrink_factors
-            } else {
-                chosen_flex_fraction
-            }
-        };
-
-        let chosen_min_flex_fraction = normalize_flex_fraction(chosen_min_flex_fraction);
-        let chosen_max_flex_fraction = normalize_flex_fraction(chosen_max_flex_fraction);
+        // <https://drafts.csswg.org/css-flexbox-1/#intrinsic-main-sizes> computes these from
+        // each line's "chosen flex fraction". No browser ships that algorithm: Chrome and
+        // Firefox sum the items' min-content and max-content contributions, and pages are built
+        // against that. Under the spec algorithm one item that can't shrink (an icon next to a
+        // label) makes the whole row's min-content equal its max-content, so a row inside a
+        // shrink-to-fit box never wraps its text.
+        let item_infos: Vec<_> = self
+            .children
+            .iter()
+            .filter_map(|kid| match &*kid.borrow() {
+                FlexLevelBox::FlexItem(item) => Some(item.main_content_size_info(
+                    layout_context,
+                    containing_block_for_children,
+                    &self.config,
+                    &flex_context_getter,
+                )),
+                FlexLevelBox::OutOfFlowAbsolutelyPositionedBox(_) => None,
+            })
+            .collect();
 
         let main_gap = match self.config.flex_axis {
             FlexAxis::Row => self.style.clone_column_gap(),
@@ -551,30 +506,17 @@ impl FlexContainer {
         let mut container_depends_on_block_constraints = false;
 
         for FlexItemBoxInlineContentSizesInfo {
-            outer_flex_base_size,
             outer_min_main_size,
             outer_max_main_size,
-            min_flex_factors,
-            max_flex_factors,
+            content_contribution_sizes,
             min_content_main_size_for_multiline_container,
             depends_on_block_constraints,
         } in item_infos.iter()
         {
-            // > 4. Add each item’s flex base size to the product of its flex grow factor (scaled flex shrink
-            // > factor, if shrinking) and the chosen flex fraction, then clamp that result by the max main size
-            // > floored by the min main size.
-            // > 5. The flex container’s max-content size is the largest sum (among all the lines) of the
-            // > afore-calculated sizes of all items within a single line.
-            container_max_content_size += (*outer_flex_base_size +
-                Au::from_f32_px(
-                    max_flex_factors.flex_grow_or_shrink_factor * chosen_max_flex_fraction,
-                ))
-            .clamp_between_extremums(*outer_min_main_size, *outer_max_main_size);
+            container_max_content_size += content_contribution_sizes
+                .max_content
+                .clamp_between_extremums(*outer_min_main_size, *outer_max_main_size);
 
-            // > The min-content main size of a single-line flex container is calculated
-            // > identically to the max-content main size, except that the flex items’
-            // > min-content contributions are used instead of their max-content contributions.
-            //
             // > However, for a multi-line container, the min-content main size is simply the
             // > largest min-content contribution of all the non-collapsed flex items in the
             // > flex container. For this purpose, each item’s contribution is capped by the
@@ -582,11 +524,9 @@ impl FlexContainer {
             // > base size if the item is not shrinkable, and then further clamped by the item’s
             // > min and max main sizes.
             if self.config.flex_wrap == FlexWrap::Nowrap {
-                container_min_content_size += (*outer_flex_base_size +
-                    Au::from_f32_px(
-                        min_flex_factors.flex_grow_or_shrink_factor * chosen_min_flex_fraction,
-                    ))
-                .clamp_between_extremums(*outer_min_main_size, *outer_max_main_size);
+                container_min_content_size += content_contribution_sizes
+                    .min_content
+                    .clamp_between_extremums(*outer_min_main_size, *outer_max_main_size);
             } else {
                 container_min_content_size
                     .max_assign(*min_content_main_size_for_multiline_container);
@@ -1782,8 +1722,34 @@ impl FlexItem<'_> {
             flex_axis,
         );
 
+        // <https://drafts.csswg.org/css-sizing-4/#aspect-ratio>: a non-replaced item with an
+        // `auto` block size takes it from its inline size; its content can only make it taller.
+        let aspect_ratio_block_size = self
+            .preferred_aspect_ratio
+            .filter(|_| {
+                cross_axis_is_item_block_axis &&
+                    used_cross_size_override.is_none() &&
+                    !independent_formatting_context.is_replaced() &&
+                    self.content_cross_sizes.preferred.is_initial()
+            })
+            .map(|ratio| {
+                let block_stretch_size = containing_block
+                    .size
+                    .block
+                    .to_definite()
+                    .map(|size| Au::zero().max(size - self.pbm_auto_is_zero.cross));
+                let (_, min, max) = self.content_cross_sizes.resolve_each_extrinsic(
+                    Size::FitContent,
+                    Au::zero(),
+                    block_stretch_size,
+                );
+                ratio
+                    .compute_dependent_size(Direction::Block, used_main_size)
+                    .clamp_between_extremums(min, max)
+            });
+
         let (inline_size, block_size) = if cross_axis_is_item_block_axis {
-            let cross_size = match used_cross_size_override {
+            let cross_size = match used_cross_size_override.or(aspect_ratio_block_size) {
                 Some(s) => SizeConstraint::Definite(s),
                 None => {
                     let inline_stretch_size =
@@ -1899,6 +1865,7 @@ impl FlexItem<'_> {
             ..
         } = layout;
 
+        let content_block_size = content_block_size.max(aspect_ratio_block_size.unwrap_or_default());
         let hypothetical_cross_size = if cross_axis_is_item_block_axis {
             lazy_block_size.resolve(|| content_block_size)
         } else {
@@ -2419,21 +2386,6 @@ impl FlexItemBox {
         let outer_flex_base_size = flex_base_size + pbm_auto_is_zero.main;
         let outer_min_main_size = content_min_main_size + pbm_auto_is_zero.main;
         let outer_max_main_size = content_max_main_size.map(|v| v + pbm_auto_is_zero.main);
-        let max_flex_factors = self.desired_flex_factors_for_preferred_width(
-            content_contribution_sizes.max_content,
-            flex_base_size,
-            outer_flex_base_size,
-        );
-
-        // > The min-content main size of a single-line flex container is calculated
-        // > identically to the max-content main size, except that the flex items’
-        // > min-content contributions are used instead of their max-content contributions.
-        let min_flex_factors = self.desired_flex_factors_for_preferred_width(
-            content_contribution_sizes.min_content,
-            flex_base_size,
-            outer_flex_base_size,
-        );
-
         // > However, for a multi-line container, the min-content main size is simply the
         // > largest min-content contribution of all the non-collapsed flex items in the
         // > flex container. For this purpose, each item’s contribution is capped by the
@@ -2454,59 +2406,11 @@ impl FlexItemBox {
                 .clamp_between_extremums(outer_min_main_size, outer_max_main_size);
 
         FlexItemBoxInlineContentSizesInfo {
-            outer_flex_base_size,
             outer_min_main_size,
             outer_max_main_size,
-            min_flex_factors,
-            max_flex_factors,
+            content_contribution_sizes,
             min_content_main_size_for_multiline_container,
             depends_on_block_constraints,
-        }
-    }
-
-    fn desired_flex_factors_for_preferred_width(
-        &self,
-        preferred_width: Au,
-        flex_base_size: Au,
-        outer_flex_base_size: Au,
-    ) -> DesiredFlexFractionAndGrowOrShrinkFactor {
-        let difference = (preferred_width - outer_flex_base_size).to_f32_px();
-        let (flex_grow_or_scaled_flex_shrink_factor, desired_flex_fraction) = if difference > 0.0 {
-            // > If that result is positive, divide it by the item’s flex
-            // > grow factor if the flex grow > factor is ≥ 1, or multiply
-            // > it by the flex grow factor if the flex grow factor is < 1;
-            let flex_grow_factor = self.style().get_position().flex_grow.0;
-
-            (
-                flex_grow_factor,
-                if flex_grow_factor >= 1.0 {
-                    difference / flex_grow_factor
-                } else {
-                    difference * flex_grow_factor
-                },
-            )
-        } else if difference < 0.0 {
-            // > if the result is negative, divide it by the item’s scaled
-            // > flex shrink factor (if dividing > by zero, treat the result
-            // > as negative infinity).
-            let flex_shrink_factor = self.style().get_position().flex_shrink.0;
-            let scaled_flex_shrink_factor = flex_shrink_factor * flex_base_size.to_f32_px();
-
-            (
-                scaled_flex_shrink_factor,
-                if scaled_flex_shrink_factor != 0.0 {
-                    difference / scaled_flex_shrink_factor
-                } else {
-                    f32::NEG_INFINITY
-                },
-            )
-        } else {
-            (0.0, 0.0)
-        };
-
-        DesiredFlexFractionAndGrowOrShrinkFactor {
-            desired_flex_fraction,
-            flex_grow_or_shrink_factor: flex_grow_or_scaled_flex_shrink_factor,
         }
     }
 

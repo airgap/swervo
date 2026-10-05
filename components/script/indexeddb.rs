@@ -820,9 +820,21 @@ pub(crate) fn extract_key(
     // multiEntry flag is unset, and the result of running the steps to convert a value to a
     // multiEntry key with r otherwise. Rethrow any exceptions.
     let key = match multi_entry {
-        Some(true) => {
-            // TODO: implement convert_value_to_multientry_key
-            unimplemented!("multiEntry keys are not yet supported");
+        // <https://w3c.github.io/IndexedDB/#convert-a-value-to-a-multientry-key>, approximated:
+        // an array becomes the array key of its unique subkeys (the backend indexes each one),
+        // but an invalid subkey makes the whole value invalid instead of being skipped.
+        Some(true) => match convert_value_to_key(cx, r.handle(), None)? {
+            ConversionResult::Valid(IndexedDBKeyType::Array(subkeys)) => {
+                let mut unique: Vec<IndexedDBKeyType> = Vec::with_capacity(subkeys.len());
+                for subkey in subkeys {
+                    if !unique.contains(&subkey) {
+                        unique.push(subkey);
+                    }
+                }
+                IndexedDBKeyType::Array(unique)
+            },
+            ConversionResult::Valid(key) => key,
+            ConversionResult::Invalid => return Ok(ExtractionResult::Invalid),
         },
         _ => match convert_value_to_key(cx, r.handle(), None)? {
             ConversionResult::Valid(key) => key,

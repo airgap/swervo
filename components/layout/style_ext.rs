@@ -1366,6 +1366,9 @@ impl From<stylo::Display> for Display {
             stylo::DisplayInside::TableFooterGroup |
             stylo::DisplayInside::TableRow |
             stylo::DisplayInside::TableCell => unreachable!("Internal DisplayInside found"),
+            stylo::DisplayInside::WebkitBox => {
+                unreachable!("StyleAdjuster lays -webkit-box out as a block or flex container")
+            },
         };
         Display::GeneratingBox(DisplayGeneratingBox::OutsideInside { outside, inside })
     }

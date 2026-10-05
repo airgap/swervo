@@ -25,7 +25,10 @@ use js::jsapi::{Heap, JSObject};
 use js::jsval::JSVal;
 use js::realm::CurrentRealm;
 use js::rust::HandleObject;
-use layout_api::{LayoutDamage, QueryMsg, ScrollContainerQueryFlags, StyleData, with_layout_state};
+use layout_api::{
+    LayoutDamage, QueryMsg, SVG_PAINT_PROPERTIES, ScrollContainerQueryFlags, StyleData,
+    with_layout_state,
+};
 use net_traits::ReferrerPolicy;
 use net_traits::request::{CorsSettings, CredentialsMode};
 use script_bindings::cell::{DomRefCell, Ref, RefMut};
@@ -166,7 +169,7 @@ use crate::dom::promise::Promise;
 use crate::dom::range::Range;
 use crate::dom::raredata::ElementRareData;
 use crate::dom::sanitizer::Sanitizer;
-use crate::dom::scrolling_box::{ScrollAxisState, ScrollingBox};
+use crate::dom::scrolling_box::{ScrollAxisState, ScrollRequirement, ScrollingBox};
 use crate::dom::servoparser::ServoParser;
 use crate::dom::shadowroot::{IsUserAgentWidget, ShadowRoot};
 use crate::dom::svg::svgsvgelement::SVGSVGElement;
@@ -374,6 +377,52 @@ impl Element {
 
     pub(crate) fn clean_up_style_data(&self) {
         self.style_data.borrow_mut().take();
+    }
+
+    /// Restyle the `:has()` anchors whose match may depend on a change at this element: a state
+    /// or attribute change here, or a change to its children. Matching a `:has()` selector flags
+    /// the anchor and every element its search visits (ancestor direction for descendant
+    /// arguments, sibling direction for `+`/`~` ones), so the anchors are found by walking up
+    /// from a visited element and, where the search ran along siblings, back over preceding
+    /// siblings. Each anchor restyles with its subtree, as selectors like `.a:has(.b) .c` style
+    /// its descendants. stylo's precise relative-selector invalidation is driven by Gecko's
+    /// restyle manager, which servo doesn't have. Elements no `:has()` search reached carry
+    /// none of these flags, so pages without `:has()` never walk.
+    pub(crate) fn invalidate_relative_selector_anchors(&self) {
+        const ANCHORS: ElementSelectorFlags = ElementSelectorFlags::ANCHORS_RELATIVE_SELECTOR
+            .union(ElementSelectorFlags::ANCHORS_RELATIVE_SELECTOR_NON_SUBJECT);
+        let searched = ElementSelectorFlags::RELATIVE_SELECTOR_SEARCH_DIRECTION_ANCESTOR_SIBLING;
+        if !self.get_selector_flags().intersects(searched | ANCHORS) {
+            return;
+        }
+        let document = self.owner_document();
+        let restyle_if_anchor = |element: &Element| {
+            if element.get_selector_flags().intersects(ANCHORS) {
+                document
+                    .ensure_pending_restyle(element)
+                    .hint
+                    .insert(RestyleHint::restyle_subtree());
+            }
+        };
+        for ancestor in self
+            .upcast::<Node>()
+            .inclusive_ancestors(ShadowIncluding::No)
+            .filter_map(DomRoot::downcast::<Element>)
+        {
+            restyle_if_anchor(&ancestor);
+            if ancestor
+                .get_selector_flags()
+                .intersects(ElementSelectorFlags::RELATIVE_SELECTOR_SEARCH_DIRECTION_SIBLING)
+            {
+                for sibling in ancestor
+                    .upcast::<Node>()
+                    .preceding_siblings()
+                    .filter_map(DomRoot::downcast::<Element>)
+                {
+                    restyle_if_anchor(&sibling);
+                }
+            }
+        }
     }
 
     pub(crate) fn restyle(&self, damage: NodeDamage) {
@@ -1319,6 +1368,18 @@ impl<'dom> LayoutDom<'dom, Element> {
                             vec![specified::Image::for_cascade(url.into_url().into())].into(),
                         ),
                     ));
+                }
+            }
+        }
+
+        if *self.namespace() == ns!(svg) {
+            for property in SVG_PAINT_PROPERTIES {
+                if let Some(AttrValue::Declaration { block, lock, .. }) =
+                    self.get_attr_for_layout(&ns!(), &LocalName::from(property.name()))
+                {
+                    for declaration in block.read_with(&lock.read()).declarations() {
+                        push(declaration.clone());
+                    }
                 }
             }
         }
@@ -3657,6 +3718,24 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
         // element to the user’s attention.
     }
 
+    /// Blink's `scrollIntoViewIfNeeded()`: scroll only an element that is out of view, to the
+    /// center of the scrollport (or the nearest edge without `centerIfNeeded`).
+    fn ScrollIntoViewIfNeeded(&self, cx: &mut JSContext, center_if_needed: bool) {
+        if !self.has_css_layout_box() {
+            return;
+        }
+        let position = if center_if_needed {
+            ScrollLogicalPosition::Center
+        } else {
+            ScrollLogicalPosition::Nearest
+        };
+        let axis = ScrollAxisState {
+            position,
+            requirement: ScrollRequirement::IfNotVisible,
+        };
+        self.scroll_into_view_with_options(cx, ScrollBehavior::Auto, axis, axis, None, None);
+    }
+
     /// <https://drafts.csswg.org/cssom-view/#dom-element-scrollwidth>
     fn ScrollWidth(&self) -> i32 {
         self.upcast::<Node>().scroll_area().size.width
@@ -4949,6 +5028,7 @@ impl VirtualMethods for Element {
             s.children_changed(cx, mutation);
         }
 
+        self.invalidate_relative_selector_anchors();
         let flags = self.get_selector_flags();
         if flags.intersects(ElementSelectorFlags::HAS_SLOW_SELECTOR) {
             // All children of this node need to be restyled when any child changes.
@@ -5215,6 +5295,7 @@ impl Element {
                 snapshot.state = Some(self.state());
             }
         }
+        self.invalidate_relative_selector_anchors();
 
         self.state.set(state);
     }

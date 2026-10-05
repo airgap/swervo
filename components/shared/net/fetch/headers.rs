@@ -275,12 +275,9 @@ pub fn extract_mime_type(headers: &HeaderMap) -> Option<Vec<u8>> {
 
 pub fn extract_mime_type_as_mime(headers: &HeaderMap) -> Option<mime::Mime> {
     extract_mime_type_as_dataurl_mime(headers).and_then(|mime: DataUrlMime| {
-        // Try to transform a data-url::mime::Mime into a mime::Mime
-        let mut mime_as_str = format!("{}/{}", mime.type_, mime.subtype);
-        for p in mime.parameters {
-            mime_as_str.push_str(format!("; {}={}", p.0, p.1).as_str());
-        }
-        mime_as_str.parse().ok()
+        // Through data-url's serialization, which re-quotes parameter values: wikimedia's math
+        // SVGs carry `profile="https://…"`, and unquoted that no longer parses.
+        mime.to_string().parse().ok()
     })
 }
 

@@ -635,36 +635,13 @@ impl<T: ClipboardProvider> TextInput<T> {
                 self.select_all();
                 KeyReaction::RedrawSelection
             })
-            .shortcut(CMD_OR_CONTROL, 'X', || {
-                if let Some(text) = self.get_selection_text() {
-                    self.clipboard_provider.set_text(text);
-                    self.delete_selection();
-                }
-                KeyReaction::DispatchInput(None, IsComposing::NotComposing, InputType::DeleteByCut)
-            })
-            .shortcut(CMD_OR_CONTROL, 'C', || {
-                // TODO(stevennovaryo): we should not provide text to clipboard for type=password
-                if let Some(text) = self.get_selection_text() {
-                    self.clipboard_provider.set_text(text);
-                }
-                KeyReaction::DispatchInput(None, IsComposing::NotComposing, InputType::Nothing)
-            })
-            .shortcut(CMD_OR_CONTROL, 'V', || {
-                if let Ok(text_content) = self.clipboard_provider.get_text() {
-                    self.insert(&text_content);
-                    KeyReaction::DispatchInput(
-                        Some(text_content),
-                        IsComposing::NotComposing,
-                        InputType::InsertFromPaste,
-                    )
-                } else {
-                    KeyReaction::DispatchInput(
-                        Some("".to_string()),
-                        IsComposing::NotComposing,
-                        InputType::InsertFromPaste,
-                    )
-                }
-            })
+            // Cut, copy and paste run after the keydown, as the cut/copy/paste clipboard events
+            // whose default action edits the text (see `DocumentEventHandler::
+            // handle_keyboard_event`), so pages see those events. Matched here so the key
+            // isn't inserted as text.
+            .shortcut(CMD_OR_CONTROL, 'X', || KeyReaction::Nothing)
+            .shortcut(CMD_OR_CONTROL, 'C', || KeyReaction::Nothing)
+            .shortcut(CMD_OR_CONTROL, 'V', || KeyReaction::Nothing)
             .shortcut(Modifiers::empty(), Key::Named(NamedKey::Delete), || {
                 if self.delete_unit_or_selection(RopeMovement::Grapheme, Direction::Forward) {
                     KeyReaction::DispatchInput(

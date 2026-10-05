@@ -278,6 +278,19 @@ impl GenericLayoutDataTrait for DOMLayoutData {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+
+    fn content_box_size(&self) -> Option<euclid::default::Size2D<app_units::Au>> {
+        self.0
+            .borrow()
+            .fragments()
+            .iter()
+            .find_map(|fragment| match fragment {
+                Fragment::Box(box_fragment) | Fragment::Float(box_fragment) => {
+                    Some(box_fragment.content_rect().size.to_untyped())
+                },
+                _ => None,
+            })
+    }
 }
 
 pub struct BoxSlot<'dom> {
@@ -666,6 +679,14 @@ impl<'dom> NodeExt<'dom> for ServoLayoutNode<'dom> {
                         else {
                             return false;
                         };
+                        // A box that became absolutely positioned or floated needs a new
+                        // out-of-flow box built by its parent; rebuilt in place as in-flow it
+                        // was never laid out, so it vanished.
+                        if info.style.clone_position().is_absolutely_positioned() ||
+                            info.style.clone_float().is_floating()
+                        {
+                            return false;
+                        }
                         if !matches!(
                             BlockLevelCreator::new_for_inflow_block_level_element(
                                 &info,

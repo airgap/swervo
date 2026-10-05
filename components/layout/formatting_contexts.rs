@@ -12,6 +12,7 @@ use style::context::SharedStyleContext;
 use style::logical_geometry::Direction;
 use style::properties::ComputedValues;
 use style::selector_parser::PseudoElement;
+use style::values::specified::align::AlignFlags;
 
 use crate::context::LayoutContext;
 use crate::dom::WeakLayoutBox;
@@ -19,18 +20,19 @@ use crate::dom_traversal::{Contents, NodeAndStyleInfo, NonReplacedContents};
 use crate::flexbox::FlexContainer;
 use crate::flow::BlockFormattingContext;
 use crate::fragment_tree::{BaseFragmentInfo, FragmentFlags};
+use crate::geom::PhysicalSize;
 use crate::layout_box_base::{IndependentFormattingContextLayoutResult, LayoutBoxBase};
 use crate::positioned::{LayoutRootLayoutInputs, PositioningContext};
 use crate::replaced::ReplacedContents;
 use crate::sizing::{
     self, ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, LazySize,
 };
-use crate::style_ext::{AspectRatio, Display, DisplayInside, LayoutStyle};
+use crate::style_ext::{AspectRatio, ComputedValuesExt, Display, DisplayInside, LayoutStyle};
 use crate::table::Table;
 use crate::taffy::TaffyContainer;
 use crate::{
     ArcRefCell, ConstraintSpace, ContainingBlock, IndefiniteContainingBlock, LogicalVec2,
-    PropagatedBoxTreeData,
+    PropagatedBoxTreeData, SizeConstraint,
 };
 
 /// <https://drafts.csswg.org/css-display/#independent-formatting-context>
@@ -290,8 +292,32 @@ impl IndependentFormattingContext {
         layout_context: &LayoutContext,
         constraint_space: &ConstraintSpace,
     ) -> InlineContentSizesResult {
-        self.base
-            .inline_content_sizes(layout_context, constraint_space, &self.contents)
+        let result = self
+            .base
+            .inline_content_sizes(layout_context, constraint_space, &self.contents);
+        // <https://drafts.csswg.org/css-sizing-4/#aspect-ratio-size-transfers>: a non-replaced
+        // box with an `aspect-ratio` and a definite block size takes its automatic inline size
+        // from the ratio (an inline-block with `height: 50px; aspect-ratio: 2` is 100px wide),
+        // but no narrower than its min-content size. Replaced boxes transfer in their own
+        // content sizes.
+        if self.is_replaced() {
+            return result;
+        }
+        let (Some(ratio), SizeConstraint::Definite(block_size)) =
+            (constraint_space.preferred_aspect_ratio, constraint_space.block_size)
+        else {
+            return result;
+        };
+        let inline_size = ratio
+            .compute_dependent_size(Direction::Inline, block_size)
+            .max(result.sizes.min_content);
+        InlineContentSizesResult {
+            sizes: ContentSizes {
+                min_content: inline_size,
+                max_content: inline_size,
+            },
+            depends_on_block_constraints: true,
+        }
     }
 
     /// Computes the tentative intrinsic block sizes that may be needed while computing
@@ -470,11 +496,12 @@ impl IndependentFormattingContext {
                 }
                 replaced_layout
             },
-            IndependentFormattingContextContents::Flow(bfc) => bfc.layout(
-                layout_context,
-                positioning_context,
-                containing_block_for_children,
-            ),
+            IndependentFormattingContextContents::Flow(bfc) => {
+                let mut result =
+                    bfc.layout(layout_context, positioning_context, containing_block_for_children);
+                align_block_container_content(self.style(), lazy_block_size, &mut result);
+                result
+            },
             IndependentFormattingContextContents::Flex(fc) => fc.layout(
                 layout_context,
                 positioning_context,
@@ -580,8 +607,9 @@ impl IndependentFormattingContext {
             IndependentFormattingContextContents::Replaced(replaced, _) => {
                 replaced.preferred_aspect_ratio(self.style(), padding_border_sums)
             },
-            // TODO: support preferred aspect ratios on non-replaced boxes.
-            _ => None,
+            _ => self
+                .style()
+                .preferred_aspect_ratio(None, padding_border_sums),
         }
     }
 
@@ -636,4 +664,39 @@ impl ComputeInlineContentSizes for IndependentFormattingContextContents {
             },
         }
     }
+}
+
+/// <https://drafts.csswg.org/css-align/#distribution-block>: `align-content` on a block container
+/// taller than its content moves the content to the center or end. Buttons center their label
+/// this way (see servo.css), like Chrome. Horizontal writing modes only.
+fn align_block_container_content(
+    style: &ComputedValues,
+    lazy_block_size: &LazySize,
+    result: &mut IndependentFormattingContextLayoutResult,
+) {
+    let alignment = style.get_position().align_content.primary().value();
+    if !matches!(
+        alignment,
+        AlignFlags::CENTER | AlignFlags::END | AlignFlags::FLEX_END
+    ) || !style.writing_mode.is_horizontal()
+    {
+        return;
+    }
+    let content_block_size = result.content_block_size;
+    let free_space = lazy_block_size.resolve(|| content_block_size) - content_block_size;
+    if free_space <= Au(0) {
+        return;
+    }
+    let offset = if alignment == AlignFlags::CENTER {
+        free_space / 2
+    } else {
+        free_space
+    };
+    for fragment in &result.fragments {
+        if let Some(base) = fragment.base() {
+            base.translate_rect(PhysicalSize::new(Au(0), offset));
+        }
+    }
+    result.baselines.first = result.baselines.first.map(|baseline| baseline + offset);
+    result.baselines.last = result.baselines.last.map(|baseline| baseline + offset);
 }

@@ -24,8 +24,12 @@ use crate::dom::bindings::root::MutNullableDom;
 use crate::dom::focusevent::FocusEventType;
 use crate::dom::node::focus::FocusNavigationScopeOwner;
 use crate::dom::types::{
-    Element, EventTarget, FocusEvent, HTMLElement, HTMLIFrameElement, KeyboardEvent, Window,
+    Element, EventTarget, FocusEvent, HTMLElement, HTMLIFrameElement, HTMLInputElement,
+    HTMLTextAreaElement, KeyboardEvent, Window,
 };
+use crate::dom::bindings::codegen::Bindings::HTMLInputElementBinding::HTMLInputElementMethods;
+use crate::dom::bindings::codegen::Bindings::HTMLTextAreaElementBinding::HTMLTextAreaElementMethods;
+use crate::dom::bindings::str::DOMString;
 use crate::dom::{Document, Event, EventBubbles, EventCancelable, Node, NodeTraits};
 use crate::realms::enter_auto_realm;
 
@@ -153,6 +157,10 @@ pub(crate) struct DocumentFocusHandler {
     has_focus: Cell<bool>,
     /// <https://html.spec.whatwg.org/multipage/#sequential-focus-navigation-starting-point>
     sequential_focus_navigation_starting_point: MutNullableDom<Node>,
+    /// The focused text control and its value when focused, so blurring it after an edit
+    /// fires `change`.
+    focused_text_control: MutNullableDom<Element>,
+    focused_text_control_value: DomRefCell<Option<DOMString>>,
 }
 
 impl DocumentFocusHandler {
@@ -163,6 +171,8 @@ impl DocumentFocusHandler {
             focus_sequence: Cell::new(FocusSequenceNumber::default()),
             has_focus: Cell::new(has_focus),
             sequential_focus_navigation_starting_point: Default::default(),
+            focused_text_control: Default::default(),
+            focused_text_control_value: Default::default(),
         }
     }
 
@@ -389,6 +399,16 @@ impl DocumentFocusHandler {
                 _ => None,
             };
 
+            // Step 2.2: If entry is an input element, and the change event applies to the
+            // element, and the element does not have a defined activation behavior, and the
+            // user has changed the element's value or its list of selected files while the
+            // control was focused without committing that change, then fire an event named
+            // change at the element, with the bubbles attribute initialized to true.
+            if let Some(element) = blur_event_target.and_then(|target| target.downcast::<Element>())
+            {
+                self.fire_change_if_edited_since_focus(cx, element);
+            }
+
             // Step 2.4: If blur event target is not null, fire a focus event named blur at
             // blur event target, with related blur target as the related target.
             if let Some(blur_event_target) = blur_event_target {
@@ -479,7 +499,42 @@ impl DocumentFocusHandler {
         }
     }
 
-    /// <https://html.spec.whatwg.org/multipage/#fire-a-focus-event>
+    /// The value of `element` if it is a text control (`<textarea>`, or an `<input>` taking
+    /// text), whose edits commit on blur.
+    fn text_control_value(element: &Element) -> Option<DOMString> {
+        if let Some(input) = element.downcast::<HTMLInputElement>() {
+            return input.is_textual_or_password().then(|| input.Value());
+        }
+        element
+            .downcast::<HTMLTextAreaElement>()
+            .map(|textarea| textarea.Value())
+    }
+
+    /// Fires `change` at `element` if it is the focused text control and its value changed
+    /// since it was focused. Also called when Enter commits an edit.
+    pub(crate) fn fire_change_if_edited_since_focus(&self, cx: &mut JSContext, element: &Element) {
+        if self.focused_text_control.get().as_deref() != Some(element) {
+            return;
+        }
+        let Some(value) = Self::text_control_value(element) else {
+            return;
+        };
+        let edited = self
+            .focused_text_control_value
+            .borrow()
+            .as_ref()
+            .is_some_and(|value_at_focus| *value_at_focus != value);
+        *self.focused_text_control_value.borrow_mut() = Some(value);
+        if edited {
+            element
+                .upcast::<EventTarget>()
+                .fire_bubbling_event(cx, atom!("change"));
+        }
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#fire-a-focus-event>, followed for elements by
+    /// the bubbling `focusin`/`focusout` of <https://w3c.github.io/uievents/#event-type-focusin>,
+    /// which React's `onFocus`/`onBlur` listen for.
     pub(crate) fn fire_focus_event(
         &self,
         cx: &mut JSContext,
@@ -505,6 +560,38 @@ impl DocumentFocusHandler {
         let event = event.upcast::<Event>();
         event.set_trusted(true);
         event.fire(cx, event_target);
+
+        let Some(element) = event_target.downcast::<Element>() else {
+            return;
+        };
+        match focus_event_type {
+            FocusEventType::Focus => {
+                self.focused_text_control.set(Some(element));
+                *self.focused_text_control_value.borrow_mut() = Self::text_control_value(element);
+            },
+            FocusEventType::Blur => {
+                self.focused_text_control.set(None);
+                *self.focused_text_control_value.borrow_mut() = None;
+            },
+        }
+        let bubbling_name = match focus_event_type {
+            FocusEventType::Focus => "focusin".into(),
+            FocusEventType::Blur => "focusout".into(),
+        };
+        let bubbling_event = FocusEvent::new(
+            cx,
+            &self.window,
+            bubbling_name,
+            EventBubbles::Bubbles,
+            EventCancelable::NotCancelable,
+            Some(&self.window),
+            0i32,
+            related_target,
+        );
+        let bubbling_event = bubbling_event.upcast::<Event>();
+        bubbling_event.set_trusted(true);
+        bubbling_event.set_composed(true);
+        bubbling_event.fire(cx, event_target);
     }
 
     /// <https://html.spec.whatwg.org/multipage/#focus-fixup-rule>

@@ -44,6 +44,20 @@ impl SourceBufferList {
         self.queue_event("addsourcebuffer");
     }
 
+    /// The presentation times every SourceBuffer in the list holds: the intersection of their
+    /// `buffered` ranges, which is what the media element can play
+    /// (<https://w3c.github.io/media-source/#htmlmediaelement-extensions-buffered>).
+    pub(crate) fn buffered_intersection(&self) -> Vec<(f64, f64)> {
+        let buffers = self.buffers.borrow();
+        let mut buffers = buffers.iter();
+        let Some(first) = buffers.next() else {
+            return vec![];
+        };
+        buffers.fold(first.buffered_ranges(), |intersection, buffer| {
+            intersect_ranges(&intersection, &buffer.buffered_ranges())
+        })
+    }
+
     /// Queue a task that fires a named event at this SourceBufferList.
     fn queue_event(&self, name: &'static str) {
         let this = Trusted::new(self);
@@ -69,4 +83,23 @@ impl SourceBufferListMethods<crate::DomTypeHolder> for SourceBufferList {
             .get(index as usize)
             .map(|b| DomRoot::from_ref(&**b))
     }
+}
+
+/// Intersect two sorted lists of disjoint `[start, end)` ranges.
+fn intersect_ranges(a: &[(f64, f64)], b: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    let (mut i, mut j) = (0, 0);
+    let mut intersection = vec![];
+    while i < a.len() && j < b.len() {
+        let start = a[i].0.max(b[j].0);
+        let end = a[i].1.min(b[j].1);
+        if start < end {
+            intersection.push((start, end));
+        }
+        if a[i].1 < b[j].1 {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    intersection
 }

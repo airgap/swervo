@@ -424,8 +424,20 @@ pub(crate) fn font_family_substitute(name: &str) -> Option<String> {
 fn acceptable_fontconfig_substitute(name: &str) -> Option<String> {
     let cname = CString::new(name).ok()?;
     unsafe {
-        let pattern = FcNameParse(cname.as_ptr() as *mut FcChar8);
+        // The family set directly, not via FcNameParse: its pattern syntax reads a leading `-`
+        // as a size, so `-apple-system` became an empty pattern that fontconfig filled with its
+        // default family, which then passed as a substitute.
+        let pattern = FcPatternCreate();
         if pattern.is_null() {
+            return None;
+        }
+        if FcPatternAddString(
+            pattern,
+            FC_FAMILY.as_ptr() as *mut c_char,
+            cname.as_ptr() as *const FcChar8,
+        ) == 0
+        {
+            FcPatternDestroy(pattern);
             return None;
         }
         FcConfigSubstitute(ptr::null_mut(), pattern, FcMatchPattern);

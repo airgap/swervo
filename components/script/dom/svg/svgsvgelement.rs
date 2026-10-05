@@ -10,7 +10,7 @@ use dom_struct::dom_struct;
 use html5ever::{LocalName, Prefix, QualName, local_name, ns};
 use js::context::JSContext;
 use js::rust::HandleObject;
-use layout_api::{SVG_PAINT_PROPERTIES, SVGElementData, svg_paint_signature};
+use layout_api::{SVG_PAINT_PROPERTIES, SVGElementData, parse_view_box, svg_paint_signature};
 use percent_encoding::percent_decode_str;
 use pixels::EncodedImageType;
 use script_bindings::cell::DomRefCell;
@@ -110,10 +110,12 @@ impl SVGSVGElement {
         cloned_nodes.extend(self.process_image_elements(cx));
         cloned_nodes.extend(self.process_external_references(cx));
 
-        let paint_declarations = |element: &Element| self.paint_declarations(element);
+        let rewrite_attributes = |element: &Element, attributes: &mut Vec<(QualName, AttrValue)>| {
+            self.rewrite_serialized_attributes(element, attributes)
+        };
         let serialize_result = self
             .upcast::<Node>()
-            .xml_serialize_with_style_prefix(TraversalScope::IncludeNode, &paint_declarations);
+            .xml_serialize_with_attribute_rewrite(TraversalScope::IncludeNode, &rewrite_attributes);
 
         self.cleanup_cloned_nodes(cx, &cloned_nodes);
         *self.cached_paint_signature.borrow_mut() = paint_signature;
@@ -621,16 +623,68 @@ impl SVGSVGElement {
         }
     }
 
+    /// Adjust `element`'s attributes for the standalone serialization the rasterizer reads.
+    fn rewrite_serialized_attributes(
+        &self,
+        element: &Element,
+        attributes: &mut Vec<(QualName, AttrValue)>,
+    ) {
+        // With a viewBox, layout sizes the root's box and fits the viewBox into it; the
+        // rasterizer only needs the viewBox's aspect ratio as the image's natural size. Left in,
+        // `width`/`height` made that size wrong whenever CSS overrode one of them: `width="50"`
+        // without `height` reads as 50x100 to the rasterizer (the missing height defaults to
+        // 100%), so the icon was fitted into its box at half size.
+        if std::ptr::eq(element, self.upcast::<Element>()) &&
+            element
+                .get_attribute_string_value_with_namespace(&ns!(), &local_name!("viewBox"))
+                .is_some_and(|view_box| parse_view_box(&view_box).is_some())
+        {
+            attributes.retain(|(name, _)| {
+                name.ns != ns!() ||
+                    (name.local != local_name!("width") && name.local != local_name!("height"))
+            });
+        }
+
+        let Some(declarations) = self.paint_declarations(element) else {
+            return;
+        };
+        let style_name = QualName::new(None, ns!(), local_name!("style"));
+        match attributes.iter_mut().find(|(name, _)| *name == style_name) {
+            // Appended, so they win over the inline text they were computed from: the computed
+            // values already include it, in a form the consumer understands (inline text can hold
+            // `var()` or `currentcolor` that a standalone SVG renderer can't resolve).
+            // Custom properties and `var()` uses are dropped from the inline text: resvg's CSS
+            // parser stops at a `--name` and discards every later declaration, the appended
+            // ones included, and their computed results are what gets appended.
+            Some((_, value)) => {
+                // Joined without empty entries: resvg also gives up on a leading `;`.
+                let kept: Vec<&str> = value
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|declaration| {
+                        !declaration.is_empty() &&
+                            !declaration.starts_with("--") &&
+                            !declaration.contains("var(")
+                    })
+                    .chain(std::iter::once(declarations.as_str()))
+                    .collect();
+                *value = AttrValue::String(kept.join(";"));
+            },
+            None => attributes.push((style_name, AttrValue::String(declarations))),
+        }
+    }
+
     /// CSS declarations that carry `element`'s cascaded paint properties (see
     /// `SVG_PAINT_PROPERTIES`) into the standalone serialization, which otherwise sees none of
     /// the page's stylesheets, inherited values or custom properties. A property is copied where
-    /// a rule set it, i.e. where it differs from the flat-tree parent's value. The root `<svg>`
-    /// also gets the inherited properties it merely inherits from the page, since the standalone
-    /// document has no ancestors, unless a presentation attribute of the same name sets the
-    /// property there (in the cascade a presentation attribute beats inheritance but loses to a
-    /// rule). Presentation attributes using `var()` get the custom properties substituted, as
-    /// browsers parse them as CSS. Unstyled elements (inside `display: none` subtrees, clones
-    /// made for serialization) inherit from the serialized parent like the cascade would.
+    /// a rule set it, i.e. where it differs from the flat-tree parent's value, and wherever a
+    /// presentation attribute names it: those are in the cascade (see `SVGElement`'s
+    /// `parse_plain_attribute`), so the computed value says whether a rule overrode the
+    /// attribute, even with a value equal to the inherited one. The root `<svg>` also gets the
+    /// inherited properties it merely inherits from the page, since the standalone document has
+    /// no ancestors. Unstyled elements (inside `display: none` subtrees, clones made for
+    /// serialization) inherit from the serialized parent like the cascade would, with the
+    /// custom properties in their `var()` presentation attributes substituted.
     fn paint_declarations(&self, element: &Element) -> Option<String> {
         let style = element.style_from_last_restyle();
         let parent_style = element
@@ -646,6 +700,12 @@ impl SVGSVGElement {
                 .find_map(|ancestor| ancestor.style_from_last_restyle())
         });
         let is_root = std::ptr::eq(element, self.upcast::<Element>());
+        // Inline declarations are serialized too, and resvg can't read all of them (`var()`,
+        // lowercase `currentcolor`), so every paint property they name is re-emitted computed.
+        let inline_style = element.get_attribute_string_value_with_namespace(
+            &ns!(),
+            &local_name!("style"),
+        );
 
         let mut declarations = String::new();
         for property in SVG_PAINT_PROPERTIES {
@@ -658,8 +718,12 @@ impl SVGSVGElement {
                 let set_by_a_rule = parent_style
                     .as_ref()
                     .is_none_or(|parent| rasterizer_value(parent, property) != value);
-                let inherited_into_root = is_root && property.inherited() && attribute.is_none();
-                (set_by_a_rule || inherited_into_root).then_some(value)
+                let inherited_into_root = is_root && property.inherited();
+                let named_inline = inline_style
+                    .as_deref()
+                    .is_some_and(|style| style.contains(property.name()));
+                (set_by_a_rule || inherited_into_root || attribute.is_some() || named_inline)
+                    .then_some(value)
             });
             let value = from_cascade.or_else(|| {
                 let attribute = attribute.filter(|attribute| attribute.contains("var("))?;

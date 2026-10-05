@@ -65,6 +65,74 @@ fn mapped_value_of_command(command: CommandName) -> DOMString {
     .into()
 }
 
+impl Document {
+    /// Edits an editing host for a key press, with the event order of
+    /// <https://w3c.github.io/input-events/#event-order-during-typing>: a cancelable
+    /// `beforeinput` carrying the input type and typed `data`, the edit, then `input`. Returns
+    /// whether the key was handled (also when the page canceled `beforeinput`).
+    pub(crate) fn edit_by_typing(
+        &self,
+        cx: &mut JSContext,
+        command: CommandName,
+        data: Option<DOMString>,
+    ) -> bool {
+        let window = self.window();
+        let Some(selection) = self.selection_if_command_is_enabled(cx, command) else {
+            return false;
+        };
+        let Some(editing_host) = selection
+            .active_range()
+            .expect("Must always have an active range")
+            .CommonAncestorContainer()
+            .editing_host_of()
+        else {
+            return false;
+        };
+        let input_type = mapped_value_of_command(command);
+        let before_input = InputEvent::new(
+            cx,
+            window,
+            None,
+            atom!("beforeinput"),
+            true,
+            true,
+            Some(window),
+            0,
+            data.clone(),
+            false,
+            input_type.clone(),
+        );
+        let before_input = before_input.upcast::<Event>();
+        before_input.set_trusted(true);
+        if !before_input.fire(cx, editing_host.upcast()) {
+            return true;
+        }
+        let Some(selection) = self.selection_if_command_is_enabled(cx, command) else {
+            return true;
+        };
+        if !command.execute(cx, self, &selection, data.clone().unwrap_or_default()) {
+            return true;
+        }
+        let input = InputEvent::new(
+            cx,
+            window,
+            None,
+            atom!("input"),
+            true,
+            false,
+            Some(window),
+            0,
+            data,
+            false,
+            input_type,
+        );
+        let input = input.upcast::<Event>();
+        input.set_trusted(true);
+        input.fire(cx, editing_host.upcast());
+        true
+    }
+}
+
 impl Node {
     fn is_in_plaintext_only_state(&self) -> bool {
         self.downcast::<HTMLElement>()
@@ -126,6 +194,7 @@ impl Document {
             "forecolor" => CommandName::ForeColor,
             "hilitecolor" => CommandName::HiliteColor,
             "insertparagraph" => CommandName::InsertParagraph,
+            "inserttext" => CommandName::InsertText,
             "italic" => CommandName::Italic,
             "removeformat" => CommandName::RemoveFormat,
             "strikethrough" => CommandName::Strikethrough,

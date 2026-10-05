@@ -3830,7 +3830,14 @@ impl Document {
             declarative_refresh: Default::default(),
             resize_observers: Default::default(),
             fonts: Default::default(),
-            visibility_state: Cell::new(DocumentVisibilityState::Hidden),
+            // <https://html.spec.whatwg.org/multipage/#initialise-the-document-object>: the
+            // navigable's system visibility state. Pages size, animate and play only when
+            // visible, and nothing later flips a normal load to visible.
+            visibility_state: Cell::new(if has_browsing_context {
+                DocumentVisibilityState::Visible
+            } else {
+                DocumentVisibilityState::Hidden
+            }),
             status_code,
             is_initial_about_blank: Cell::new(is_initial_about_blank),
             allow_declarative_shadow_roots: Cell::new(allow_declarative_shadow_roots),
@@ -4121,15 +4128,35 @@ impl Document {
             "domComplete" => self.navigation_timing().dom_complete.get(),
             "loadEventStart" => self.navigation_timing().load_event_start.get(),
             "loadEventEnd" => self.navigation_timing().load_event_end.get(),
-            "redirectStart" | "redirectEnd" | "secureConnectionStart" | "responseEnd" => self
+            "redirectStart" | "redirectEnd" | "fetchStart" | "domainLookupStart" |
+            "domainLookupEnd" | "connectStart" | "connectEnd" | "secureConnectionStart" |
+            "requestStart" | "responseStart" | "responseEnd" | "domLoading" => self
                 .resource_fetch_timing()
                 .as_ref()
-                .and_then(|resource_fetch_timing| match name {
-                    "redirectStart" => resource_fetch_timing.redirect_start,
-                    "redirectEnd" => resource_fetch_timing.redirect_end,
-                    "secureConnectionStart" => resource_fetch_timing.secure_connection_start,
-                    "responseEnd" => resource_fetch_timing.response_end,
-                    _ => None,
+                .and_then(|timing| {
+                    // <https://w3c.github.io/navigation-timing/#dom-performancetiming-domainlookupstart>
+                    // and its siblings: with no DNS lookup or new connection (a reused
+                    // connection, a cached response) these equal fetchStart.
+                    let fetch_start = timing.fetch_start;
+                    let connect_start = timing.connect_start.or(fetch_start);
+                    match name {
+                        "redirectStart" => timing.redirect_start,
+                        "redirectEnd" => timing.redirect_end,
+                        "fetchStart" => fetch_start,
+                        "domainLookupStart" => timing.domain_lookup_start.or(fetch_start),
+                        // The network layer doesn't record the end of the lookup; the
+                        // connection starts right after it.
+                        "domainLookupEnd" => connect_start,
+                        "connectStart" => connect_start,
+                        "connectEnd" => timing.connect_end.or(connect_start),
+                        "secureConnectionStart" => timing.secure_connection_start,
+                        "requestStart" => timing.request_start,
+                        "responseStart" => timing.response_start,
+                        "responseEnd" => timing.response_end,
+                        // The document is created, and starts loading, as its response arrives.
+                        "domLoading" => timing.response_start,
+                        _ => unreachable!(),
+                    }
                 }),
             _ => {
                 return Err(Error::Operation(Some(format!(
@@ -4302,6 +4329,7 @@ impl Document {
         // I'm getting rid of the whole hashtable soon anyway, since all it does
         // right now is populate the element restyle data in layout, and we
         // could in theory do it in the DOM I think.
+        el.invalidate_relative_selector_anchors();
         let mut entry = self.ensure_pending_restyle(el);
         if entry.snapshot.is_none() {
             entry.snapshot = Some(Snapshot::new());

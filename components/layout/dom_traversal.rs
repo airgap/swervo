@@ -19,7 +19,7 @@ use web_atoms::LocalName;
 use crate::context::LayoutContext;
 use crate::dom::{BoxSlot, LayoutBox, NodeExt};
 use crate::flow::inline::SharedInlineStyles;
-use crate::lists::generate_counter_representation;
+use crate::lists::{counter_values, generate_counter_representation, list_item_ordinal};
 use crate::quotes::quotes_for_lang;
 use crate::replaced::ReplacedContents;
 use crate::style_ext::{Display, DisplayGeneratingBox, DisplayInside, DisplayOutside};
@@ -424,11 +424,32 @@ pub(crate) fn generate_pseudo_element_content(
                             vec.push(PseudoElementContentItem::Text(quote));
                         }
                     },
-                    ContentItem::Counter(_, style) | ContentItem::Counters(_, _, style) => {
-                        // TODO: Add support for counters, this assumes a value of 0.
+                    ContentItem::Counter(name, style) => {
+                        let value = if &*name.0 == "list-item" {
+                            list_item_ordinal(context, pseudo_element_info.node)
+                        } else {
+                            *counter_values(context, pseudo_element_info.node, name)
+                                .last()
+                                .expect("A counter always has a value")
+                        };
                         vec.push(PseudoElementContentItem::Text(
-                            generate_counter_representation(style).to_string(),
+                            generate_counter_representation(style, value),
                         ));
+                    },
+                    ContentItem::Counters(name, separator, style) => {
+                        // Nested `list-item` numbering (`counters(list-item, ".")`) only
+                        // shows the innermost list's ordinal.
+                        let values = if &*name.0 == "list-item" {
+                            vec![list_item_ordinal(context, pseudo_element_info.node)]
+                        } else {
+                            counter_values(context, pseudo_element_info.node, name)
+                        };
+                        let text = values
+                            .into_iter()
+                            .map(|value| generate_counter_representation(style, value))
+                            .collect::<Vec<_>>()
+                            .join(separator);
+                        vec.push(PseudoElementContentItem::Text(text));
                     },
                     ContentItem::NoOpenQuote | ContentItem::NoCloseQuote => {},
                 }
