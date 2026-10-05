@@ -128,7 +128,15 @@ impl Tokenizer {
 }
 
 /// <https://html.spec.whatwg.org/multipage/#html-fragment-serialisation-algorithm>
-fn start_element<S: Serializer>(element: &Element, serializer: &mut S) -> io::Result<()> {
+/// Supplies CSS declarations (`;`-terminated) to prepend to an element's `style` attribute as
+/// it is serialized, without mutating the DOM.
+pub(crate) type StylePrefix<'a> = &'a dyn Fn(&Element) -> Option<String>;
+
+fn start_element<S: Serializer>(
+    element: &Element,
+    serializer: &mut S,
+    style_prefix: Option<StylePrefix<'_>>,
+) -> io::Result<()> {
     let name = QualName::new(
         None,
         element.namespace().clone(),
@@ -153,6 +161,17 @@ fn start_element<S: Serializer>(element: &Element, serializer: &mut S) -> io::Re
         let value = attr.value().clone();
         (qname, value)
     }));
+
+    if let Some(declarations) = style_prefix.and_then(|style_prefix| style_prefix(element)) {
+        let style_name = QualName::new(None, ns!(), local_name!("style"));
+        match attributes.iter_mut().find(|(name, _)| *name == style_name) {
+            // Prepended, so the element's own inline declarations still win.
+            Some((_, value)) => {
+                *value = AttrValue::String(format!("{declarations}{}", &**value));
+            },
+            None => attributes.push((style_name, AttrValue::String(declarations))),
+        }
+    }
 
     let attr_refs = attributes.iter().map(|(qname, value)| {
         let ar: AttrRef = (qname, &**value);
@@ -290,6 +309,7 @@ pub(crate) fn serialize_html_fragment<S: Serializer>(
     traversal_scope: TraversalScope,
     serialize_shadow_roots: bool,
     shadow_roots: Vec<DomRoot<ShadowRoot>>,
+    style_prefix: Option<StylePrefix<'_>>,
 ) -> io::Result<()> {
     let iter = SerializationIterator::new(
         cx,
@@ -302,7 +322,7 @@ pub(crate) fn serialize_html_fragment<S: Serializer>(
     for cmd in iter {
         match cmd {
             SerializationCommand::OpenElement(n) => {
-                start_element(&n, serializer)?;
+                start_element(&n, serializer, style_prefix)?;
             },
             SerializationCommand::CloseElement(name) => {
                 serializer.end_elem(name)?;
@@ -374,11 +394,25 @@ pub(crate) fn serialize_html_fragment<S: Serializer>(
 
 pub(crate) struct HtmlSerialize<'a> {
     node: &'a Node,
+    style_prefix: Option<StylePrefix<'a>>,
 }
 
 impl<'a> HtmlSerialize<'a> {
     pub(crate) fn new(node: &'a Node) -> HtmlSerialize<'a> {
-        HtmlSerialize { node }
+        HtmlSerialize {
+            node,
+            style_prefix: None,
+        }
+    }
+
+    pub(crate) fn with_style_prefix(
+        node: &'a Node,
+        style_prefix: StylePrefix<'a>,
+    ) -> HtmlSerialize<'a> {
+        HtmlSerialize {
+            node,
+            style_prefix: Some(style_prefix),
+        }
     }
 }
 
@@ -391,6 +425,14 @@ impl Serialize for HtmlSerialize<'_> {
         // TODO: https://github.com/servo/servo/issues/42839
         let mut cx = unsafe { temp_cx() };
         let cx = &mut cx;
-        serialize_html_fragment(cx, self.node, serializer, traversal_scope, false, vec![])
+        serialize_html_fragment(
+            cx,
+            self.node,
+            serializer,
+            traversal_scope,
+            false,
+            vec![],
+            self.style_prefix,
+        )
     }
 }

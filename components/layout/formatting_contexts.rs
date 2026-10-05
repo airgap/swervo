@@ -189,7 +189,7 @@ impl IndependentFormattingContext {
                 // A replaced `<svg>` reuses the same slot for native `<foreignObject>` HTML
                 // content when `dom_svg_foreignobject_native` is on (LYK-136 stage 3): the
                 // svg raster paints below, the widget IFC's fragments lay out, paint, and
-                // hit-test on top. The UA sheet collapses non-foreignObject svg children.
+                // hit-test on top. Only foreignObjects get boxes (`traverse_svg_foreign_objects`).
                 let node = node_and_style_info.node;
                 let is_native_foreign_object_host = matches!(
                     contents.kind,

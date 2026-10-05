@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use layout_api::{
     DangerousStyleElement, DangerousStyleNode, LayoutDamage, LayoutElement, LayoutNode,
+    svg_paint_signature,
 };
 use script::layout_dom::ServoLayoutNode;
 use style::context::{SharedStyleContext, StyleContext};
@@ -17,6 +18,7 @@ use style::traversal::{DomTraversal, PerLevelTraversalData, recalc_style_at};
 use crate::BoxTree;
 use crate::context::LayoutContext;
 use crate::dom::{DOMLayoutData, NodeExt};
+use crate::dom_traversal::is_foreign_object;
 use crate::layout_root::LayoutRoot;
 
 pub struct RecalcStyle<'a> {
@@ -190,13 +192,28 @@ pub(crate) fn compute_damage_and_rebuild_box_tree_below_dirty_root<'dom>(
         return damage_from_parent;
     };
 
-    let (element_damage, is_display_none) = {
+    let (mut element_damage, is_display_none) = {
         let mut element_data = element.element_data_mut();
         (
             LayoutDamage::from(std::mem::take(&mut element_data.damage)),
             element_data.styles.is_display_none(),
         )
     };
+    // An inline <svg> paints from a cached serialization with its paint properties baked in,
+    // so a restyle that changes them (even a repaint-only `color` change) has to rebuild its
+    // box, which requests a fresh serialization.
+    if !element_damage.is_empty() && svg_paint_is_stale(layout_context, node) {
+        element_damage |= LayoutDamage::BoxDamage;
+    }
+    // Descendants' computed paint is baked into the enclosing `<svg>`'s serialization as well,
+    // but only the root's is fingerprinted: re-serialize when a descendant restyles.
+    if !element_damage.is_empty() {
+        if let Some(svg) = enclosing_serialized_svg(node) {
+            layout_context
+                .image_resolver
+                .queue_svg_element_for_serialization(svg);
+        }
+    }
 
     let has_dirty_descendants;
     #[expect(unsafe_code)]
@@ -234,6 +251,51 @@ pub(crate) fn compute_damage_and_rebuild_box_tree_below_dirty_root<'dom>(
     // Apply the calculated damage to this element (perhaps triggering box tree layout),
     // and propagate resulting damage to ancestors.
     damage_set.apply_damage(layout_context, layout_roots)
+}
+
+/// Whether `node` is an `<svg>` whose cached serialization was built from different paint
+/// properties than its current style has. Unserialized or failed serializations don't count:
+/// the former is already queued, the latter is never retried.
+fn svg_paint_is_stale(layout_context: &LayoutContext, node: ServoLayoutNode<'_>) -> bool {
+    let Some(svg_data) = node.as_svg() else {
+        return false;
+    };
+    if !matches!(svg_data.source, Some(Ok(_))) {
+        return false;
+    }
+    let style = node.style(&layout_context.style_context);
+    svg_data.source_paint_signature.as_deref() != Some(svg_paint_signature(&style).as_str())
+}
+
+/// The `<svg>` whose rasterized serialization paints `node`, when `node` is an svg element
+/// below it (not inside a `<foreignObject>`, whose HTML content lays out normally) and that
+/// serialization exists.
+#[expect(unsafe_code)]
+fn enclosing_serialized_svg(node: ServoLayoutNode<'_>) -> Option<ServoLayoutNode<'_>> {
+    let element = node.as_element()?;
+    if !element.is_svg_element() || is_foreign_object(&element) {
+        return None;
+    }
+    // The outermost svg of the contiguous svg-namespace ancestor chain is the replaced one;
+    // nested `<svg>`s are serialized as part of it.
+    let mut enclosing_svg = None;
+    let mut ancestor = unsafe { node.dangerous_flat_tree_parent() };
+    while let Some(current) = ancestor {
+        let Some(current_element) = current.as_element() else {
+            break;
+        };
+        if !current_element.is_svg_element() || is_foreign_object(&current_element) {
+            break;
+        }
+        if current.as_svg().is_some() {
+            enclosing_svg = Some(current);
+        }
+        ancestor = unsafe { current.dangerous_flat_tree_parent() };
+    }
+    enclosing_svg.filter(|svg| {
+        svg.as_svg()
+            .is_some_and(|data| matches!(data.source, Some(Ok(_))))
+    })
 }
 
 enum BoxDamageAction<'a> {

@@ -226,6 +226,10 @@ impl<'dom> LayoutElement<'dom> for ServoLayoutElement<'dom> {
         self.element.local_name()
     }
 
+    fn is_svg_element(&self) -> bool {
+        *self.element.namespace() == ns!(svg)
+    }
+
     fn attribute(&self, namespace: &Namespace, name: &LocalName) -> Option<&AttrValue> {
         self.element.get_attr_for_layout(namespace, name)
     }

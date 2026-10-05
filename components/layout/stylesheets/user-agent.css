@@ -423,10 +423,11 @@ marquee {
   white-space: nowrap;
 }
 
-/* Native <foreignObject> layout (pref dom_svg_foreignobject_native, LYK-136): when the
- * replaced <svg> builds a widget IFC over its children, only foreignObject subtrees may
- * contribute boxes — shape/def elements collapse. Inert without the pref (a replaced svg
- * never descends). foreignObject geometry attributes are SVG2 presentation attributes. */
+/* Native <foreignObject> layout (pref dom_svg_foreignobject_native, LYK-136): the replaced
+ * <svg> builds a widget over its foreignObject descendants only; layout gives other svg
+ * elements no box (they paint through the svg's raster, which takes their computed paint
+ * properties). Inert without the pref (a replaced svg never descends). foreignObject
+ * geometry attributes are SVG2 presentation attributes. */
 *|foreignObject {
   display: block;
 }

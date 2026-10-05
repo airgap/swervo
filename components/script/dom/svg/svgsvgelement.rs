@@ -10,14 +10,20 @@ use dom_struct::dom_struct;
 use html5ever::{LocalName, Prefix, QualName, local_name, ns};
 use js::context::JSContext;
 use js::rust::HandleObject;
-use layout_api::SVGElementData;
+use layout_api::{SVG_PAINT_PROPERTIES, SVGElementData, svg_paint_signature};
+use percent_encoding::percent_decode_str;
 use pixels::EncodedImageType;
 use script_bindings::cell::DomRefCell;
 use servo_url::ServoUrl;
+use style::Atom;
 use style::attr::AttrValue;
-use style::parser::ParserContext;
+use style::color::AbsoluteColor;
+use style::parser::{Parse, ParserContext};
+use style::properties::{ComputedValues, LonghandId, PropertyDeclarationId};
 use style::stylesheets::Origin;
-use style::values::specified::LengthPercentage;
+use style::values::computed::{Color as ComputedColor, SVGPaint};
+use style::values::generics::svg::{SVGPaintFallback, SVGPaintKind};
+use style::values::specified::{Color as SpecifiedColor, LengthPercentage};
 use style_traits::ParsingMode;
 use uuid::Uuid;
 use xml5ever::serialize::TraversalScope;
@@ -48,6 +54,9 @@ pub(crate) struct SVGSVGElement {
     // on each layout and must be invalidated when the subtree changes.
     #[no_trace]
     cached_serialized_data_url: DomRefCell<Option<Result<ServoUrl, ()>>>,
+    /// The `svg_paint_signature` of this element's style that the cached serialization was
+    /// built with; layout re-requests serialization when the current style no longer matches.
+    cached_paint_signature: DomRefCell<Option<String>>,
 }
 
 impl SVGSVGElement {
@@ -60,6 +69,7 @@ impl SVGSVGElement {
             svggraphicselement: SVGGraphicsElement::new_inherited(local_name, prefix, document),
             uuid: Uuid::new_v4().to_string(),
             cached_serialized_data_url: Default::default(),
+            cached_paint_signature: Default::default(),
         }
     }
 
@@ -80,6 +90,18 @@ impl SVGSVGElement {
     }
 
     pub(crate) fn serialize_and_cache_subtree(&self, cx: &mut js::context::JSContext) {
+        // A re-serialization (layout saw the paint properties change) must not leave the
+        // previous document's raster behind: rasterizations are cached per svg element.
+        if self.cached_serialized_data_url.borrow().is_some() {
+            self.evict_cached_images();
+        }
+        // Recorded only once the passes below are done: their temporary clones mutate this
+        // subtree, which invalidates (clears) the cache, signature included.
+        let paint_signature = self
+            .upcast::<Element>()
+            .style_from_last_restyle()
+            .map(|style| svg_paint_signature(&style));
+
         let mut cloned_nodes = self.process_use_elements(cx);
         // Order matters: lowering `<foreignObject>` and `<image href>` first means the
         // `<image>` elements those passes insert (which carry `mask`/`clip-path`/`filter`
@@ -88,11 +110,13 @@ impl SVGSVGElement {
         cloned_nodes.extend(self.process_image_elements(cx));
         cloned_nodes.extend(self.process_external_references(cx));
 
+        let paint_declarations = |element: &Element| self.paint_declarations(element);
         let serialize_result = self
             .upcast::<Node>()
-            .xml_serialize(TraversalScope::IncludeNode);
+            .xml_serialize_with_style_prefix(TraversalScope::IncludeNode, &paint_declarations);
 
         self.cleanup_cloned_nodes(cx, &cloned_nodes);
+        *self.cached_paint_signature.borrow_mut() = paint_signature;
 
         let Ok(xml_source) = serialize_result else {
             *self.cached_serialized_data_url.borrow_mut() = Some(Err(()));
@@ -597,7 +621,99 @@ impl SVGSVGElement {
         }
     }
 
-    pub(crate) fn invalidate_cached_serialized_subtree_and_rasterization_result(&self) {
+    /// CSS declarations that carry `element`'s cascaded paint properties (see
+    /// `SVG_PAINT_PROPERTIES`) into the standalone serialization, which otherwise sees none of
+    /// the page's stylesheets, inherited values or custom properties. A property is copied where
+    /// a rule set it, i.e. where it differs from the flat-tree parent's value. The root `<svg>`
+    /// also gets the inherited properties it merely inherits from the page, since the standalone
+    /// document has no ancestors, unless a presentation attribute of the same name sets the
+    /// property there (in the cascade a presentation attribute beats inheritance but loses to a
+    /// rule). Presentation attributes using `var()` get the custom properties substituted, as
+    /// browsers parse them as CSS. Unstyled elements (inside `display: none` subtrees, clones
+    /// made for serialization) inherit from the serialized parent like the cascade would.
+    fn paint_declarations(&self, element: &Element) -> Option<String> {
+        let style = element.style_from_last_restyle();
+        let parent_style = element
+            .upcast::<Node>()
+            .parent_in_flat_tree()
+            .and_then(DomRoot::downcast::<Element>)
+            .and_then(|parent| parent.style_from_last_restyle());
+        let custom_property_style = style.clone().or_else(|| {
+            element
+                .upcast::<Node>()
+                .inclusive_ancestors_in_flat_tree()
+                .filter_map(DomRoot::downcast::<Element>)
+                .find_map(|ancestor| ancestor.style_from_last_restyle())
+        });
+        let is_root = std::ptr::eq(element, self.upcast::<Element>());
+
+        let mut declarations = String::new();
+        for property in SVG_PAINT_PROPERTIES {
+            let attribute = element.get_attribute_string_value_with_namespace(
+                &ns!(),
+                &LocalName::from(property.name()),
+            );
+            let from_cascade = style.as_ref().and_then(|style| {
+                let value = rasterizer_value(style, property);
+                let set_by_a_rule = parent_style
+                    .as_ref()
+                    .is_none_or(|parent| rasterizer_value(parent, property) != value);
+                let inherited_into_root = is_root && property.inherited() && attribute.is_none();
+                (set_by_a_rule || inherited_into_root).then_some(value)
+            });
+            let value = from_cascade.or_else(|| {
+                let attribute = attribute.filter(|attribute| attribute.contains("var("))?;
+                let style = custom_property_style.as_ref()?;
+                let substituted = substitute_custom_properties(&attribute, style)?;
+                Some(self.rasterizer_text(property, &substituted, style))
+            });
+            if let Some(value) = value {
+                declarations.push_str(property.name());
+                declarations.push(':');
+                declarations.push_str(&value);
+                declarations.push(';');
+            }
+        }
+        (!declarations.is_empty()).then_some(declarations)
+    }
+
+    /// `text` (a property value after `var()` substitution) with any colour in it rewritten as
+    /// the rasterizer needs, see [`rasterizer_value`]; `none`, `url(#…)` pass through.
+    fn rasterizer_text(&self, property: LonghandId, text: &str, style: &ComputedValues) -> String {
+        if !matches!(
+            property,
+            LonghandId::Color | LonghandId::Fill | LonghandId::Stroke | LonghandId::StopColor
+        ) {
+            return text.to_owned();
+        }
+        let document = self.owner_document();
+        let url = document.url().into_url().into();
+        let context = ParserContext::new(
+            Origin::Author,
+            &url,
+            None,
+            ParsingMode::DEFAULT,
+            document.quirks_mode(),
+            /* namespaces = */ Default::default(),
+            None,
+            None,
+            /* attr_taint = */ Default::default(),
+        );
+        let mut input = ParserInput::new(text);
+        let mut parser = Parser::new(&mut input);
+        let color = parser.parse_entirely(|parser| SpecifiedColor::parse(&context, parser));
+        match color
+            .ok()
+            .and_then(|color| color.to_computed_color(None).ok())
+        {
+            Some(color) => {
+                rasterizer_paint_color(&color, &style.get_inherited_text().clone_color())
+            },
+            None => text.to_owned(),
+        }
+    }
+
+    fn evict_cached_images(&self) {
         let owner_window = self.owner_window();
         owner_window
             .image_cache()
@@ -610,8 +726,12 @@ impl SVGSVGElement {
                 &None,
             );
         }
+    }
 
+    pub(crate) fn invalidate_cached_serialized_subtree_and_rasterization_result(&self) {
+        self.evict_cached_images();
         *self.cached_serialized_data_url.borrow_mut() = None;
+        *self.cached_paint_signature.borrow_mut() = None;
         self.upcast::<Node>().dirty(NodeDamage::Other);
     }
 }
@@ -714,6 +834,112 @@ fn serialize_reference_closure(cx: &mut JSContext, subtree: &Node) -> String {
     serialized
 }
 
+/// `property`'s computed value written for the inline-SVG rasterizer (resvg) rather than as
+/// CSS: colours become sRGB `rgba()` (resvg has no `oklab()`, `color-mix()`, `light-dark()`, …),
+/// `currentcolor` keeps the `currentColor` spelling resvg requires, so it keeps tracking `color`,
+/// and paint-server urls become in-document `url(#id)` references.
+fn rasterizer_value(style: &ComputedValues, property: LonghandId) -> String {
+    let current_color = style.get_inherited_text().clone_color();
+    match property {
+        LonghandId::Color => rasterizer_color(&current_color),
+        LonghandId::StopColor => rasterizer_color(
+            &style
+                .get_svg()
+                .clone_stop_color()
+                .resolve_to_absolute(&current_color),
+        ),
+        LonghandId::Fill => {
+            rasterizer_paint(&style.get_inherited_svg().clone_fill(), &current_color)
+        },
+        LonghandId::Stroke => {
+            rasterizer_paint(&style.get_inherited_svg().clone_stroke(), &current_color)
+        },
+        _ => {
+            let mut value = String::new();
+            style
+                .computed_or_resolved_value(property, None, &mut value)
+                .expect("Writing CSS to a String cannot fail");
+            value
+        },
+    }
+}
+
+fn rasterizer_color(color: &AbsoluteColor) -> String {
+    let [red, green, blue, alpha] = *color.clone().into_srgb_legacy().raw_components();
+    let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!(
+        "rgba({}, {}, {}, {})",
+        channel(red),
+        channel(green),
+        channel(blue),
+        alpha.clamp(0.0, 1.0)
+    )
+}
+
+fn rasterizer_paint_color(color: &ComputedColor, current_color: &AbsoluteColor) -> String {
+    if color.is_currentcolor() {
+        "currentColor".to_owned()
+    } else {
+        rasterizer_color(&color.resolve_to_absolute(current_color))
+    }
+}
+
+fn rasterizer_paint(paint: &SVGPaint, current_color: &AbsoluteColor) -> String {
+    let kind = match &paint.kind {
+        SVGPaintKind::None => "none".to_owned(),
+        SVGPaintKind::Color(color) => rasterizer_paint_color(color, current_color),
+        // Paint servers live in the page; a reference that resolves to no fragment can't.
+        SVGPaintKind::PaintServer(url) => match url.url().and_then(|url| url.fragment()) {
+            Some(fragment) => format!("url(#{})", percent_decode_str(fragment).decode_utf8_lossy()),
+            None => "none".to_owned(),
+        },
+        SVGPaintKind::ContextFill => "context-fill".to_owned(),
+        SVGPaintKind::ContextStroke => "context-stroke".to_owned(),
+    };
+    match &paint.fallback {
+        SVGPaintFallback::Unset => kind,
+        SVGPaintFallback::None => format!("{kind} none"),
+        SVGPaintFallback::Color(color) => {
+            format!("{kind} {}", rasterizer_paint_color(color, current_color))
+        },
+    }
+}
+
+/// `value` with each `var(--name[, fallback])` replaced by the custom property's computed value
+/// in `style`, or else its fallback. `None` when a reference has neither, which makes the whole
+/// value invalid.
+fn substitute_custom_properties(value: &str, style: &ComputedValues) -> Option<String> {
+    let mut substituted = String::new();
+    let mut rest = value;
+    while let Some(start) = rest.find("var(") {
+        substituted.push_str(&rest[..start]);
+        let arguments = &rest[start + "var(".len()..];
+        let mut depth = 1;
+        let end = arguments.char_indices().find_map(|(index, character)| {
+            match character {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {},
+            }
+            (depth == 0).then_some(index)
+        })?;
+        let (name, fallback) = match arguments[..end].split_once(',') {
+            Some((name, fallback)) => (name.trim(), Some(fallback.trim())),
+            None => (arguments[..end].trim(), None),
+        };
+        let name = Atom::from(name.strip_prefix("--")?);
+        let custom_value = style.computed_value_to_string(PropertyDeclarationId::Custom(&name));
+        if custom_value.trim().is_empty() {
+            substituted.push_str(&substitute_custom_properties(fallback?, style)?);
+        } else {
+            substituted.push_str(custom_value.trim());
+        }
+        rest = &arguments[end + 1..];
+    }
+    substituted.push_str(rest);
+    Some(substituted)
+}
+
 /// Extract `id` from a `url(#id)` attribute value (quotes and whitespace tolerated).
 /// Returns `None` for non-fragment urls and the `none` keyword.
 fn parse_url_fragment_reference(value: &str) -> Option<String> {
@@ -741,6 +967,12 @@ impl<'dom> LayoutDom<'dom, SVGSVGElement> {
             source: unsafe {
                 self.unsafe_get()
                     .cached_serialized_data_url
+                    .borrow_for_layout()
+                    .clone()
+            },
+            source_paint_signature: unsafe {
+                self.unsafe_get()
+                    .cached_paint_signature
                     .borrow_for_layout()
                     .clone()
             },

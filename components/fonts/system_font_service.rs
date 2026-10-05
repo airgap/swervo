@@ -32,9 +32,10 @@ use crate::platform::font_list::{
 };
 
 /// Resolve a *named* font family that isn't installed under that name, via the platform's font
-/// configuration. On Linux/freetype this is fontconfig's alias substitution (Arial -> Liberation
-/// Sans, Verdana -> Noto Sans, …, matching Chrome); on macOS/Windows the requested families are
-/// installed and native matching already handles them, so this is a no-op.
+/// configuration. On Linux/freetype this is fontconfig's substitution, filtered the way Chrome
+/// filters it (Arial -> Liberation Sans is accepted, Verdana -> Noto Sans is not); on
+/// macOS/Windows the requested families are installed and native matching already handles them,
+/// so this is a no-op.
 #[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
 fn platform_family_substitute(name: &str) -> Option<String> {
     crate::platform::font_list::font_family_substitute(name)
@@ -254,9 +255,9 @@ impl SystemFontService {
         // look up canonical name
         let mut family_name = self.family_name_for_single_font_family(family);
         // If a *named* family is not installed under that name, resolve it through the platform's
-        // font configuration (fontconfig on Linux: Arial -> Liberation Sans, Verdana -> Noto Sans,
-        // Helvetica -> Nimbus Sans, …) instead of dropping to the generic fallback — matching what
-        // Chrome does. Generics are already resolved by `family_name_for_single_font_family`.
+        // font configuration (fontconfig on Linux: Arial -> Liberation Sans, Helvetica -> Liberation
+        // Sans) where Chrome would; a rejected substitute leaves the family unmatched so the page's
+        // next family applies. Generics are already resolved by `family_name_for_single_font_family`.
         if matches!(family, SingleFontFamily::FamilyName(_)) &&
             !self.local_families.families.contains_key(&family_name)
         {

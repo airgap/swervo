@@ -114,7 +114,7 @@ use crate::dom::node::virtualmethods::{VirtualMethods, vtable_for};
 use crate::dom::pointerevent::{PointerEvent, PointerId};
 use crate::dom::range::WeakRangeVec;
 use crate::dom::raredata::NodeRareData;
-use crate::dom::servoparser::html::HtmlSerialize;
+use crate::dom::servoparser::html::{HtmlSerialize, StylePrefix};
 use crate::dom::servoparser::serialize_html_fragment;
 use crate::dom::shadowroot::{IsUserAgentWidget, ShadowRoot};
 use crate::dom::text::Text;
@@ -3217,6 +3217,7 @@ impl Node {
             traversal_scope,
             serialize_shadow_roots,
             shadow_roots,
+            None,
         )
         .expect("Serializing node failed");
 
@@ -3229,10 +3230,31 @@ impl Node {
         &self,
         traversal_scope: xml_serialize::TraversalScope,
     ) -> Fallible<DOMString> {
+        self.xml_serialize_inner(traversal_scope, HtmlSerialize::new(self))
+    }
+
+    /// [`Self::xml_serialize`], with `style_prefix`'s declarations merged into each element's
+    /// `style` attribute in the output.
+    pub(crate) fn xml_serialize_with_style_prefix(
+        &self,
+        traversal_scope: xml_serialize::TraversalScope,
+        style_prefix: StylePrefix<'_>,
+    ) -> Fallible<DOMString> {
+        self.xml_serialize_inner(
+            traversal_scope,
+            HtmlSerialize::with_style_prefix(self, style_prefix),
+        )
+    }
+
+    fn xml_serialize_inner(
+        &self,
+        traversal_scope: xml_serialize::TraversalScope,
+        serializable: HtmlSerialize<'_>,
+    ) -> Fallible<DOMString> {
         let mut writer = vec![];
         xml_serialize::serialize(
             &mut writer,
-            &HtmlSerialize::new(self),
+            &serializable,
             xml_serialize::SerializeOpts { traversal_scope },
         )
         .map_err(|error| {

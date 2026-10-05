@@ -1011,6 +1011,17 @@ impl Element {
             .map(|data| data.element_data.borrow().styles.primary().clone())
     }
 
+    /// The element's style from the last restyle, without the reflow [`Self::style`] forces.
+    /// For code that already runs right after layout (inline-SVG serialization), where a
+    /// re-entrant reflow is both unnecessary and unsafe. `None` for unstyled elements, e.g.
+    /// descendants of a `display: none` element.
+    pub(crate) fn style_from_last_restyle(&self) -> Option<ServoArc<ComputedValues>> {
+        self.style_data
+            .borrow()
+            .as_ref()
+            .and_then(|data| data.element_data.borrow().styles.get_primary().cloned())
+    }
+
     pub(crate) fn is_styled(&self) -> bool {
         self.style_data.borrow().is_some()
     }
@@ -1188,8 +1199,9 @@ impl<'dom> LayoutDom<'dom, Element> {
         };
 
         // Native <foreignObject> layout (LYK-136 stage 3): when the pref is on, the replaced
-        // <svg> builds a widget IFC over its children — foreignObject becomes a block and
-        // every other svg child collapses (they render via the raster, never as boxes).
+        // <svg> builds a widget over its foreignObject descendants, which become blocks; layout
+        // gives no other svg element a box (they render via the raster). They stay styled, not
+        // `display: none`, because the raster takes their computed paint properties.
         // Done as presentation hints rather than UA-sheet rules because camelCase SVG type
         // selectors don't match through the stylesheet path (selector names are lowercased
         // at parse; svg local names are matched case-sensitively). Author styles still win.
@@ -1308,10 +1320,6 @@ impl<'dom> LayoutDom<'dom, Element> {
                         ),
                     ));
                 }
-            } else if *self.local_name() != local_name!("svg") {
-                push(PropertyDeclaration::Display(
-                    style::values::specified::Display::None,
-                ));
             }
         }
 

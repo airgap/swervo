@@ -223,6 +223,17 @@ pub fn fallback_font_families(options: FallbackFontSelectionOptions) -> Vec<&'st
 pub(crate) fn default_system_generic_font_family(
     generic: GenericFontFamily,
 ) -> LowercaseFontFamilyName {
+    // Chrome's default fonts on Linux, resolved like any named family. Fontconfig's own generic
+    // choice (often Noto) only applies when neither they nor a metric-compatible stand-in exist.
+    let chrome_default_family = match generic {
+        GenericFontFamily::None | GenericFontFamily::Serif => Some("Times New Roman"),
+        GenericFontFamily::SansSerif => Some("Arial"),
+        _ => None,
+    };
+    if let Some(family) = chrome_default_family.and_then(font_family_substitute) {
+        return family.into();
+    }
+
     let generic_string = match generic {
         GenericFontFamily::None | GenericFontFamily::Serif => c"serif",
         GenericFontFamily::SansSerif => c"sans-serif",
@@ -275,42 +286,180 @@ pub(crate) fn default_system_generic_font_family(
     .into()
 }
 
-/// Resolve a requested font family *name* through fontconfig's configuration substitution + match —
-/// i.e. its aliases (Arial → Liberation Sans, Verdana → Noto Sans, Helvetica → Nimbus Sans, Times New
-/// Roman → Liberation Serif, …). This is what Chrome does on Linux for families that are not installed
-/// under their requested name; swervo otherwise only ran fontconfig for *generic* families and dropped
-/// named misses to the generic fallback, so e.g. Arial and Verdana both collapsed to the same font.
-/// Returns the matched family name (always an installed font), or None on failure.
+/// Skia's `kFontEquivMap` (Chrome's fontconfig matcher): families accepted in place of one
+/// another when fontconfig substitutes one for another, because they share metrics. A family's
+/// class is its *first* entry (a few CJK families are listed twice), as in Skia's
+/// `GetFontEquivClass`.
+const FONT_EQUIVALENCE_CLASSES: &[(&str, &str)] = &[
+    ("sans", "Arial"),
+    ("sans", "Arimo"),
+    ("sans", "Liberation Sans"),
+    ("serif", "Times New Roman"),
+    ("serif", "Tinos"),
+    ("serif", "Liberation Serif"),
+    ("mono", "Courier New"),
+    ("mono", "Cousine"),
+    ("mono", "Liberation Mono"),
+    ("symbol", "Symbol"),
+    ("symbol", "Symbol Neu"),
+    ("pgothic", "MS PGothic"),
+    ("pgothic", "ＭＳ Ｐゴシック"),
+    ("pgothic", "Noto Sans CJK JP"),
+    ("pgothic", "IPAPGothic"),
+    ("pgothic", "MotoyaG04Gothic"),
+    ("gothic", "MS Gothic"),
+    ("gothic", "ＭＳ ゴシック"),
+    ("gothic", "Noto Sans Mono CJK JP"),
+    ("gothic", "IPAGothic"),
+    ("gothic", "MotoyaG04GothicMono"),
+    ("pmincho", "MS PMincho"),
+    ("pmincho", "ＭＳ Ｐ明朝"),
+    ("pmincho", "Noto Serif CJK JP"),
+    ("pmincho", "IPAPMincho"),
+    ("pmincho", "MotoyaG04Mincho"),
+    ("mincho", "MS Mincho"),
+    ("mincho", "ＭＳ 明朝"),
+    ("mincho", "Noto Serif CJK JP"),
+    ("mincho", "IPAMincho"),
+    ("mincho", "MotoyaG04MinchoMono"),
+    ("simsun", "Simsun"),
+    ("simsun", "宋体"),
+    ("simsun", "Noto Serif CJK SC"),
+    ("simsun", "MSung GB18030"),
+    ("simsun", "Song ASC"),
+    ("nsimsun", "NSimsun"),
+    ("nsimsun", "新宋体"),
+    ("nsimsun", "Noto Serif CJK SC"),
+    ("nsimsun", "MSung GB18030"),
+    ("nsimsun", "N Song ASC"),
+    ("simhei", "Simhei"),
+    ("simhei", "黑体"),
+    ("simhei", "Noto Sans CJK SC"),
+    ("simhei", "MYingHeiGB18030"),
+    ("simhei", "MYingHeiB5HK"),
+    ("pmingliu", "PMingLiU"),
+    ("pmingliu", "新細明體"),
+    ("pmingliu", "Noto Serif CJK TC"),
+    ("pmingliu", "MSung B5HK"),
+    ("mingliu", "MingLiU"),
+    ("mingliu", "細明體"),
+    ("mingliu", "Noto Serif CJK TC"),
+    ("mingliu", "MSung B5HK"),
+    ("pmingliuhk", "PMingLiU_HKSCS"),
+    ("pmingliuhk", "新細明體_HKSCS"),
+    ("pmingliuhk", "Noto Serif CJK TC"),
+    ("pmingliuhk", "MSung B5HK"),
+    ("mingliuhk", "MingLiU_HKSCS"),
+    ("mingliuhk", "細明體_HKSCS"),
+    ("mingliuhk", "Noto Serif CJK TC"),
+    ("mingliuhk", "MSung B5HK"),
+    ("cambria", "Cambria"),
+    ("cambria", "Caladea"),
+    ("calibri", "Calibri"),
+    ("calibri", "Carlito"),
+];
+
+fn is_metric_compatible(requested: &str, matched: &str) -> bool {
+    let class_of = |family: &str| {
+        FONT_EQUIVALENCE_CLASSES
+            .iter()
+            .find(|(_, name)| name.eq_ignore_ascii_case(family))
+            .map(|(class, _)| *class)
+    };
+    class_of(requested).is_some_and(|class| class_of(matched) == Some(class))
+}
+
+/// Blink's `AlternateFamilyName`: the name Chrome retries when a family can't be found. It is
+/// why Helvetica renders as Arial's stand-in (fontconfig itself picks Nimbus Sans, which Skia
+/// rejects).
+fn alternate_family_name(name: &str) -> Option<&'static str> {
+    [
+        ("Arial", "Helvetica"),
+        ("Courier", "Courier New"),
+        ("Times", "Times New Roman"),
+    ]
+    .iter()
+    .find_map(|(first, second)| {
+        if first.eq_ignore_ascii_case(name) {
+            Some(*second)
+        } else if second.eq_ignore_ascii_case(name) {
+            Some(*first)
+        } else {
+            None
+        }
+    })
+}
+
+unsafe fn pattern_family(pattern: *mut FcPattern, index: c_int) -> Option<String> {
+    let mut family: *mut FcChar8 = ptr::null_mut();
+    let result = unsafe {
+        FcPatternGetString(
+            pattern,
+            FC_FAMILY.as_ptr() as *mut c_char,
+            index,
+            &mut family,
+        )
+    };
+    if result != FcResultMatch {
+        return None;
+    }
+    unsafe { CStr::from_ptr(family as *const c_char) }
+        .to_str()
+        .ok()
+        .map(str::to_owned)
+}
+
+/// Resolve a font family *name* that isn't installed under that name the way Chrome does on
+/// Linux (Skia's `SkFontConfigInterfaceDirect::matchFamilyName`): run fontconfig's substitution
+/// and match, but accept the result only if it is the family fontconfig's configuration rewrote
+/// the name to, the requested family itself, or a metric-compatible stand-in. Anything else is a
+/// best-effort guess Chrome rejects so the page's next family applies: Verdana does not become
+/// Noto Sans; `font-family: Verdana, sans-serif` falls through to sans-serif. Retries Blink's
+/// alternate name (Helvetica -> Arial). Returns an installed family name, or None.
 pub(crate) fn font_family_substitute(name: &str) -> Option<String> {
-    let cname = std::ffi::CString::new(name).ok()?;
+    acceptable_fontconfig_substitute(name)
+        .or_else(|| alternate_family_name(name).and_then(acceptable_fontconfig_substitute))
+}
+
+fn acceptable_fontconfig_substitute(name: &str) -> Option<String> {
+    let cname = CString::new(name).ok()?;
     unsafe {
         let pattern = FcNameParse(cname.as_ptr() as *mut FcChar8);
         if pattern.is_null() {
             return None;
         }
         FcConfigSubstitute(ptr::null_mut(), pattern, FcMatchPattern);
+        let post_config_family = pattern_family(pattern, 0);
         FcDefaultSubstitute(pattern);
 
         let mut result = 0;
-        let family_match = FcFontMatch(ptr::null_mut(), pattern, &mut result);
-        let mut matched = None;
-        if !family_match.is_null() {
-            let mut match_string: *mut FcChar8 = ptr::null_mut();
-            FcPatternGetString(
-                family_match,
-                FC_FAMILY.as_ptr() as *mut c_char,
-                0,
-                &mut match_string,
-            );
-            if !match_string.is_null() {
-                if let Ok(s) = CStr::from_ptr(match_string as *const c_char).to_str() {
-                    matched = Some(s.to_owned());
-                }
-            }
-            FcPatternDestroy(family_match);
-        }
+        let font_match = FcFontMatch(ptr::null_mut(), pattern, &mut result);
         FcPatternDestroy(pattern);
-        matched
+        if font_match.is_null() {
+            return None;
+        }
+        // Skia lets these generic-sounding names take whatever fontconfig picks
+        // (`IsFallbackFontAllowed`).
+        let fallback_allowed = ["sans", "serif", "monospace"]
+            .iter()
+            .any(|generic| generic.eq_ignore_ascii_case(name));
+        let acceptable = fallback_allowed ||
+            (0..)
+                .map_while(|index| pattern_family(font_match, index))
+                .any(|matched| {
+                    post_config_family
+                        .as_deref()
+                        .is_some_and(|post_config| post_config.eq_ignore_ascii_case(&matched)) ||
+                        matched.eq_ignore_ascii_case(name) ||
+                        is_metric_compatible(name, &matched)
+                });
+        let family = if acceptable {
+            pattern_family(font_match, 0)
+        } else {
+            None
+        };
+        FcPatternDestroy(font_match);
+        family
     }
 }
 
