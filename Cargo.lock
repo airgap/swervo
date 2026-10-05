@@ -6365,8 +6365,7 @@ checksum = "c5a797f0e07bdf071d15742978fc3128ec6c22891c31a3a931513263904c982a"
 [[package]]
 name = "peek-poke"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef60922033e31835f6cf98b9b81b58368037b71d2a81928985cd9d0b3b3171fb"
+source = "git+https://github.com/airgap/webrender?rev=363698bd1a7d641fdd88814c460cf280e659b383#363698bd1a7d641fdd88814c460cf280e659b383"
 dependencies = [
  "euclid",
  "peek-poke-derive",
@@ -6375,8 +6374,7 @@ dependencies = [
 [[package]]
 name = "peek-poke-derive"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "271f78bae1e699b58c180a384a2e8d78ccbb60b853e15db92339725f3a2764d5"
+source = "git+https://github.com/airgap/webrender?rev=363698bd1a7d641fdd88814c460cf280e659b383#363698bd1a7d641fdd88814c460cf280e659b383"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -11386,8 +11384,7 @@ dependencies = [
 [[package]]
 name = "webrender"
 version = "0.69.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "384e260b5f94dd5459e58e37a4a336141ce1b91da3c3c403d579688922515731"
+source = "git+https://github.com/airgap/webrender?rev=363698bd1a7d641fdd88814c460cf280e659b383#363698bd1a7d641fdd88814c460cf280e659b383"
 dependencies = [
  "allocator-api2",
  "bincode",
@@ -11423,8 +11420,7 @@ dependencies = [
 [[package]]
 name = "webrender_api"
 version = "0.69.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61c9f6c3b8ea958f6c34c3eb82f46ac42dacd94e3c18c710bcd27879ade71492"
+source = "git+https://github.com/airgap/webrender?rev=363698bd1a7d641fdd88814c460cf280e659b383#363698bd1a7d641fdd88814c460cf280e659b383"
 dependencies = [
  "app_units",
  "bitflags 2.13.0",
@@ -11443,8 +11439,7 @@ dependencies = [
 [[package]]
 name = "webrender_build"
 version = "0.69.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5476f637aa37fc5753921fb324cc9114cc158bfd7602382afefcd6afda4bad04"
+source = "git+https://github.com/airgap/webrender?rev=363698bd1a7d641fdd88814c460cf280e659b383#363698bd1a7d641fdd88814c460cf280e659b383"
 dependencies = [
  "bitflags 2.13.0",
  "lazy_static",
@@ -12121,8 +12116,7 @@ dependencies = [
 [[package]]
 name = "wr_glyph_rasterizer"
 version = "0.69.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f35fd5520f25d3a02acc20464e53e48bb68e22ac78960f10a6fd76820e3bde2"
+source = "git+https://github.com/airgap/webrender?rev=363698bd1a7d641fdd88814c460cf280e659b383#363698bd1a7d641fdd88814c460cf280e659b383"
 dependencies = [
  "core-foundation 0.9.4",
  "core-graphics",
@@ -12147,8 +12141,7 @@ dependencies = [
 [[package]]
 name = "wr_malloc_size_of"
 version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "482308b684f11723b200a32808094bb460b5ac4840903ccbcb78ad92a6354a1f"
+source = "git+https://github.com/airgap/webrender?rev=363698bd1a7d641fdd88814c460cf280e659b383#363698bd1a7d641fdd88814c460cf280e659b383"
 dependencies = [
  "app_units",
  "euclid",

@@ -216,6 +216,9 @@ skip = [
     "sha3",
 ]
 
+[sources]
+allow-git = ["https://github.com/airgap/webrender"]
+
 # github.com organizations to allow git sources for
 [sources.allow-org]
 github = [

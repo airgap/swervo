@@ -26,9 +26,8 @@ use net_traits::request::{Destination, PreloadEntry, PreloadId, RequestBuilder, 
 use net_traits::response::{Response, ResponseInit};
 use net_traits::{
     AsyncRuntime, CookieAsyncResponse, CookieData, CookieSource, CoreResourceMsg,
-    CoreResourceThread, CustomResponseMediator, DiscardFetch, FetchChannels, FetchTaskTarget,
-    ResourceFetchTiming, ResourceThreads, ResourceTimingType, WebSocketDomAction,
-    WebSocketNetworkEvent,
+    CoreResourceThread, DiscardFetch, FetchChannels, FetchTaskTarget, ResourceFetchTiming,
+    ResourceThreads, ResourceTimingType, WebSocketDomAction, WebSocketNetworkEvent,
 };
 use parking_lot::{Mutex, RwLock};
 use profile_traits::mem::{
@@ -46,7 +45,7 @@ use servo_base::generic_channel::{
     GenericSelectionResult,
 };
 use servo_base::id::CookieStoreId;
-use servo_url::{ImmutableOrigin, ServoUrl};
+use servo_url::ServoUrl;
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::async_runtime::{init_async_runtime, spawn_task};
