@@ -109,7 +109,7 @@ class SetupDav1dTests(unittest.TestCase):
         contents = destination.read_text()
         self.assertIn("--target=aarch64-linux-ohos", contents)
         self.assertIn("-D__MUSL__", contents)
-        self.assertIn(f"--sysroot={self.root.as_posix()}/sysroot", contents)
+        self.assertIn(f"--sysroot={self.root.resolve().as_posix()}/sysroot", contents)
 
     def test_missing_sdk_fails_early(self):
         with patch.dict(os.environ, {}, clear=True), self.assertRaisesRegex(RuntimeError, "Set OHOS_SDK_NATIVE"):
