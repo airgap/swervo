@@ -145,6 +145,8 @@ jobs:
         run: |
           ./mach bootstrap --yes --skip-lints --skip-nextest
           brew install gnu-tar
+      - name: Setup dav1d
+        uses: ./.github/actions/setup-dav1d
       - name: Build (${{ inputs.profile }})
         env:
           RUSTFLAGS: ${{ inputs.profile == 'checked-release' && '-D warnings' || '' }}
@@ -264,6 +266,8 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.msrv.outputs.rust_version }}
+      - name: Setup dav1d
+        uses: ./.github/actions/setup-dav1d
       - name: Compile libservo with MSRV
         run: |
           cargo +${{ steps.msrv.outputs.rust_version }} build -p servo --locked
@@ -288,5 +292,7 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-c
+      - name: Setup dav1d
+        uses: ./.github/actions/setup-dav1d
       - name: Build and test servo-capi-tests
         run: cargo test -p servo-capi-tests --locked

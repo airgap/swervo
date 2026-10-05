@@ -1,0 +1,47 @@
+name: Setup dav1d
+description: Build the native AVIF decoder for the Cargo target, including cross builds
+inputs:
+  target:
+    description: Rust target triple, or native for the runner's architecture
+    default: native
+    required: false
+runs:
+  using: composite
+  steps:
+    - name: Install native build tools (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y nasm pkg-config
+    - name: Install native build tools (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: brew install nasm pkg-config
+    - name: Install assembler (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        choco install nasm --yes --no-progress
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        'C:\Program Files\NASM' >> $env:GITHUB_PATH
+    - name: Install isolated Meson tools
+      shell: bash
+      run: |
+        python -m venv "$RUNNER_TEMP/dav1d-tools"
+        if [[ "$RUNNER_OS" == Windows ]]; then
+          tools="$RUNNER_TEMP/dav1d-tools/Scripts"
+        else
+          tools="$RUNNER_TEMP/dav1d-tools/bin"
+        fi
+        "$tools/python" -m pip install --disable-pip-version-check meson==1.9.2 ninja==1.13.0
+        if [[ "$RUNNER_OS" == Windows ]]; then
+          "$tools/python" -m pip install --disable-pip-version-check pkgconf==2.5.1.post1
+        fi
+        echo "$tools" >> "$GITHUB_PATH"
+    - name: Build and verify dav1d
+      shell: bash
+      env:
+        DAV1D_TARGET: ${{ inputs.target }}
+        MACOSX_DEPLOYMENT_TARGET: '13.0'
+      run: python etc/ci/setup_dav1d.py --target "$DAV1D_TARGET" --work-dir "$RUNNER_TEMP/dav1d"

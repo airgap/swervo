@@ -181,6 +181,8 @@ jobs:
       - name: Install crown
         run: cargo install --path support/crown
 
+      - name: Setup dav1d
+        uses: ./.github/actions/setup-dav1d
       - name: Build (${{ inputs.profile }})
         env:
           RUSTFLAGS: ${{ inputs.profile == 'checked-release' && '-D warnings' || '' }}
@@ -304,6 +306,8 @@ jobs:
       # installing lld is the easiest way to get it in path.
       - name: install lld
         run: sudo apt-get install -y lld
+      - name: Setup dav1d
+        uses: ./.github/actions/setup-dav1d
       - name: Compile libservo with MSRV
         env:
           # lld seems to use less memory and prevents OOM errors during linking.
@@ -349,6 +353,8 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-c
+      - name: Setup dav1d
+        uses: ./.github/actions/setup-dav1d
       - name: Build and test servo-capi-tests
         run: cargo test -p servo-capi-tests --locked
 
@@ -414,6 +420,8 @@ jobs:
         run: |
           sudo apt update
           ./mach bootstrap --yes --skip-lints
+      - name: Setup dav1d
+        uses: ./.github/actions/setup-dav1d
       - name: Run unit-tests with coverage
         shell: bash
         env:

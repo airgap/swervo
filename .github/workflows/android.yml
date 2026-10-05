@@ -99,6 +99,12 @@ jobs:
           APK_SIGNING_KEY_STORE_PATH="${PWD}/servo_keystore.jks"
           echo "${KEYSTORE_BASE64}" | base64 -d > "${APK_SIGNING_KEY_STORE_PATH}"
           echo "APK_SIGNING_KEY_STORE_PATH=${APK_SIGNING_KEY_STORE_PATH}" >> ${GITHUB_ENV}
+      - name: Setup dav1d
+        uses: ./.github/actions/setup-dav1d
+        with:
+          target: ${{ matrix.target }}
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
       - name: Build (arch ${{ matrix.target }} profile ${{ inputs.profile }})
         env:
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}

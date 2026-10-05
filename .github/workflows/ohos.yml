@@ -103,6 +103,12 @@ jobs:
           unzip servo-ohos-material.zip
           echo "SERVO_OHOS_SIGNING_CONFIG=${PWD}/servo-ohos-material/signing-configs.json" >> $GITHUB_ENV
           echo "signed=true" >> "$GITHUB_OUTPUT"
+      - name: Setup dav1d
+        uses: ./.github/actions/setup-dav1d
+        with:
+          target: ${{ matrix.target }}
+        env:
+          OHOS_SDK_NATIVE: ${{ steps.setup_sdk.outputs.ohos_sdk_native }}
       - name: Build (arch ${{ matrix.target }} profile ${{ inputs.profile }})
         env:
           OHOS_SDK_NATIVE: ${{ steps.setup_sdk.outputs.ohos_sdk_native }}

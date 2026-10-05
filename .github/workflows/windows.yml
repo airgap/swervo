@@ -153,6 +153,8 @@ jobs:
           cat C:\init\incremental_build_debug.txt
           echo "`$env:LIBCLANG_PATH now = $env:LIBCLANG_PATH"
           echo "`$env:PATH now = $env:PATH"
+      - name: Setup dav1d
+        uses: ./.github/actions/setup-dav1d
       - name: Build (${{ inputs.profile }})
         env:
           RUSTFLAGS: ${{ inputs.profile == 'checked-release' && '-D warnings' || '' }}
@@ -280,6 +282,8 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.msrv.outputs.rust_version }}
+      - name: Setup dav1d
+        uses: ./.github/actions/setup-dav1d
       - name: Compile libservo with MSRV
         run: |
           cargo +${{ steps.msrv.outputs.rust_version }} build -p servo --locked
@@ -304,6 +308,8 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-c
+      - name: Setup dav1d
+        uses: ./.github/actions/setup-dav1d
       - name: Build and test servo-capi-tests
         env:
           CC: "clang-cl.exe"
