@@ -457,23 +457,18 @@ wr_malloc_size_of = { git = "https://github.com/airgap/webrender", rev = "363698
 #
 # Or for Stylo:
 #
-# NavGator: `background-clip: text` needs a `background_clip::Clip::Text` variant that
-# upstream stylo only exposes to Gecko (`extra_gecko_values`). airgap/stylo promotes it
-# into the shared `values` list so Servo gets it too. This patch tree is servo/stylo at the
-# rev pinned above (bc25ec93) plus that one-line longhands.toml change — keep the rev bumped
-# in lockstep with the servo/stylo rev above. Branch: navgator-background-clip-text.
-# Now also carries the light-dark() resolution fix and fill/stroke + the SVG paint properties
-# enabled for Servo (inline-SVG serialization copies them in). Branch:
-# nicole/svg-paint-properties-servo.
+# Keep the fork aligned with the Servo APIs used by this tree, including ruby columns.
+# It also exposes `background-clip: text` and SVG paint properties to Servo and carries
+# the light-dark() resolution fix. Keep all Stylo crates on the same fork revision.
 [patch."https://github.com/servo/stylo"]
-selectors = { git = "https://github.com/airgap/stylo", rev = "23a4897b8769339a7eefdab7fc01e7ca3a438662" }
-servo_arc = { git = "https://github.com/airgap/stylo", rev = "23a4897b8769339a7eefdab7fc01e7ca3a438662" }
-stylo = { git = "https://github.com/airgap/stylo", rev = "23a4897b8769339a7eefdab7fc01e7ca3a438662" }
-stylo_atoms = { git = "https://github.com/airgap/stylo", rev = "23a4897b8769339a7eefdab7fc01e7ca3a438662" }
-stylo_dom = { git = "https://github.com/airgap/stylo", rev = "23a4897b8769339a7eefdab7fc01e7ca3a438662" }
-stylo_malloc_size_of = { git = "https://github.com/airgap/stylo", rev = "23a4897b8769339a7eefdab7fc01e7ca3a438662" }
-stylo_static_prefs = { git = "https://github.com/airgap/stylo", rev = "23a4897b8769339a7eefdab7fc01e7ca3a438662" }
-stylo_traits = { git = "https://github.com/airgap/stylo", rev = "23a4897b8769339a7eefdab7fc01e7ca3a438662" }
+selectors = { git = "https://github.com/airgap/stylo", rev = "cd2ec36a70548eaadd465cf8b84eed422024d410" }
+servo_arc = { git = "https://github.com/airgap/stylo", rev = "cd2ec36a70548eaadd465cf8b84eed422024d410" }
+stylo = { git = "https://github.com/airgap/stylo", rev = "cd2ec36a70548eaadd465cf8b84eed422024d410" }
+stylo_atoms = { git = "https://github.com/airgap/stylo", rev = "cd2ec36a70548eaadd465cf8b84eed422024d410" }
+stylo_dom = { git = "https://github.com/airgap/stylo", rev = "cd2ec36a70548eaadd465cf8b84eed422024d410" }
+stylo_malloc_size_of = { git = "https://github.com/airgap/stylo", rev = "cd2ec36a70548eaadd465cf8b84eed422024d410" }
+stylo_static_prefs = { git = "https://github.com/airgap/stylo", rev = "cd2ec36a70548eaadd465cf8b84eed422024d410" }
+stylo_traits = { git = "https://github.com/airgap/stylo", rev = "cd2ec36a70548eaadd465cf8b84eed422024d410" }
 #
 # Or for another Git dependency:
 #
