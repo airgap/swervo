@@ -6,6 +6,7 @@
 //! view of a script thread. When an `EventLoop` is dropped, an `ExitScriptThread`
 //! message is sent to the script thread, asking it to shut down.
 
+use std::cell::Cell;
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -35,6 +36,9 @@ pub struct EventLoop {
     /// on the other side of the process boundary. When running in the same process, the
     /// BackgroundHangMonitor is shared among all [`EventLoop`]s so this will be `None`.
     background_hang_monitor_sender: Option<GenericSender<BackgroundHangMonitorControlMsg>>,
+    /// Set once the content process hosting this event loop has died. Its pipelines can no
+    /// longer acknowledge an exit request, so the constellation retires them itself.
+    dead: Cell<bool>,
     dont_send_or_sync: PhantomData<Rc<()>>,
 }
 
@@ -146,6 +150,7 @@ impl EventLoop {
             script_chan,
             id,
             background_hang_monitor_sender: None,
+            dead: Cell::new(false),
             dont_send_or_sync: PhantomData,
         }
     }
@@ -177,18 +182,27 @@ impl EventLoop {
         let crossbeam_receiver = lifeline_receiver.route_preserving_errors();
         constellation
             .process_manager
-            .add(crossbeam_receiver, process);
+            .add(crossbeam_receiver, process, Some(id));
 
         Ok(Self {
             script_chan,
             id,
             background_hang_monitor_sender: Some(background_hand_monitor_sender),
+            dead: Cell::new(false),
             dont_send_or_sync: PhantomData,
         })
     }
 
     pub(crate) fn id(&self) -> ScriptEventLoopId {
         self.id
+    }
+
+    pub(crate) fn is_dead(&self) -> bool {
+        self.dead.get()
+    }
+
+    pub(crate) fn mark_dead(&self) {
+        self.dead.set(true);
     }
 
     /// Send a message to the event loop.

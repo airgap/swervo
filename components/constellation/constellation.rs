@@ -1309,7 +1309,12 @@ where
             Request::BackgroundHangMonitor(message) => {
                 self.handle_request_from_background_hang_monitor(message);
             },
-            Request::RemoveProcess(index) => self.process_manager.remove(index),
+            Request::RemoveProcess(index) => {
+                let exited = self.process_manager.remove(index);
+                if let Some(event_loop_id) = exited.event_loop_id {
+                    self.handle_content_process_exit(event_loop_id, exited.status);
+                }
+            },
         }
     }
 
@@ -1409,15 +1414,56 @@ where
                         return warn!("{}: LoadUrl for unknown browsing context", webview_id);
                     },
                 };
+
+                // An embedder that shows its own crash UI, or reloads, after a crash
+                // notification navigates away from Servo's crash page. The new document takes
+                // the crash page's place in session history, whether that page is still
+                // loading (which would otherwise make `load_url` drop this load) or shown.
+                let pending_crash_page = self
+                    .pending_changes
+                    .iter()
+                    .find(|change| {
+                        change.browsing_context_id == ctx_id &&
+                            self.pipelines
+                                .get(&change.new_pipeline_id)
+                                .is_some_and(|pipeline| pipeline.load_data.crash.is_some())
+                    })
+                    .map(|change| (change.new_pipeline_id, change.replace.clone()));
+                let showing_crash_page = self
+                    .pipelines
+                    .get(&pipeline_id)
+                    .is_some_and(|pipeline| pipeline.load_data.crash.is_some());
+                if let Some((crash_page_pipeline_id, _)) = pending_crash_page {
+                    self.close_pipeline(
+                        crash_page_pipeline_id,
+                        DiscardBrowsingContext::No,
+                        ExitPipelineMode::Normal,
+                    );
+                }
+                let history_handling = if showing_crash_page {
+                    NavigationHistoryBehavior::Replace
+                } else {
+                    NavigationHistoryBehavior::Push
+                };
+
                 // Since this is a top-level load, initiated by the embedder, go straight to load_url,
                 // bypassing schedule_navigation.
-                self.load_url(
+                let new_pipeline_id = self.load_url(
                     webview_id,
                     pipeline_id,
                     load_data,
-                    NavigationHistoryBehavior::Push,
+                    history_handling,
                     TargetSnapshotParams::default(),
                 );
+                if let Some((_, crash_page_replace)) = pending_crash_page &&
+                    let Some(new_pipeline_id) = new_pipeline_id &&
+                    let Some(change) = self
+                        .pending_changes
+                        .iter_mut()
+                        .find(|change| change.new_pipeline_id == new_pipeline_id)
+                {
+                    change.replace = crash_page_replace;
+                }
             },
             // Create a new top level browsing context. Will use response_chan to return
             // the browsing context id.
@@ -2610,7 +2656,7 @@ where
 
                     if let Ok(process) = content.spawn_multiprocess() {
                         let crossbeam_receiver = receiver.route_preserving_errors();
-                        self.process_manager.add(crossbeam_receiver, process);
+                        self.process_manager.add(crossbeam_receiver, process, None);
                     } else {
                         return warn!("Failed to spawn process for SW manager.");
                     }
@@ -2990,6 +3036,12 @@ where
         let Some(pipeline) = self.pipelines.get(&pipeline_id) else {
             return;
         };
+        // A content process whose channel broke has died or is about to (a script thread
+        // panic takes its process down). Its lifeline reports that, with the exit status, so
+        // reporting here too would announce the same crash twice.
+        if opts::get().multiprocess {
+            return;
+        }
 
         // Treat send error the same as receiving a panic message
         self.handle_panic_in_webview(
@@ -3018,13 +3070,8 @@ where
         };
         debug!("Panic handler for {event_loop_id:?}: {reason:?}",);
 
-        let mut webview_ids = HashSet::new();
-        for pipeline in self.pipelines.values() {
-            if pipeline.event_loop.id() == event_loop_id {
-                webview_ids.insert(pipeline.webview_id);
-            }
-        }
-        for webview_id in webview_ids {
+        // A panic takes a content process down, so its exit needs no second report.
+        for webview_id in self.retire_dead_event_loop(event_loop_id) {
             self.handle_panic_in_webview(webview_id, &reason, &backtrace);
         }
     }
@@ -3035,14 +3082,145 @@ where
         reason: &String,
         backtrace: &Option<String>,
     ) {
-        let browsing_context_id = BrowsingContextId::from(webview_id);
         self.constellation_to_embedder_proxy
             .send(ConstellationToEmbedderMsg::Panic(
                 webview_id,
                 reason.clone(),
                 backtrace.clone(),
             ));
+        self.replace_crashed_webview_with_crash_page(webview_id, reason, backtrace);
+    }
 
+    /// A script event loop process exited. If pipelines still live in it, nobody asked it to
+    /// exit: it was killed by a signal (a crash such as SIGSEGV, or the OOM killer's SIGKILL),
+    /// which no in-process panic hook can report. Without this the webviews it rendered keep
+    /// showing their last frame forever while every message to them goes nowhere.
+    fn handle_content_process_exit(
+        &mut self,
+        event_loop_id: ScriptEventLoopId,
+        status: Option<std::process::ExitStatus>,
+    ) {
+        let Some(event_loop) = self
+            .event_loops()
+            .into_iter()
+            .find(|event_loop| event_loop.id() == event_loop_id)
+        else {
+            return;
+        };
+        if event_loop.is_dead() ||
+            !self
+                .pipelines
+                .values()
+                .any(|pipeline| pipeline.event_loop.id() == event_loop_id)
+        {
+            return;
+        }
+
+        let reason = match status {
+            Some(status) => format!("The content process ended unexpectedly ({status})."),
+            None => "The content process ended unexpectedly.".to_owned(),
+        };
+        error!("{event_loop_id:?}: {reason}");
+
+        if self.hard_fail {
+            error!("Pipeline failed in hard-fail mode.  Crashing!");
+            process::exit(1);
+        }
+
+        for webview_id in self.retire_dead_event_loop(event_loop_id) {
+            self.constellation_to_embedder_proxy
+                .send(ConstellationToEmbedderMsg::ContentProcessTerminated(
+                    webview_id,
+                    reason.clone(),
+                ));
+            self.replace_crashed_webview_with_crash_page(webview_id, &reason, &None);
+        }
+    }
+
+    /// Stop using an event loop whose script thread is gone: its pipelines are retired without
+    /// waiting for an acknowledgement, new documents for the hosts it served get a fresh
+    /// process, and session history entries it held reload when traversed to. Returns the
+    /// webviews that had pipelines in it.
+    fn retire_dead_event_loop(&mut self, event_loop_id: ScriptEventLoopId) -> HashSet<WebViewId> {
+        let mut webview_ids = HashSet::new();
+        for pipeline in self.pipelines.values() {
+            if pipeline.event_loop.id() == event_loop_id {
+                pipeline.event_loop.mark_dead();
+                webview_ids.insert(pipeline.webview_id);
+            }
+        }
+        for bc_group in self.browsing_context_group_set.values_mut() {
+            bc_group.event_loops.retain(|_, weak_event_loop| {
+                weak_event_loop
+                    .upgrade()
+                    .is_none_or(|event_loop| event_loop.id() != event_loop_id)
+            });
+        }
+        for webview_id in &webview_ids {
+            self.evict_history_pipelines_in_event_loop(*webview_id, event_loop_id);
+        }
+        webview_ids
+    }
+
+    /// Session history keeps documents alive for back/forward traversal. Those that lived in a
+    /// dead event loop are discarded so that traversing to them reloads them, as `trim_history`
+    /// does for entries past the history limit.
+    fn evict_history_pipelines_in_event_loop(
+        &mut self,
+        webview_id: WebViewId,
+        event_loop_id: ScriptEventLoopId,
+    ) {
+        let Some(webview) = self.webviews.get(&webview_id) else {
+            return;
+        };
+        let history_pipelines: Vec<PipelineId> = webview
+            .session_history
+            .past
+            .iter()
+            .filter_map(|diff| diff.alive_old_pipeline())
+            .chain(
+                webview
+                    .session_history
+                    .future
+                    .iter()
+                    .filter_map(|diff| diff.alive_new_pipeline()),
+            )
+            .filter(|pipeline_id| {
+                self.pipelines
+                    .get(pipeline_id)
+                    .is_some_and(|pipeline| pipeline.event_loop.id() == event_loop_id)
+            })
+            .collect();
+
+        let mut dead_pipelines = vec![];
+        for pipeline_id in history_pipelines {
+            let Some(load_data) = self.refresh_load_data(pipeline_id) else {
+                continue;
+            };
+            dead_pipelines.push((pipeline_id, NeedsToReload::Yes(pipeline_id, load_data)));
+            self.close_pipeline(
+                pipeline_id,
+                DiscardBrowsingContext::No,
+                ExitPipelineMode::Force,
+            );
+        }
+
+        if let Some(webview) = self.webviews.get_mut(&webview_id) {
+            for (alive_id, dead) in dead_pipelines {
+                webview
+                    .session_history
+                    .replace_reloader(NeedsToReload::No(alive_id), dead);
+            }
+        }
+    }
+
+    fn replace_crashed_webview_with_crash_page(
+        &mut self,
+        webview_id: WebViewId,
+        reason: &String,
+        backtrace: &Option<String>,
+    ) {
+        let browsing_context_id = BrowsingContextId::from(webview_id);
         let Some(browsing_context) = self.browsing_contexts.get(&browsing_context_id) else {
             return warn!("failed browsing context is missing");
         };
@@ -4330,6 +4508,7 @@ where
             };
 
         self.unload_document(old_pipeline_id);
+        self.retire_closed_dead_pipeline(old_pipeline_id);
 
         if let Some(new_pipeline) = self.pipelines.get(&new_pipeline_id) {
             if let Some(ref chan) = self.devtools_sender {
@@ -5049,6 +5228,7 @@ where
 
         if let Some(old_pipeline_id) = old_pipeline_id {
             self.unload_document(old_pipeline_id);
+            self.retire_closed_dead_pipeline(old_pipeline_id);
         }
 
         let Some(webview) = self.webviews.get_mut(&change.webview_id) else {
@@ -5646,6 +5826,7 @@ where
                 .session_history
                 .remove_entries_for_browsing_context(browsing_context_id);
         }
+        self.retire_closed_dead_pipeline(browsing_context.pipeline_id);
 
         if let Some(parent_pipeline_id) = browsing_context.parent_pipeline_id {
             match self.pipelines.get_mut(&parent_pipeline_id) {
@@ -5820,7 +6001,33 @@ where
             ScreenshotReadinessResponse::NoLongerActive,
         );
 
+        self.retire_closed_dead_pipeline(pipeline_id);
+
         debug!("{}: Closed", pipeline_id);
+    }
+
+    /// A pipeline whose content process died never acknowledges its exit, to us or to `Paint`,
+    /// so once it is closed it is removed here instead. A browsing context keeps showing its
+    /// current pipeline until a replacement activates, so that one stays until then.
+    fn retire_closed_dead_pipeline(&mut self, pipeline_id: PipelineId) {
+        let Some(pipeline) = self.pipelines.get(&pipeline_id) else {
+            return;
+        };
+        if !pipeline.event_loop.is_dead() {
+            return;
+        }
+        if let Some(browsing_context) = self.browsing_contexts.get(&pipeline.browsing_context_id) &&
+            (browsing_context.pipeline_id == pipeline_id ||
+                browsing_context.pipelines.contains(&pipeline_id))
+        {
+            return;
+        }
+        self.paint_proxy.send(PaintMessage::PipelineExited(
+            pipeline.webview_id,
+            pipeline_id,
+            PipelineExitSource::Script,
+        ));
+        self.handle_pipeline_exited(pipeline_id);
     }
 
     // Randomly close a pipeline -if --random-pipeline-closure-probability is set
