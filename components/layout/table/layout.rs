@@ -65,7 +65,6 @@ enum CellContentAlignment {
     Baseline,
 }
 
-
 /// Blink's `kTableMaxInlineSize`.
 const TABLE_MAX_INLINE_SIZE: i32 = 1_000_000;
 
@@ -609,8 +608,7 @@ impl<'a> TableLayout<'a> {
                 .is_some_and(|size| size.to_length().is_some())
         };
         let mut sized_by_table_column = vec![false; self.table.size.width];
-        for (column_index, sized_by_table_column) in sized_by_table_column.iter_mut().enumerate()
-        {
+        for (column_index, sized_by_table_column) in sized_by_table_column.iter_mut().enumerate() {
             let column_measure =
                 self.table
                     .get_column_measure_for_column_at_index(writing_mode, column_index, true);
@@ -628,7 +626,8 @@ impl<'a> TableLayout<'a> {
 
         let border_spacing = self.table.border_spacing().inline;
         for column_index in 0..self.table.size.width {
-            let Some(TableSlot::Cell(cell)) = self.table.slots.first().map(|row| &row[column_index])
+            let Some(TableSlot::Cell(cell)) =
+                self.table.slots.first().map(|row| &row[column_index])
             else {
                 continue;
             };
@@ -1073,26 +1072,25 @@ impl<'a> TableLayout<'a> {
 
         // Adds `amount` to the widths of the columns at `indices` in proportion to `weights`,
         // or equally if the weights add up to zero, making the increments add up to `amount`.
-        let distribute =
-            |widths: &mut [Au], amount: Au, indices: &[usize], weights: &[f32]| {
-                let total_weight: f32 = weights.iter().sum();
-                let mut accumulated_weight = 0.;
-                let mut distributed = Au::zero();
-                for (position, index) in indices.iter().enumerate() {
-                    accumulated_weight += if total_weight > 0. {
-                        weights[position] / total_weight
-                    } else {
-                        1. / indices.len() as f32
-                    };
-                    let target = if position + 1 == indices.len() {
-                        amount
-                    } else {
-                        amount.scale_by(accumulated_weight)
-                    };
-                    widths[*index] += target - distributed;
-                    distributed = target;
-                }
-            };
+        let distribute = |widths: &mut [Au], amount: Au, indices: &[usize], weights: &[f32]| {
+            let total_weight: f32 = weights.iter().sum();
+            let mut accumulated_weight = 0.;
+            let mut distributed = Au::zero();
+            for (position, index) in indices.iter().enumerate() {
+                accumulated_weight += if total_weight > 0. {
+                    weights[position] / total_weight
+                } else {
+                    1. / indices.len() as f32
+                };
+                let target = if position + 1 == indices.len() {
+                    amount
+                } else {
+                    amount.scale_by(accumulated_weight)
+                };
+                widths[*index] += target - distributed;
+                distributed = target;
+            }
+        };
 
         let used_sum = fixed_sum + percentage_sum;
         if used_sum < assignable_width {
@@ -1113,7 +1111,12 @@ impl<'a> TableLayout<'a> {
                 widths[*index] = Au::zero();
             }
             let remaining = (assignable_width - fixed_sum).max(Au::zero());
-            distribute(&mut widths, remaining, &percentage_columns, &percentage_weights);
+            distribute(
+                &mut widths,
+                remaining,
+                &percentage_columns,
+                &percentage_weights,
+            );
         }
         widths
     }
@@ -1283,8 +1286,7 @@ impl<'a> TableLayout<'a> {
             inline: padding.inline_sum() + border.inline_sum(),
             block: padding.block_sum() + border.block_sum(),
         };
-        let border_spacing_spanned =
-            self.table.border_spacing().inline * (cell.colspan - 1) as i32;
+        let border_spacing_spanned = self.table.border_spacing().inline * (cell.colspan - 1) as i32;
 
         let mut total_cell_width = (coordinate.x..coordinate.x + cell.colspan)
             .map(|column_index| self.distributed_column_widths[column_index])
@@ -2985,7 +2987,10 @@ impl Table {
         let style = match &column_group {
             Some(column_group)
                 if !is_in_fixed_mode &&
-                    matches!(column.base.style.box_size(writing_mode).inline, Size::Initial) =>
+                    matches!(
+                        column.base.style.box_size(writing_mode).inline,
+                        Size::Initial
+                    ) =>
             {
                 &column_group.base.style
             },
@@ -2997,12 +3002,7 @@ impl Table {
             min: min_size,
             max: max_size,
             percentage: percentage_size,
-        } = CellOrColumnOuterSizes::new(
-            style,
-            writing_mode,
-            &Default::default(),
-            is_in_fixed_mode,
-        );
+        } = CellOrColumnOuterSizes::new(style, writing_mode, &Default::default(), is_in_fixed_mode);
 
         CellOrTrackMeasure {
             content_sizes: ContentSizes {

@@ -74,6 +74,8 @@ jobs:
         run: |
           sudo apt update
           ./mach bootstrap --yes --skip-nextest
+      - name: Setup dav1d
+        uses: ./.github/actions/setup-dav1d
       - name: Clippy
         run: |
           ./mach clippy --locked --github-annotations -- -- --deny warnings

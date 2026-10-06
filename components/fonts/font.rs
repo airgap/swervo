@@ -41,9 +41,9 @@ use unicode_script::Script;
 use webrender_api::{FontInstanceFlags, FontInstanceKey, FontVariation};
 
 use crate::font_context::UnloadedFontFace;
+use crate::han_kerning::HanKerningData;
 use crate::platform::font::{FontTable, PlatformFont};
 use crate::platform::font_list::fallback_font_families;
-use crate::han_kerning::HanKerningData;
 use crate::platform::han_generic_font_family;
 use crate::{
     EmojiPresentationPreference, FallbackFontSelectionOptions, FontContext, FontData,
@@ -828,7 +828,8 @@ impl FontGroup {
         // fonts map their glyphs to emoji code points); only an explicit variation selector
         // asks to skip it, as in Chrome. The default presentation still steers system fallback.
         let has_presentation_selector = next_codepoint.is_some_and(|next| {
-            emoji::is_emoji_presentation_selector(next) || emoji::is_text_presentation_selector(next)
+            emoji::is_emoji_presentation_selector(next) ||
+                emoji::is_text_presentation_selector(next)
         });
         let font_has_glyph_for_listed_family = |font: &FontRef| {
             if has_presentation_selector {

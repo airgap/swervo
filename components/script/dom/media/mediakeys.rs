@@ -40,6 +40,9 @@ impl MediaKeysMethods<crate::DomTypeHolder> for MediaKeys {
         _session_type: MediaKeySessionType,
     ) -> Fallible<DomRoot<MediaKeySession>> {
         // brick 2 records the session type + tracks the session on the MediaKeys.
-        Ok(MediaKeySession::new(&self.global(), CanGc::deprecated_note()))
+        Ok(MediaKeySession::new(
+            &self.global(),
+            CanGc::deprecated_note(),
+        ))
     }
 }

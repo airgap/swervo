@@ -9,11 +9,11 @@ use dom_struct::dom_struct;
 use html5ever::{LocalName, Prefix, local_name, ns};
 use js::context::JSContext;
 use js::rust::HandleObject;
+use net_traits::blob_url_store::UrlWithBlobClaim;
 use net_traits::image_cache::{
     Image, ImageCache, ImageCacheResult, ImageLoadListener, ImageOrMetadataAvailable,
     ImageResponse, PendingImageId,
 };
-use net_traits::blob_url_store::UrlWithBlobClaim;
 use net_traits::request::{CredentialsMode, Destination, RequestBuilder, RequestId};
 use net_traits::{
     CoreResourceThread, FetchMetadata, FetchResponseMsg, NetworkError, ResourceFetchTiming,
@@ -29,9 +29,8 @@ use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::csp::{GlobalCspReporting, Violation};
 use crate::dom::document::Document;
-use crate::dom::element::AttributeMutation;
 use crate::dom::element::attributes::storage::AttrRef;
-use crate::dom::element::Element;
+use crate::dom::element::{AttributeMutation, Element};
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::iterators::ShadowIncluding;
 use crate::dom::node::virtualmethods::VirtualMethods;

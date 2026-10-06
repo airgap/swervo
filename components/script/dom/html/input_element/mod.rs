@@ -11,7 +11,6 @@ use encoding_rs::Encoding;
 use fonts::{ByteIndex, TextByteRange};
 use html5ever::{LocalName, Prefix, local_name};
 use js::context::JSContext;
-use keyboard_types::{Key, NamedKey};
 use js::jsapi::{ClippedTime, JSObject, RegExpFlag_UnicodeSets, RegExpFlags};
 use js::jsval::UndefinedValue;
 use js::rust::wrappers2::{
@@ -19,6 +18,7 @@ use js::rust::wrappers2::{
     NewDateObject, NewUCRegExpObject, ObjectIsDate, ObjectIsRegExp,
 };
 use js::rust::{HandleObject, MutableHandleObject};
+use keyboard_types::{Key, NamedKey};
 use layout_api::{ScriptSelection, SharedSelection};
 use num_traits::ToPrimitive;
 use script_bindings::cell::{DomRefCell, Ref};
@@ -1930,18 +1930,18 @@ impl HTMLInputElement {
         }
         // <https://html.spec.whatwg.org/multipage/#default-button>: the form's first submit
         // button in tree order, which is usually a `<button>` (default type submit).
-        let default_button = node
-            .traverse_preorder(ShadowIncluding::No)
-            .find(|node| {
-                if let Some(input) = node.downcast::<HTMLInputElement>() {
-                    matches!(*input.input_type(), InputType::Submit(_) | InputType::Image(_)) &&
-                        input.form_owner() == owner
-                } else if let Some(button) = node.downcast::<HTMLButtonElement>() {
-                    button.is_submit_button() && button.form_owner() == owner
-                } else {
-                    false
-                }
-            });
+        let default_button = node.traverse_preorder(ShadowIncluding::No).find(|node| {
+            if let Some(input) = node.downcast::<HTMLInputElement>() {
+                matches!(
+                    *input.input_type(),
+                    InputType::Submit(_) | InputType::Image(_)
+                ) && input.form_owner() == owner
+            } else if let Some(button) = node.downcast::<HTMLButtonElement>() {
+                button.is_submit_button() && button.form_owner() == owner
+            } else {
+                false
+            }
+        });
         match default_button {
             Some(ref button) => {
                 if !button.downcast::<Element>().unwrap().is_actually_disabled() {
@@ -2144,20 +2144,14 @@ impl HTMLInputElement {
     }
 
     fn handle_range_key(&self, cx: &mut JSContext, event: &KeyboardEvent) -> bool {
-        let min = self
-            .minimum()
-            .expect("A range input always has a minimum");
-        let max = self
-            .maximum()
-            .expect("A range input always has a maximum");
+        let min = self.minimum().expect("A range input always has a minimum");
+        let max = self.maximum().expect("A range input always has a maximum");
         let value_before = self.Value();
         let value = self
             .convert_string_to_number(&value_before.str())
             .expect("A range input's sanitized value is always a number");
         // Chrome steps a `step=any` range by a hundredth and pages it by a tenth.
-        let step = self
-            .allowed_value_step()
-            .unwrap_or((max - min) / 100.0);
+        let step = self.allowed_value_step().unwrap_or((max - min) / 100.0);
         let page_step = ((max - min) / 10.0).max(step);
         let new_value = match event.key() {
             Key::Named(NamedKey::ArrowUp | NamedKey::ArrowRight) => value + step,

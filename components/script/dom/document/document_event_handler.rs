@@ -10,6 +10,7 @@ use std::rc::Rc;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
+use app_units::Au;
 use embedder_traits::{
     Cursor, EditingActionEvent, EmbedderMsg, ImeEvent, InputEvent, InputEventId, InputEventOutcome,
     InputEventResult, KeyboardEvent as EmbedderKeyboardEvent, MouseButton, MouseButtonAction,
@@ -20,7 +21,6 @@ use embedder_traits::{
 use embedder_traits::{
     GamepadEvent as EmbedderGamepadEvent, GamepadSupportedHapticEffects, GamepadUpdateType,
 };
-use app_units::Au;
 use euclid::{Point2D, Vector2D};
 use js::context::JSContext;
 use keyboard_types::{Code, Key, KeyState, Modifiers, NamedKey};
@@ -52,7 +52,6 @@ use style_traits::CSSPixel;
 use webrender_api::ExternalScrollId;
 use webrender_api::units::LayoutVector2D;
 
-use crate::dom::execcommand::basecommand::CommandName;
 #[cfg(feature = "gamepad")]
 use crate::dom::bindings::codegen::Bindings::PermissionStatusBinding::PermissionName;
 use crate::dom::bindings::inheritance::{ElementTypeId, HTMLElementTypeId, NodeTypeId};
@@ -65,6 +64,7 @@ use crate::dom::document::drag_and_drop::{DragAndDrop, PointerState};
 use crate::dom::document::focus::FocusableArea;
 use crate::dom::document::top_layer::LightDismissEventType;
 use crate::dom::event::{EventBubbles, EventCancelable, EventComposed, EventFlags};
+use crate::dom::execcommand::basecommand::CommandName;
 #[cfg(feature = "gamepad")]
 use crate::dom::gamepad::gamepad::{Gamepad, contains_user_gesture};
 #[cfg(feature = "gamepad")]
@@ -79,9 +79,9 @@ use crate::dom::scrolling_box::{ScrollAxisState, ScrollRequirement, ScrollingBox
 use crate::dom::selection::{CaretMovement, PointerSelection, can_start_selection};
 use crate::dom::types::{
     ClipboardEvent, CompositionEvent, DataTransfer, Element, Event, EventTarget, GlobalScope,
-    HTMLAnchorElement, HTMLButtonElement, HTMLElement, HTMLInputElement,
-    HTMLLabelElement, HTMLSelectElement, HTMLTextAreaElement, MouseEvent, Touch, TouchEvent,
-    TouchList, WheelEvent, Window,
+    HTMLAnchorElement, HTMLButtonElement, HTMLElement, HTMLInputElement, HTMLLabelElement,
+    HTMLSelectElement, HTMLTextAreaElement, MouseEvent, Touch, TouchEvent, TouchList, WheelEvent,
+    Window,
 };
 use crate::drag_data_store::{DragDataStore, Kind, Mode};
 use crate::realms::enter_auto_realm;
@@ -529,7 +529,9 @@ impl DocumentEventHandler {
     ) {
         let common_ancestor = old_target
             .zip(new_target)
-            .and_then(|(old_target, new_target)| old_target.common_ancestor_in_flat_tree(new_target));
+            .and_then(|(old_target, new_target)| {
+                old_target.common_ancestor_in_flat_tree(new_target)
+            });
 
         // Without a related target in this tree (the pointer came from or went to outside the
         // document), the target and all of its ancestors up to and including the document are
@@ -738,7 +740,9 @@ impl DocumentEventHandler {
             if !capture_is_active {
                 self.fire_hover_boundary_events(
                     cx,
-                    old_hover_target.as_ref().map(|old_target| old_target.upcast::<Node>()),
+                    old_hover_target
+                        .as_ref()
+                        .map(|old_target| old_target.upcast::<Node>()),
                     Some(new_target.upcast()),
                     &hit_test_result,
                     input_event,
@@ -1260,7 +1264,9 @@ impl DocumentEventHandler {
         for ancestor in hit_node.inclusive_ancestors(ShadowIncluding::Yes) {
             if ancestor.is::<HTMLInputElement>() || ancestor.is::<HTMLTextAreaElement>() {
                 // The selection of the document moves to the text control.
-                let parent = ancestor.GetParentNode().expect("Hit elements have a parent");
+                let parent = ancestor
+                    .GetParentNode()
+                    .expect("Hit elements have a parent");
                 selection
                     .Collapse(cx, Some(&parent), ancestor.index())
                     .expect("The position of a child is a valid boundary point");
@@ -3368,7 +3374,8 @@ fn clipboard_action_for_shortcut(
     } else {
         keyboard_types::Modifiers::CONTROL
     };
-    if !event.modifiers.contains(command) || event.modifiers.contains(keyboard_types::Modifiers::ALT)
+    if !event.modifiers.contains(command) ||
+        event.modifiers.contains(keyboard_types::Modifiers::ALT)
     {
         return None;
     }
@@ -3384,7 +3391,9 @@ fn clipboard_action_for_shortcut(
 }
 
 /// The editing command a key performs in an editing host, with the text it inserts.
-fn typing_command(event: &keyboard_types::KeyboardEvent) -> Option<(CommandName, Option<DOMString>)> {
+fn typing_command(
+    event: &keyboard_types::KeyboardEvent,
+) -> Option<(CommandName, Option<DOMString>)> {
     if event
         .modifiers
         .intersects(keyboard_types::Modifiers::CONTROL | keyboard_types::Modifiers::META)
@@ -3392,7 +3401,10 @@ fn typing_command(event: &keyboard_types::KeyboardEvent) -> Option<(CommandName,
         return None;
     }
     Some(match &event.key {
-        Key::Character(text) => (CommandName::InsertText, Some(DOMString::from(text.as_str()))),
+        Key::Character(text) => (
+            CommandName::InsertText,
+            Some(DOMString::from(text.as_str())),
+        ),
         Key::Named(NamedKey::Enter) if event.modifiers.contains(Modifiers::SHIFT) => {
             (CommandName::InsertLineBreak, None)
         },

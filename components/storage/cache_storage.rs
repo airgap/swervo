@@ -32,17 +32,16 @@ pub trait CacheStorageThreadFactory {
 
 impl CacheStorageThreadFactory for GenericSender<CacheStorageThreadMsg> {
     /// Spawn the cache storage thread for one storage group.
-    fn new(
-        config_dir: Option<PathBuf>,
-        in_memory: bool,
-    ) -> GenericSender<CacheStorageThreadMsg> {
+    fn new(config_dir: Option<PathBuf>, in_memory: bool) -> GenericSender<CacheStorageThreadMsg> {
         let (chan, port) = generic_channel::channel().unwrap();
         thread::Builder::new()
             .name("CacheStorageManager".to_owned())
-            .spawn(move || match CacheStorageManager::new(port, config_dir, in_memory) {
-                Ok(manager) => manager.start(),
-                Err(e) => error!("Cache API storage failed to initialize: {e}"),
-            })
+            .spawn(
+                move || match CacheStorageManager::new(port, config_dir, in_memory) {
+                    Ok(manager) => manager.start(),
+                    Err(e) => error!("Cache API storage failed to initialize: {e}"),
+                },
+            )
             .expect("Thread spawning failed");
         chan
     }
@@ -88,11 +87,7 @@ fn header_value<'h>(headers: &'h [(String, Vec<u8>)], name: &str) -> Option<&'h 
 }
 
 /// <https://w3c.github.io/ServiceWorker/#request-matches-cached-item>
-fn request_matches(
-    query: &CacheApiRequest,
-    entry: &Entry,
-    options: &CacheApiQueryOptions,
-) -> bool {
+fn request_matches(query: &CacheApiRequest, entry: &Entry, options: &CacheApiQueryOptions) -> bool {
     // Step: unless ignoreMethod, only GET/HEAD queries can match (stored entries are GETs).
     if !options.ignore_method &&
         !query.method.eq_ignore_ascii_case("GET") &&
@@ -109,21 +104,19 @@ fn request_matches(
 
     // Vary: every listed request-header must have the same value now as when stored; `*` never
     // matches.
-    if !options.ignore_vary {
-        if let Some(vary) = &entry.vary {
-            for field in vary.split(',') {
-                let field = field.trim();
-                if field.is_empty() {
-                    continue;
-                }
-                if field == "*" {
-                    return false;
-                }
-                if header_value(&query.headers, field) !=
-                    header_value(&entry.request_headers, field)
-                {
-                    return false;
-                }
+    if !options.ignore_vary &&
+        let Some(vary) = &entry.vary
+    {
+        for field in vary.split(',') {
+            let field = field.trim();
+            if field.is_empty() {
+                continue;
+            }
+            if field == "*" {
+                return false;
+            }
+            if header_value(&query.headers, field) != header_value(&entry.request_headers, field) {
+                return false;
             }
         }
     }
@@ -402,8 +395,7 @@ impl CacheStorageManager {
                     .execute("DELETE FROM entries WHERE id = ?1", params![entry.rowid]);
             }
         }
-        let request_headers =
-            postcard::to_allocvec(&request.headers).map_err(|e| e.to_string())?;
+        let request_headers = postcard::to_allocvec(&request.headers).map_err(|e| e.to_string())?;
         let response_headers =
             postcard::to_allocvec(&response.headers).map_err(|e| e.to_string())?;
         let vary = header_value(&response.headers, "vary")

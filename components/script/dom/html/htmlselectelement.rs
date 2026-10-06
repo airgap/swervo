@@ -326,8 +326,7 @@ impl HTMLSelectElement {
         Node::replace_all(cx, None, root.upcast::<Node>());
 
         if self.is_list_box() {
-            let shadow_tree = self.create_list_box_shadow_tree(cx, root.upcast());
-            *self.shadow_tree.borrow_mut() = Some(shadow_tree);
+            self.create_list_box_shadow_tree(cx, root.upcast());
             return;
         }
 
@@ -392,7 +391,7 @@ impl HTMLSelectElement {
     /// scroller. The scroller is a flex item of a column flexbox that is as tall as the
     /// `<select>`, so it fills a `<select>` given a height by the author and is otherwise
     /// `display size` rows tall.
-    fn create_list_box_shadow_tree(&self, cx: &mut JSContext, root: &Node) -> ShadowTree {
+    fn create_list_box_shadow_tree(&self, cx: &mut JSContext, root: &Node) {
         let document = self.owner_document();
         let create_element = |cx: &mut JSContext, local_name: LocalName| {
             Element::create(
@@ -435,10 +434,10 @@ impl HTMLSelectElement {
             .unwrap();
         root.AppendChild(cx, container.upcast::<Node>()).unwrap();
 
-        ShadowTree::ListBox {
+        *self.shadow_tree.borrow_mut() = Some(ShadowTree::ListBox {
             options: options.as_traced(),
             display_size,
-        }
+        });
     }
 
     fn shadow_tree(&self, cx: &mut JSContext) -> Ref<'_, ShadowTree> {
@@ -528,7 +527,13 @@ impl HTMLSelectElement {
         let current = self
             .list_box_anchor
             .get()
-            .or_else(|| options.iter().rev().find(|option| option.Selected()).cloned())
+            .or_else(|| {
+                options
+                    .iter()
+                    .rev()
+                    .find(|option| option.Selected())
+                    .cloned()
+            })
             .and_then(|current| options.iter().position(|option| *option == current));
         let last = options.len().saturating_sub(1);
         let target = match (event.key(), current) {
@@ -545,9 +550,7 @@ impl HTMLSelectElement {
         };
         let extend = event.modifiers().contains(Modifiers::SHIFT);
         self.select_list_box_rows(cx, target, false, extend);
-        target
-            .upcast::<Element>()
-            .ScrollIntoViewIfNeeded(cx, false);
+        target.upcast::<Element>().ScrollIntoViewIfNeeded(cx, false);
         true
     }
 
@@ -583,7 +586,8 @@ impl HTMLSelectElement {
 
         let mut selection_did_change = false;
         for (index, candidate) in options.iter().enumerate() {
-            let in_range = range.contains(&index) && !candidate.upcast::<Element>().disabled_state();
+            let in_range =
+                range.contains(&index) && !candidate.upcast::<Element>().disabled_state();
             let should_be_selected = match (multiple, toggle, extend) {
                 (true, true, false) if index == target => !candidate.Selected(),
                 (true, true, _) => candidate.Selected() || in_range,

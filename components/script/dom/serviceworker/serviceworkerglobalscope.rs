@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Sender, after};
 use devtools_traits::DevtoolScriptControlMsg;
 use dom_struct::dom_struct;
-use stylo_atoms::Atom;
 use fonts::FontContext;
 use js::context::{JSContext, RawJSContext};
 use js::jsapi::JS_AddInterruptCallback;
@@ -31,6 +30,7 @@ use servo_constellation_traits::{
 };
 use servo_url::{MutableOrigin, ServoUrl};
 use style::thread_state::{self, ThreadState};
+use stylo_atoms::Atom;
 
 use crate::dom::abstractworker::WorkerScriptMsg;
 use crate::dom::abstractworkerglobalscope::{WorkerEventLoopMethods, run_worker_event_loop};
@@ -49,7 +49,6 @@ use crate::dom::csp::Violation;
 use crate::dom::debugger::debuggerglobalscope::DebuggerGlobalScope;
 use crate::dom::dedicatedworkerglobalscope::AutoWorkerReset;
 use crate::dom::event::Event;
-use crate::dom::eventtarget::EventTarget;
 use crate::dom::extendableevent::ExtendableEvent;
 use crate::dom::extendablemessageevent::{ExtendableMessageEvent, MessageSource};
 use crate::dom::globalscope::GlobalScope;
@@ -582,12 +581,12 @@ impl ServiceWorkerGlobalScope {
         use crate::dom::bindings::codegen::Bindings::RequestBinding::RequestInit;
         use crate::dom::bindings::codegen::UnionTypes::RequestOrUSVString;
         use crate::dom::bindings::str::USVString;
-        use crate::realms::enter_auto_realm;
         use crate::dom::promisenativehandler::PromiseNativeHandler;
         use crate::dom::request::Request;
         use crate::dom::serviceworker::fetchevent::{
             FetchEvent, RespondWithFulfill, RespondWithReject,
         };
+        use crate::realms::enter_auto_realm;
 
         let request = match Request::constructor(
             cx,

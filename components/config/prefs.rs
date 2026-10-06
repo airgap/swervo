@@ -224,9 +224,9 @@ pub struct Preferences {
     /// Enable WebGL2 APIs.
     // feature: WebGL2 | #41394 | Web/API/WebGL2RenderingContext
     pub dom_webgl2_enabled: bool,
-    // feature: Media Source Extensions | Web/API/Media_Source_Extensions_API
+    // feature: Media Source Extensions | #22416 | Web/API/Media_Source_Extensions_API
     pub dom_mediasource_enabled: bool,
-    // feature: Encrypted Media Extensions (EME) | Web/API/Encrypted_Media_Extensions_API
+    // feature: Encrypted Media Extensions (EME) | #27623 | Web/API/Encrypted_Media_Extensions_API
     pub dom_eme_enabled: bool,
     // feature: WebRTC | #41396 | Web/API/WebRTC_API
     pub dom_webrtc_enabled: bool,

@@ -3,15 +3,15 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::fmt::{Debug, Formatter};
-use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
 
 use app_units::Au;
 use atomic_refcell::{AtomicRef, AtomicRefCell};
-use rustc_hash::FxHashMap;
 use euclid::Point2D;
 use layout_api::LayoutDamage;
 use malloc_size_of_derive::MallocSizeOf;
+use rustc_hash::FxHashMap;
 use servo_arc::Arc as ServoArc;
 use style::Zero;
 use style::computed_values::position::T as Position;
@@ -37,6 +37,8 @@ use crate::sizing::{
 use crate::traversal::ElementDamageSet;
 use crate::{ConstraintSpace, ContainingBlock, ContainingBlockSize};
 
+type InlineContentSizesCacheEntry = (SizeConstraint, Option<Au>, InlineContentSizesResult);
+
 /// A box tree node that handles containing information about style and the original DOM
 /// node or pseudo-element that it is based on. This also handles caching of layout values
 /// such as the inline content sizes to avoid recalculating these values during layout
@@ -47,8 +49,7 @@ use crate::{ConstraintSpace, ContainingBlock, ContainingBlockSize};
 pub(crate) struct LayoutBoxBase {
     pub base_fragment_info: BaseFragmentInfo,
     pub style: ServoArc<ComputedValues>,
-    pub cached_inline_content_size:
-        AtomicRefCell<Option<Box<(SizeConstraint, Option<Au>, InlineContentSizesResult)>>>,
+    pub cached_inline_content_size: AtomicRefCell<Option<Box<InlineContentSizesCacheEntry>>>,
     pub outer_inline_content_sizes_depend_on_content: AtomicBool,
 
     /// The cached layout results for this [`LayoutBoxBase`]. These are either cached
@@ -196,9 +197,11 @@ impl LayoutBoxBase {
 
         // <https://drafts.csswg.org/css-conditional-5/#container-type>: a size container has
         // inline-size containment, so its intrinsic inline size is that of an empty box.
-        let result = if self.style.clone_container_type().intersects(
-            ContainerType::INLINE_SIZE | ContainerType::SIZE,
-        ) {
+        let result = if self
+            .style
+            .clone_container_type()
+            .intersects(ContainerType::INLINE_SIZE | ContainerType::SIZE)
+        {
             InlineContentSizesResult {
                 sizes: ContentSizes::zero(),
                 depends_on_block_constraints: false,

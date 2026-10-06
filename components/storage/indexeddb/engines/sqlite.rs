@@ -27,6 +27,9 @@ mod object_data_model;
 mod object_store_index_model;
 mod object_store_model;
 
+/// An index value and its primary key, both in their serialized storage representation.
+type SerializedIndexEntry = (Vec<u8>, Vec<u8>);
+
 fn range_to_query(range: IndexedDBKeyRange) -> Condition {
     // Special case for optimization
     if let Some(singleton) = range.as_singleton() {
@@ -400,11 +403,17 @@ impl SqliteEngine {
             binds.push(encoding::serialize(singleton));
         } else {
             if let Some(lower) = range.lower.as_ref() {
-                parts.push(format!("value {} ?", if range.lower_open { ">" } else { ">=" }));
+                parts.push(format!(
+                    "value {} ?",
+                    if range.lower_open { ">" } else { ">=" }
+                ));
                 binds.push(encoding::serialize(lower));
             }
             if let Some(upper) = range.upper.as_ref() {
-                parts.push(format!("value {} ?", if range.upper_open { "<" } else { "<=" }));
+                parts.push(format!(
+                    "value {} ?",
+                    if range.upper_open { "<" } else { "<=" }
+                ));
                 binds.push(encoding::serialize(upper));
             }
         }
@@ -419,8 +428,12 @@ impl SqliteEngine {
         unique: bool,
         range: IndexedDBKeyRange,
         count: Option<u32>,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Error> {
-        let table = if unique { "unique_index_data" } else { "index_data" };
+    ) -> Result<Vec<SerializedIndexEntry>, Error> {
+        let table = if unique {
+            "unique_index_data"
+        } else {
+            "index_data"
+        };
         let (mut conds, binds) = Self::index_value_conditions(&range);
         conds.insert(0, "index_id = ?".to_string());
         let limit = match count {
@@ -453,10 +466,18 @@ impl SqliteEngine {
         unique: bool,
         range: IndexedDBKeyRange,
     ) -> Result<u64, Error> {
-        let table = if unique { "unique_index_data" } else { "index_data" };
+        let table = if unique {
+            "unique_index_data"
+        } else {
+            "index_data"
+        };
         let (mut conds, binds) = Self::index_value_conditions(&range);
         conds.insert(0, "index_id = ?".to_string());
-        let sql = format!("SELECT COUNT(*) FROM {} WHERE {}", table, conds.join(" AND "));
+        let sql = format!(
+            "SELECT COUNT(*) FROM {} WHERE {}",
+            table,
+            conds.join(" AND ")
+        );
         let mut stmt = connection.prepare(&sql)?;
         let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&index_id];
         for b in &binds {
@@ -494,7 +515,8 @@ impl SqliteEngine {
             return Self::get_item(connection, store, key_range);
         };
         let store_id = store.id;
-        let Some((index_id, unique)) = Self::lookup_index(connection, store_id, &index_name)? else {
+        let Some((index_id, unique)) = Self::lookup_index(connection, store_id, &index_name)?
+        else {
             return Ok(None);
         };
         match Self::index_entries(connection, index_id, unique, key_range, Some(1))?
@@ -516,13 +538,16 @@ impl SqliteEngine {
             return Self::get_key(connection, store, key_range)
                 .map(|opt| opt.and_then(|k| encoding::deserialize(&k)));
         };
-        let Some((index_id, unique)) = Self::lookup_index(connection, store.id, &index_name)? else {
+        let Some((index_id, unique)) = Self::lookup_index(connection, store.id, &index_name)?
+        else {
             return Ok(None);
         };
-        Ok(Self::index_entries(connection, index_id, unique, key_range, Some(1))?
-            .into_iter()
-            .next()
-            .and_then(|(_, primary_key)| encoding::deserialize(&primary_key)))
+        Ok(
+            Self::index_entries(connection, index_id, unique, key_range, Some(1))?
+                .into_iter()
+                .next()
+                .and_then(|(_, primary_key)| encoding::deserialize(&primary_key)),
+        )
     }
 
     fn op_get_all_keys(
@@ -539,13 +564,16 @@ impl SqliteEngine {
                     .collect()
             });
         };
-        let Some((index_id, unique)) = Self::lookup_index(connection, store.id, &index_name)? else {
+        let Some((index_id, unique)) = Self::lookup_index(connection, store.id, &index_name)?
+        else {
             return Ok(Vec::new());
         };
-        Ok(Self::index_entries(connection, index_id, unique, key_range, count)?
-            .into_iter()
-            .filter_map(|(_, primary_key)| encoding::deserialize(&primary_key))
-            .collect())
+        Ok(
+            Self::index_entries(connection, index_id, unique, key_range, count)?
+                .into_iter()
+                .filter_map(|(_, primary_key)| encoding::deserialize(&primary_key))
+                .collect(),
+        )
     }
 
     fn op_get_all_items(
@@ -559,11 +587,13 @@ impl SqliteEngine {
             return Self::get_all_items(connection, store, key_range, count);
         };
         let store_id = store.id;
-        let Some((index_id, unique)) = Self::lookup_index(connection, store_id, &index_name)? else {
+        let Some((index_id, unique)) = Self::lookup_index(connection, store_id, &index_name)?
+        else {
             return Ok(Vec::new());
         };
         let mut values = Vec::new();
-        for (_, primary_key) in Self::index_entries(connection, index_id, unique, key_range, count)? {
+        for (_, primary_key) in Self::index_entries(connection, index_id, unique, key_range, count)?
+        {
             if let Some(value) = Self::object_data_value(connection, store_id, &primary_key)? {
                 values.push(value);
             }
@@ -580,7 +610,8 @@ impl SqliteEngine {
         let Some(index_name) = index else {
             return Self::count(connection, store, key_range).map(|r| r as u64);
         };
-        let Some((index_id, unique)) = Self::lookup_index(connection, store.id, &index_name)? else {
+        let Some((index_id, unique)) = Self::lookup_index(connection, store.id, &index_name)?
+        else {
             return Ok(0);
         };
         Self::index_count(connection, index_id, unique, key_range)
@@ -608,7 +639,8 @@ impl SqliteEngine {
             });
         };
         let store_id = store.id;
-        let Some((index_id, unique)) = Self::lookup_index(connection, store_id, &index_name)? else {
+        let Some((index_id, unique)) = Self::lookup_index(connection, store_id, &index_name)?
+        else {
             return Ok(Vec::new());
         };
         // For an index cursor the cursor key is the index value and the primary key is the
@@ -623,8 +655,8 @@ impl SqliteEngine {
             ) else {
                 continue;
             };
-            let value = Self::object_data_value(connection, store_id, &primary_key)?
-                .unwrap_or_default();
+            let value =
+                Self::object_data_value(connection, store_id, &primary_key)?.unwrap_or_default();
             records.push(IndexedDBRecord {
                 key,
                 primary_key: primary,

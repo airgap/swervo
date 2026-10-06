@@ -11,7 +11,9 @@ use std::ptr;
 use std::ptr::NonNull;
 
 use js::context::{JSContext, RawJSContext};
-use js::conversions::{ConversionResult, FromJSValConvertible, ToJSValConvertible, jsstr_to_string};
+use js::conversions::{
+    ConversionResult, FromJSValConvertible, ToJSValConvertible, jsstr_to_string,
+};
 use js::glue::{GetProxyHandler, GetProxyHandlerFamily, GetProxyPrivate, SetProxyPrivate};
 use js::jsapi::{
     CallArgs, DOMProxyShadowsResult, GetObjectRealmOrNull, GetRealmPrincipals, GetStaticPrototype,

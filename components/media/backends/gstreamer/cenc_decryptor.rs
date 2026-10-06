@@ -103,7 +103,11 @@ mod imp {
         /// Answer the demuxer's `drm-preferred-decryption-system-id` context query with Clear Key,
         /// so qtdemux/matroskademux select the Clear Key pssh and attach the per-sample crypto
         /// info (without this, qtdemux "fails to attach cenc metadata" and no decryption happens).
-        fn query(&self, direction: gstreamer::PadDirection, query: &mut gstreamer::QueryRef) -> bool {
+        fn query(
+            &self,
+            direction: gstreamer::PadDirection,
+            query: &mut gstreamer::QueryRef,
+        ) -> bool {
             if let gstreamer::QueryViewMut::Context(q) = query.view_mut() &&
                 q.context_type() == "drm-preferred-decryption-system-id"
             {
@@ -115,7 +119,10 @@ mod imp {
                     .structure_mut()
                     .set("decryption-system-id", CLEARKEY_SYSTEM_ID);
                 q.set_context(&context);
-                gstreamer::debug!(CAT, "answered drm-preferred-decryption-system-id -> clearkey");
+                gstreamer::debug!(
+                    CAT,
+                    "answered drm-preferred-decryption-system-id -> clearkey"
+                );
                 return true;
             }
             BaseTransformImplExt::parent_query(self, direction, query)
@@ -236,7 +243,9 @@ mod imp {
             // NB: map_writable() can hand back a *merged copy* for a multi-memory buffer, so
             // in-place writes to it silently do not reach downstream — copy_from_slice does.
             let mut data = {
-                let map = buffer.map_readable().map_err(|_| gstreamer::FlowError::Error)?;
+                let map = buffer
+                    .map_readable()
+                    .map_err(|_| gstreamer::FlowError::Error)?;
                 map.to_vec()
             };
             clearkey::decrypt_subsamples(&key16, &iv, &mut data, &subsamples);
@@ -245,7 +254,7 @@ mod imp {
                 .map_err(|_| gstreamer::FlowError::Error)?;
 
             // Drop the protection meta so downstream treats the buffer as clear.
-            while let Some(mut meta) = buffer.meta_mut::<gstreamer::meta::ProtectionMeta>() {
+            while let Some(meta) = buffer.meta_mut::<gstreamer::meta::ProtectionMeta>() {
                 let _ = meta.remove();
             }
             // Remember this PTS so a later meta-less re-push of the same sample is dropped.

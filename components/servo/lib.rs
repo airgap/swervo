@@ -60,6 +60,9 @@ pub use servo_base::id::WebViewId;
 pub use servo_config::opts::{DiagnosticsLogging, DiagnosticsLoggingOption, Opts, OutputOptions};
 pub use servo_config::prefs::{PrefValue, Preferences, UserAgentPlatform};
 pub use servo_config::{opts, pref, prefs};
+// Sandbox backend symbols (constellation) surfaced on the `servo` public API so the embedder
+// can apply the *same* content-process policy in --sandbox-selftest (no policy drift).
+pub use servo_constellation::{SandboxOutcome, apply_sandbox, content_process_policy};
 pub use servo_geometry::{
     DeviceIndependentIntRect, DeviceIndependentPixel, convert_rect_to_css_pixel,
 };
@@ -79,9 +82,6 @@ pub use crate::gamepad_delegate::{
 };
 pub use crate::network_manager::{CacheEntry, NetworkManager};
 pub use crate::servo::{Servo, ServoBuilder, run_content_process};
-// Sandbox backend symbols (constellation) surfaced on the `servo` public API so the embedder
-// can apply the *same* content-process policy in --sandbox-selftest (no policy drift).
-pub use servo_constellation::{SandboxOutcome, apply_sandbox, content_process_policy};
 pub use crate::servo_delegate::{ServoDelegate, ServoError};
 pub use crate::site_data_manager::{SiteData, SiteDataManager, StorageType};
 pub use crate::user_content_manager::UserContentManager;

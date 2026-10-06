@@ -1,0 +1,91 @@
+name: AVIF dependency
+
+on:
+  pull_request:
+    paths:
+      - '.github/actions/setup-dav1d/**'
+      - '.github/workflows/dav1d.yml'
+      - 'etc/ci/setup_dav1d*'
+  workflow_dispatch:
+
+jobs:
+  native:
+    name: Native dav1d (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - uses: ./.github/actions/setup-dav1d
+      - name: Test dependency setup
+        run: python -m unittest discover -s etc/ci -p setup_dav1d_tests.py
+      - name: Verify Rust bindings link the static decoder
+        shell: bash
+        run: |
+          mkdir "$RUNNER_TEMP/dav1d-rust-smoke"
+          cd "$RUNNER_TEMP/dav1d-rust-smoke"
+          cargo init --name dav1d-smoke --bin
+          printf '\n[dependencies.dav1d-sys]\nversion = "=0.8.3"\n' >> Cargo.toml
+          cat > src/main.rs <<'RS'
+          fn main() {
+              unsafe {
+                  let mut settings = std::mem::MaybeUninit::uninit();
+                  dav1d_sys::dav1d_default_settings(settings.as_mut_ptr());
+                  let mut context = std::ptr::null_mut();
+                  assert_eq!(dav1d_sys::dav1d_open(&mut context, settings.as_ptr()), 0);
+                  dav1d_sys::dav1d_close(&mut context);
+              }
+          }
+          RS
+          cargo update -p system-deps --precise 7.0.8
+          cargo run --locked
+
+  android:
+    name: Android dav1d (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-linux-android, armv7-linux-androideabi, i686-linux-android, x86_64-linux-android]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r28b
+      - uses: ./.github/actions/setup-dav1d
+        with:
+          target: ${{ matrix.target }}
+        env:
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+
+  ohos:
+    name: OpenHarmony dav1d (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-unknown-linux-ohos, x86_64-unknown-linux-ohos]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - uses: openharmony-rs/setup-ohos-sdk@v1.0.0
+        id: sdk
+        with:
+          version: '6.0.0.1'
+          fixup-path: true
+      - uses: ./.github/actions/setup-dav1d
+        with:
+          target: ${{ matrix.target }}
+        env:
+          OHOS_SDK_NATIVE: ${{ steps.sdk.outputs.ohos_sdk_native }}

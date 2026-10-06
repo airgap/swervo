@@ -53,9 +53,7 @@ impl ServiceWorkerUnprivilegedContent {
             // manager thread panics on its first id), then keep the process alive until the
             // manager exits. In single-process mode the installer is already primed and the
             // manager thread just shares the process.
-            PipelineNamespace::set_installer_sender(
-                self.senders.namespace_request_sender.clone(),
-            );
+            PipelineNamespace::set_installer_sender(self.senders.namespace_request_sender.clone());
         }
         let join_handle = SWF::create(self.senders, self.origin);
         if multiprocess && let Some(join_handle) = join_handle {

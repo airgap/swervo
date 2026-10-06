@@ -21,6 +21,7 @@ mod http_loader;
 mod image_cache;
 mod resource_thread;
 mod subresource_integrity;
+mod svg_text;
 use std::sync::Arc;
 
 use content_security_policy as csp;
@@ -147,6 +148,7 @@ fn new_fetch_context(
         ignore_certificate_errors: false,
         preloaded_resources: Default::default(),
         in_flight_keep_alive_records: Default::default(),
+        sw_managers: Default::default(),
     }
 }
 impl FetchTaskTarget for FetchResponseCollector {

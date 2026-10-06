@@ -11,16 +11,15 @@ use std::cell::Cell;
 use std::ffi::CString;
 
 use dom_struct::dom_struct;
-use js::rust::HandleObject;
 use js::context::JSContext;
-
-use crate::dom::bindings::codegen::Bindings::MediaSourceBinding::{
-    EndOfStreamError, MediaSourceMethods, ReadyState,
-};
+use js::rust::HandleObject;
 use script_bindings::reflector::reflect_dom_object_with_proto;
 use servo_media::{ServoMedia, SupportsMediaType};
 use stylo_atoms::Atom;
 
+use crate::dom::bindings::codegen::Bindings::MediaSourceBinding::{
+    EndOfStreamError, MediaSourceMethods, ReadyState,
+};
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
@@ -176,10 +175,14 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
             .media_element()
             .and_then(|element| element.get_player())
             .expect("an open MediaSource has a media element with a player");
-        let stream = player.lock().unwrap().add_source_buffer().map_err(|error| {
-            warn!("MSE addSourceBuffer: {error:?}");
-            Error::NotSupported(None)
-        })?;
+        let stream = player
+            .lock()
+            .unwrap()
+            .add_source_buffer()
+            .map_err(|error| {
+                warn!("MSE addSourceBuffer: {error:?}");
+                Error::NotSupported(None)
+            })?;
         let source_buffer =
             SourceBuffer::new(&self.global(), self, stream, CanGc::deprecated_note());
         self.source_buffers.add(&source_buffer);

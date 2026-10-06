@@ -181,12 +181,48 @@ jobs:
       - name: Install crown
         run: cargo install --path support/crown
 
+      - name: Setup dav1d
+        uses: ./.github/actions/setup-dav1d
       - name: Build (${{ inputs.profile }})
         env:
           RUSTFLAGS: ${{ inputs.profile == 'checked-release' && '-D warnings' || '' }}
         run: |
           ./mach build --use-crown --locked --profile ${{ inputs.profile }} ${{ inputs.build-args }}
           mv target/cargo-timings target/cargo-timings-linux
+      - name: Discarded-document caret regression
+        id: caret_regression
+        if: ${{ inputs.unit-tests }}
+        run: |
+          ./mach test-wpt --profile ${{ inputs.profile }} --processes 1 --timeout-multiplier 2 \
+            --log-raw target/selection-modify-wpt.log \
+            --log-wptreport target/selection-modify-wptreport.json \
+            /_mozilla/mozilla/selection-modify-discarded-document.html
+      - name: Archive caret regression result
+        if: ${{ always() && inputs.unit-tests && steps.caret_regression.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: caret-regression-${{ inputs.profile }}
+          path: |
+            target/selection-modify-wpt.log
+            target/selection-modify-wptreport.json
+          if-no-files-found: warn
+      - name: Clipboard event regressions
+        id: clipboard_regression
+        if: ${{ inputs.unit-tests }}
+        run: |
+          ./mach test-wpt --profile ${{ inputs.profile }} --processes 1 --timeout-multiplier 2 \
+            --log-raw target/clipboard-wpt.log \
+            --log-wptreport target/clipboard-wptreport.json \
+            /_mozilla/input-events/input-events-textarea-cut-paste.html
+      - name: Archive clipboard regression results
+        if: ${{ always() && inputs.unit-tests && steps.clipboard_regression.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: clipboard-regression-${{ inputs.profile }}
+          path: |
+            target/clipboard-wpt.log
+            target/clipboard-wptreport.json
+          if-no-files-found: warn
       - name: Smoketest
         run: xvfb-run ./mach smoketest --profile ${{ inputs.profile  }}
       - name: Script tests
@@ -304,6 +340,8 @@ jobs:
       # installing lld is the easiest way to get it in path.
       - name: install lld
         run: sudo apt-get install -y lld
+      - name: Setup dav1d
+        uses: ./.github/actions/setup-dav1d
       - name: Compile libservo with MSRV
         env:
           # lld seems to use less memory and prevents OOM errors during linking.
@@ -349,6 +387,8 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-c
+      - name: Setup dav1d
+        uses: ./.github/actions/setup-dav1d
       - name: Build and test servo-capi-tests
         run: cargo test -p servo-capi-tests --locked
 
@@ -414,6 +454,8 @@ jobs:
         run: |
           sudo apt update
           ./mach bootstrap --yes --skip-lints
+      - name: Setup dav1d
+        uses: ./.github/actions/setup-dav1d
       - name: Run unit-tests with coverage
         shell: bash
         env:

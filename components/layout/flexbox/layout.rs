@@ -1871,7 +1871,8 @@ impl FlexItem<'_> {
             ..
         } = layout;
 
-        let content_block_size = content_block_size.max(aspect_ratio_block_size.unwrap_or_default());
+        let content_block_size =
+            content_block_size.max(aspect_ratio_block_size.unwrap_or_default());
         let hypothetical_cross_size = if cross_axis_is_item_block_axis {
             lazy_block_size.resolve(|| content_block_size)
         } else {
@@ -2358,7 +2359,6 @@ impl FlexItemBox {
             content_min_main_size,
             content_max_main_size,
             pbm_auto_is_zero,
-            preferred_aspect_ratio,
             automatic_cross_size_for_intrinsic_sizing,
             ..
         } = self.to_flex_item(
@@ -2500,8 +2500,7 @@ impl FlexItemBox {
         // TODO: This is wrong if the item writing mode is different from the flex
         // container's writing mode.
         let inline_size = {
-            let stretch_size =
-                flex_context.containing_block.size.inline - pbm_auto_is_zero.cross;
+            let stretch_size = flex_context.containing_block.size.inline - pbm_auto_is_zero.cross;
             let get_content_size = || {
                 self.inline_content_sizes(
                     flex_context,

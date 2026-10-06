@@ -15,7 +15,8 @@ use std::rc::Rc;
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use log::error;
-use servo_base::generic_channel::GenericCallback;
+use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
+use servo_base::generic_channel::{GenericCallback, GenericSend};
 use storage_traits::cache_storage::{
     CacheApiQueryOptions, CacheApiResponse, CacheStorageThreadMsg,
 };
@@ -27,15 +28,13 @@ use crate::dom::bindings::codegen::Bindings::CacheStorageBinding::{
 use crate::dom::bindings::codegen::UnionTypes::RequestOrUSVString;
 use crate::dom::bindings::error::Error;
 use crate::dom::bindings::refcounted::TrustedPromise;
-use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
-use servo_base::generic_channel::GenericSend;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::cache::{Cache, request_info_to_cache_request};
-use crate::dom::response::Response;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::promise::Promise;
+use crate::dom::response::Response;
 use crate::task_source::SendableTaskSource;
 
 /// Convert the bindings' `CacheQueryOptions` dictionary to the transferable form.
@@ -73,10 +72,9 @@ impl CacheReplyHandler {
             error!("Cache API reply handler fired twice.");
             return;
         };
-        self.task_source
-            .queue(task!(cache_api_reply: move |cx| {
-                settle(cx, trusted_promise.root(), value);
-            }));
+        self.task_source.queue(task!(cache_api_reply: move |cx| {
+            settle(cx, trusted_promise.root(), value);
+        }));
     }
 }
 
@@ -118,7 +116,10 @@ impl CacheStorageMethods<crate::DomTypeHolder> for CacheStorage {
 
         let mut handler = CacheReplyHandler::new(
             &promise,
-            global.task_manager().dom_manipulation_task_source().to_sendable(),
+            global
+                .task_manager()
+                .dom_manipulation_task_source()
+                .to_sendable(),
         );
         let callback = GenericCallback::new(move |message: Result<Vec<CacheApiResponse>, _>| {
             let responses = message.unwrap_or_default();
@@ -155,7 +156,10 @@ impl CacheStorageMethods<crate::DomTypeHolder> for CacheStorage {
 
         let mut handler = CacheReplyHandler::new(
             &promise,
-            global.task_manager().dom_manipulation_task_source().to_sendable(),
+            global
+                .task_manager()
+                .dom_manipulation_task_source()
+                .to_sendable(),
         );
         let callback = GenericCallback::new(move |message: Result<bool, _>| {
             let has = message.unwrap_or(false);
@@ -179,7 +183,10 @@ impl CacheStorageMethods<crate::DomTypeHolder> for CacheStorage {
 
         let mut handler = CacheReplyHandler::new(
             &promise,
-            global.task_manager().dom_manipulation_task_source().to_sendable(),
+            global
+                .task_manager()
+                .dom_manipulation_task_source()
+                .to_sendable(),
         );
         let callback = GenericCallback::new(move |message: Result<Result<i64, String>, _>| {
             let result = match message {
@@ -216,7 +223,10 @@ impl CacheStorageMethods<crate::DomTypeHolder> for CacheStorage {
 
         let mut handler = CacheReplyHandler::new(
             &promise,
-            global.task_manager().dom_manipulation_task_source().to_sendable(),
+            global
+                .task_manager()
+                .dom_manipulation_task_source()
+                .to_sendable(),
         );
         let callback = GenericCallback::new(move |message: Result<bool, _>| {
             let deleted = message.unwrap_or(false);
@@ -226,11 +236,13 @@ impl CacheStorageMethods<crate::DomTypeHolder> for CacheStorage {
         })
         .expect("Could not create CacheStorage delete callback");
 
-        let _ = global.storage_threads().send(CacheStorageThreadMsg::Delete {
-            sender: callback,
-            origin: global.origin().immutable().clone(),
-            name: cache_name.to_string(),
-        });
+        let _ = global
+            .storage_threads()
+            .send(CacheStorageThreadMsg::Delete {
+                sender: callback,
+                origin: global.origin().immutable().clone(),
+                name: cache_name.to_string(),
+            });
 
         promise
     }
@@ -242,7 +254,10 @@ impl CacheStorageMethods<crate::DomTypeHolder> for CacheStorage {
 
         let mut handler = CacheReplyHandler::new(
             &promise,
-            global.task_manager().dom_manipulation_task_source().to_sendable(),
+            global
+                .task_manager()
+                .dom_manipulation_task_source()
+                .to_sendable(),
         );
         let callback = GenericCallback::new(move |message: Result<Vec<String>, _>| {
             let names = message.unwrap_or_default();

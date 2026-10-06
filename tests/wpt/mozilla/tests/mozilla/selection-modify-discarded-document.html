@@ -1,0 +1,40 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Selection.modify does not use stale layout in a discarded iframe document</title>
+<link rel="help" href="https://w3c.github.io/selection-api/#dom-selection-modify">
+<script src="/resources/testharness.js"></script>
+<script src="/resources/testharnessreport.js"></script>
+<script src="/common/gc.js"></script>
+<body>
+<script>
+promise_test(async t => {
+  const frame = document.createElement("iframe");
+  t.add_cleanup(() => frame.remove());
+  const loaded = new Promise(resolve => frame.onload = resolve);
+  frame.srcdoc = '<div id="editor" contenteditable>Original laid-out text</div>';
+  document.body.append(frame);
+  await loaded;
+
+  const doc = frame.contentDocument;
+  const editor = doc.getElementById("editor");
+  const selection = frame.contentWindow.getSelection();
+  selection.collapse(editor.firstChild, 0);
+  selection.modify("move", "forward", "character");
+  editor.getBoundingClientRect();
+
+  // Retain the document, selection, and editing host, but discard its browsing context.
+  // Removing its old text then permits collection while its former layout is retained.
+  frame.remove();
+  editor.textContent = "Replacement text";
+  selection.collapse(editor, 0);
+  assert_equals(selection.anchorNode, editor);
+  assert_equals(selection.anchorOffset, 0);
+  await garbageCollect();
+
+  selection.modify("move", "forward", "character");
+  assert_equals(selection.anchorNode, editor);
+  assert_equals(selection.anchorOffset, 0);
+  assert_equals(selection.focusNode, editor);
+  assert_equals(selection.focusOffset, 0);
+}, "A discarded iframe document does not reuse caret addresses from its previous layout");
+</script>

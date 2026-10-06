@@ -417,8 +417,8 @@ impl Range {
         // Nodes preceding the start node in tree order are neither contained nor partially
         // contained, and neither is any node from the first one after the end boundary point.
         let mut rects = Vec::new();
-        for node in iter::once(start.clone())
-            .chain(start.following_nodes(&ancestor, ShadowIncluding::No))
+        for node in
+            iter::once(start.clone()).chain(start.following_nodes(&ancestor, ShadowIncluding::No))
         {
             if node != end && bp_position(&node, 0, &end, end_offset) != Some(Ordering::Less) {
                 break;

@@ -38,6 +38,9 @@ use crate::dom::stream::readablestream::ReadableStream;
 use crate::dom::stream::underlyingsourcecontainer::UnderlyingSourceType;
 use crate::script_runtime::{CanGc, StreamConsumer};
 
+/// Response metadata persisted by the Cache API: status, status message, headers, and URL.
+pub(crate) type CacheApiResponseParts = (u16, Vec<u8>, Vec<(String, Vec<u8>)>, Option<String>);
+
 #[dom_struct]
 pub(crate) struct Response {
     reflector_: Reflector,
@@ -177,10 +180,7 @@ impl Response {
 
     /// Snapshot the parts of this response the Cache API persists, minus the body (which
     /// `Cache.put` reads separately): (status, status message, headers, response url).
-    pub(crate) fn cache_api_parts(
-        &self,
-        cx: &mut js::context::JSContext,
-    ) -> (u16, Vec<u8>, Vec<(String, Vec<u8>)>, Option<String>) {
+    pub(crate) fn cache_api_parts(&self, cx: &mut js::context::JSContext) -> CacheApiResponseParts {
         let (code, message) = {
             let status = self.status.borrow();
             (status.code().as_u16(), status.message().to_vec())

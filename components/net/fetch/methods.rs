@@ -34,8 +34,7 @@ use net_traits::response::{Response, ResponseBody, ResponseType, TerminationReas
 use net_traits::{
     CustomResponseMediator, FetchTaskTarget, NetworkError, ReferrerPolicy, ResourceAttribute,
     ResourceFetchTiming, ResourceFetchTimingContainer, ResourceTimeValue, ResourceTimingType,
-    WebSocketDomAction,
-    WebSocketNetworkEvent, set_default_accept_language,
+    WebSocketDomAction, WebSocketNetworkEvent, set_default_accept_language,
 };
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;

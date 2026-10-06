@@ -15,6 +15,7 @@ mod layout_node;
 mod pseudo_element_chain;
 
 use std::any::Any;
+use std::cmp::Ordering;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -268,7 +269,10 @@ pub fn parse_view_box(value: &str) -> Option<[f32; 4]> {
         numbers.next()?.ok()?,
         numbers.next()?.ok()?,
     ];
-    if numbers.next().is_some() || !(view_box[2] > 0.0) || !(view_box[3] > 0.0) {
+    if numbers.next().is_some() ||
+        view_box[2].partial_cmp(&0.0) != Some(Ordering::Greater) ||
+        view_box[3].partial_cmp(&0.0) != Some(Ordering::Greater)
+    {
         return None;
     }
     Some(view_box)
@@ -451,10 +455,7 @@ pub trait Layout {
     fn query_containing_block(&self, node: TrustedNodeAddress) -> Option<UntrustedNodeAddress>;
     /// Resolve an AccessKit accessibility node id to the DOM node backing it, so an incoming
     /// assistive-technology action can be dispatched to that node (LYK-1378 / Servo #4344).
-    fn query_accessibility_node(
-        &self,
-        node_id: accesskit::NodeId,
-    ) -> Option<UntrustedNodeAddress>;
+    fn query_accessibility_node(&self, node_id: accesskit::NodeId) -> Option<UntrustedNodeAddress>;
     fn query_containing_block_is_descendant(
         &self,
         root: TrustedNodeAddress,
@@ -1113,7 +1114,33 @@ mod test {
 
     use pixels::{CorsStatus, ImageFrame, ImageMetadata, PixelFormat, RasterImage, Repeat};
 
-    use crate::ImageAnimationState;
+    use crate::{ImageAnimationState, parse_view_box};
+
+    #[test]
+    fn test_parse_view_box_dimensions() {
+        assert_eq!(
+            parse_view_box("0, 0, 40, 19.3"),
+            Some([0.0, 0.0, 40.0, 19.3])
+        );
+        assert_eq!(
+            parse_view_box("0 0 inf 10"),
+            Some([0.0, 0.0, f32::INFINITY, 10.0])
+        );
+        for value in [
+            "0 0 0 10",
+            "0 0 -0 10",
+            "0 0 -1 10",
+            "0 0 10 0",
+            "0 0 10 -1",
+            "0 0 NaN 10",
+            "0 0 10 NaN",
+            "0 0 -inf 10",
+            "0 0 10",
+            "0 0 10 10 10",
+        ] {
+            assert_eq!(parse_view_box(value), None, "{value}");
+        }
+    }
 
     #[test]
     fn test_animated_image_update() {

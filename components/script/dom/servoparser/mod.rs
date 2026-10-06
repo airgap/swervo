@@ -950,7 +950,11 @@ pub(crate) struct ParserContext {
 fn navgator_detect_download(metadata: Option<&Metadata>, url: &ServoUrl) -> Option<String> {
     let headers = metadata?.headers.as_ref()?;
     let cd = headers.get("content-disposition")?.to_str().ok()?;
-    if !cd.trim_start().to_ascii_lowercase().starts_with("attachment") {
+    if !cd
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("attachment")
+    {
         return None;
     }
     let mut filename = cd
@@ -963,7 +967,7 @@ fn navgator_detect_download(metadata: Option<&Metadata>, url: &ServoUrl) -> Opti
         .filter(|f| !f.is_empty())
         .or_else(|| {
             url.path_segments()
-                .and_then(|s| s.last().map(|s| s.to_string()))
+                .and_then(|mut s| s.next_back().map(|s| s.to_string()))
                 .filter(|s| !s.is_empty())
         })
         .unwrap_or_else(|| "download".to_string());
@@ -1472,17 +1476,16 @@ impl FetchResponseListener for ParserContext {
         self.parser = Some(Trusted::new(&*parser));
         // NavGator: if this navigation is an attachment, stream it to disk as a download
         // instead of rendering it. The (blank) document still completes; chunks go to the file.
-        if error.is_none() {
-            if let Some(path) = navgator_detect_download(metadata.as_ref(), &self.url) {
-                if let Ok(file) = std::fs::File::create(&path) {
-                    window.send_to_embedder(EmbedderMsg::DownloadStarted(
-                        self.webview_id,
-                        self.url.to_string(),
-                        path.clone(),
-                    ));
-                    self.download = Some((file, path));
-                }
-            }
+        if error.is_none() &&
+            let Some(path) = navgator_detect_download(metadata.as_ref(), &self.url) &&
+            let Ok(file) = std::fs::File::create(&path)
+        {
+            window.send_to_embedder(EmbedderMsg::DownloadStarted(
+                self.webview_id,
+                self.url.to_string(),
+                path.clone(),
+            ));
+            self.download = Some((file, path));
         }
         self.navigation_params = NavigationParams {
             policy_container,
@@ -1495,7 +1498,10 @@ impl FetchResponseListener for ParserContext {
         // Pages read `performance.timing` and measure from navigation marks while the document
         // is still arriving, so the fetch timing up to the response headers is recorded now.
         // `process_response_eof` replaces it with the final timing, which includes responseEnd.
-        if let Some(timing) = metadata.as_ref().and_then(|metadata| metadata.timing.clone()) {
+        if let Some(timing) = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.timing.clone())
+        {
             document.set_resource_fetch_timing(timing);
         }
         self.submit_resource_timing(cx);
@@ -1607,9 +1613,14 @@ impl FetchResponseListener for ParserContext {
             drop(file); // flush + close
             let success = status.is_ok();
             if let Some(parser) = self.parser.as_ref().map(|p| p.root()) {
-                parser.document.window().send_to_embedder(
-                    EmbedderMsg::DownloadCompleted(self.webview_id, path, success),
-                );
+                parser
+                    .document
+                    .window()
+                    .send_to_embedder(EmbedderMsg::DownloadCompleted(
+                        self.webview_id,
+                        path,
+                        success,
+                    ));
             }
             return;
         }

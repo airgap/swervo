@@ -127,12 +127,9 @@ impl HTMLAllCollection {
         }
 
         // Steps 2 and 5.
-        Some(HTMLCollectionOrElement::HTMLCollection(HTMLCollection::new(
-            cx,
-            self.global().as_window(),
-            &root,
-            Box::new(filter),
-        )))
+        Some(HTMLCollectionOrElement::HTMLCollection(
+            HTMLCollection::new(cx, self.global().as_window(), &root, Box::new(filter)),
+        ))
     }
 }
 

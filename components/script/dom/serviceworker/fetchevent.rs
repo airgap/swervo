@@ -13,29 +13,28 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use ipc_channel::ipc::IpcSender;
-use net_traits::CustomResponse;
-
 use dom_struct::dom_struct;
+use ipc_channel::ipc::IpcSender;
 use js::context::JSContext;
 use js::rust::HandleObject;
+use net_traits::CustomResponse;
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_dom_object_with_proto_and_cx;
 use stylo_atoms::Atom;
 
+use crate::dom::bindings::codegen::Bindings::EventBinding::EventMethods;
 use crate::dom::bindings::codegen::Bindings::FetchEventBinding::{
     FetchEventInit, FetchEventMethods,
 };
+use crate::dom::bindings::conversions::root_from_handlevalue;
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
-use crate::dom::bindings::codegen::Bindings::EventBinding::EventMethods;
 use crate::dom::event::Event;
 use crate::dom::promise::Promise;
-use crate::dom::request::Request;
-use crate::dom::bindings::conversions::root_from_handlevalue;
 use crate::dom::promisenativehandler::Callback;
+use crate::dom::request::Request;
 use crate::dom::response::Response;
 use crate::dom::serviceworker::extendableevent::ExtendableEvent;
 use crate::dom::serviceworker::serviceworkerglobalscope::ServiceWorkerGlobalScope;

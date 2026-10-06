@@ -32,8 +32,7 @@ use style::values::computed::{FontStretch, FontStyle, FontSynthesis, FontWeight}
 use style::values::generics::font::FontStyle as GenericFontStyle;
 use style::values::specified::font::{
     FontFamily as SpecifiedFontFamily, FontStretch as SpecifiedFontStretch,
-    FontStyle as SpecifiedFontStyleProperty, FontWeight as SpecifiedFontWeight,
-    SpecifiedFontStyle,
+    FontStyle as SpecifiedFontStyleProperty, FontWeight as SpecifiedFontWeight, SpecifiedFontStyle,
 };
 use style_traits::ParsingMode;
 
@@ -419,7 +418,15 @@ impl FontFaceSetMethods<crate::DomTypeHolder> for FontFaceSet {
     fn Clear(&self) {
         // Step 1. Remove all non-CSS-connected items from the FontFaceSet’s set entries,
         // its [[LoadedFonts]] list, and its [[FailedFonts]] list.
-        for face in self.set_entries.borrow_mut().drain(..) {
+        // Root every face before removing the set's traced references to them.
+        let faces: Vec<_> = self
+            .set_entries
+            .borrow()
+            .iter()
+            .map(Dom::as_rooted)
+            .collect();
+        self.set_entries.borrow_mut().clear();
+        for face in faces {
             face.remove_from_font_matching();
         }
 

@@ -20,12 +20,11 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::dom::bindings::codegen::Bindings::URLBinding::URLMethods;
+use crate::dom::bindings::codegen::UnionTypes::BlobOrMediaSource;
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::bindings::str::{DOMString, USVString};
-use crate::dom::bindings::codegen::UnionTypes::BlobOrMediaSource;
-use crate::dom::blob::Blob;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::url::urlhelper::UrlHelper;
 use crate::dom::url::urlsearchparams::URLSearchParams;
@@ -200,8 +199,7 @@ impl URLMethods<crate::DomTypeHolder> for URL {
             // <https://w3c.github.io/media-source/#dom-url-createobjecturl> — mint a fresh blob:
             // URL and register it against the MediaSource so an HTMLMediaElement can attach.
             BlobOrMediaSource::MediaSource(ref media_source) => {
-                let url =
-                    URL::unicode_serialization_blob_url(origin.immutable(), &Uuid::new_v4());
+                let url = URL::unicode_serialization_blob_url(origin.immutable(), &Uuid::new_v4());
                 global.register_media_source(url.clone(), media_source);
                 DOMString::from(url)
             },

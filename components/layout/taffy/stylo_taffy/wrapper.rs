@@ -5,14 +5,13 @@
 use std::ops::Deref;
 
 use app_units::Au;
-use style::Zero;
 use style::properties::ComputedValues;
 use style::values::CustomIdent;
 use style::values::computed::{BorderSideWidth, GridTemplateAreas, LengthPercentage};
 use style::values::generics::grid::{TrackListValue, TrackRepeat, TrackSize};
 use style::values::specified::BorderStyle;
 use style::values::specified::position::NamedArea;
-use style::{Atom, OwnedSlice};
+use style::{Atom, OwnedSlice, Zero};
 use taffy::prelude::TaffyAuto;
 
 use super::{convert, stylo};

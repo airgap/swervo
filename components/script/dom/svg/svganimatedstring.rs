@@ -51,8 +51,7 @@ impl SVGAnimatedStringMethods<crate::DomTypeHolder> for SVGAnimatedString {
     fn BaseVal(&self) -> DOMString {
         // `href` falls back to the deprecated `xlink:href` when absent.
         // <https://svgwg.org/svg2-draft/types.html#__svg__SVGURIReference__href>
-        if self.local_name == local_name!("href") && !self.element.has_attribute(&self.local_name)
-        {
+        if self.local_name == local_name!("href") && !self.element.has_attribute(&self.local_name) {
             return self
                 .element
                 .get_attribute_string_value_with_namespace(&ns!(xlink), &local_name!("href"))

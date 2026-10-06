@@ -14,7 +14,6 @@ use style::selector_parser::PseudoElement;
 
 use crate::dom::bindings::codegen::Bindings::DOMRectBinding::DOMRect_Binding::DOMRectMethods;
 use crate::dom::bindings::codegen::Bindings::ElementBinding::ElementMethods;
-use crate::dom::bindings::codegen::Bindings::EventBinding::EventMethods;
 use crate::dom::bindings::codegen::Bindings::MouseEventBinding::MouseEventMethods;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use crate::dom::bindings::inheritance::Castable;
@@ -100,13 +99,14 @@ impl RangeInputType {
         // The track and thumb are absolutely positioned against the padding box, with the
         // center of the thumb at the value's fraction of its width.
         let element = input.upcast::<Element>();
-        let padding_box_left = element.GetBoundingClientRect(cx).X() + f64::from(element.ClientLeft());
+        let padding_box_left =
+            element.GetBoundingClientRect(cx).X() + f64::from(element.ClientLeft());
         let padding_box_width = f64::from(element.ClientWidth());
         if padding_box_width <= 0.0 {
             return;
         }
-        let fraction =
-            ((f64::from(mouse_event.ClientX()) - padding_box_left) / padding_box_width).clamp(0.0, 1.0);
+        let fraction = ((f64::from(mouse_event.ClientX()) - padding_box_left) / padding_box_width)
+            .clamp(0.0, 1.0);
 
         let min = input
             .minimum()
@@ -117,7 +117,10 @@ impl RangeInputType {
         let value_before = input.Value();
         // The value sanitization algorithm snaps the value to the nearest step.
         input
-            .SetValue(cx, DOMString::from((min + fraction * (max - min)).to_string()))
+            .SetValue(
+                cx,
+                DOMString::from((min + fraction * (max - min)).to_string()),
+            )
             .expect("Setting the value of a range input can't fail");
         if input.Value() != value_before {
             input.queue_user_input_event();

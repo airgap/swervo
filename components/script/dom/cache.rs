@@ -15,19 +15,14 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use dom_struct::dom_struct;
-use log::error;
-use servo_base::generic_channel::GenericCallback;
-use servo_url::ServoUrl;
-use storage_traits::cache_storage::{
-    CacheApiQueryOptions, CacheApiRequest, CacheApiResponse, CacheStorageThreadMsg,
-};
-
 use js::context::JSContext;
 use js::realm::CurrentRealm;
 use js::rust::HandleValue as SafeHandleValue;
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
-use servo_base::generic_channel::GenericSend;
+use servo_base::generic_channel::{GenericCallback, GenericSend};
+use servo_url::ServoUrl;
+use storage_traits::cache_storage::{CacheApiRequest, CacheApiResponse, CacheStorageThreadMsg};
 
 use crate::body::BodyMixin;
 use crate::dom::bindings::codegen::Bindings::CacheBinding::{CacheMethods, CacheQueryOptions};
@@ -41,11 +36,11 @@ use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::ByteString;
 use crate::dom::cachestorage::{CacheReplyHandler, native_query_options};
-use crate::dom::request::Request;
-use crate::dom::response::Response;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::promise::Promise;
 use crate::dom::promisenativehandler::{Callback, PromiseNativeHandler};
+use crate::dom::request::Request;
+use crate::dom::response::Response;
 use crate::fetch::Fetch;
 use crate::realms::enter_auto_realm;
 
@@ -240,7 +235,7 @@ impl Cache {
                         return;
                     },
                 };
-                let fail_pending = pending.clone();
+                let fail_pending = pending;
                 reader.read_all_bytes(
                     cx,
                     Rc::new(move |_cx: &mut JSContext, bytes: &[u8]| {
@@ -309,20 +304,21 @@ impl Cache {
         let init = RequestInit::empty();
         let fetch_promise = Fetch(&global, info, init, realm_cx);
 
-        let fulfill = AddAllFetchFulfill {
+        // Keep the callbacks traced until the native handler takes ownership of them.
+        rooted!(&in(realm_cx) let mut fulfill = Some(AddAllFetchFulfill {
             cache: Dom::from_ref(self),
             run_id,
             cache_request: RefCell::new(Some(cache_request)),
-        };
-        let reject = AddAllFetchReject {
+        }));
+        rooted!(&in(realm_cx) let mut reject = Some(AddAllFetchReject {
             cache: Dom::from_ref(self),
             run_id,
-        };
+        }));
         let handler = PromiseNativeHandler::new(
             realm_cx,
             &global,
-            Some(Box::new(fulfill)),
-            Some(Box::new(reject)),
+            fulfill.take().map(|callback| Box::new(callback) as Box<_>),
+            reject.take().map(|callback| Box::new(callback) as Box<_>),
         );
         fetch_promise.append_native_handler(realm_cx, &handler);
     }
@@ -330,12 +326,15 @@ impl Cache {
 
 /// Fulfillment of one `addAll` fetch: validate and store the response.
 #[derive(JSTraceable, MallocSizeOf)]
+#[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
 struct AddAllFetchFulfill {
     cache: Dom<Cache>,
     run_id: u64,
     #[no_trace]
     cache_request: RefCell<Option<CacheApiRequest>>,
 }
+
+impl js::gc::Rootable for AddAllFetchFulfill {}
 
 impl Callback for AddAllFetchFulfill {
     fn callback(&self, cx: &mut CurrentRealm, v: SafeHandleValue) {
@@ -366,10 +365,13 @@ impl Callback for AddAllFetchFulfill {
 
 /// Rejection of one `addAll` fetch: the batch fails.
 #[derive(JSTraceable, MallocSizeOf)]
+#[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
 struct AddAllFetchReject {
     cache: Dom<Cache>,
     run_id: u64,
 }
+
+impl js::gc::Rootable for AddAllFetchReject {}
 
 impl Callback for AddAllFetchReject {
     fn callback(&self, cx: &mut CurrentRealm, _v: SafeHandleValue) {
@@ -497,11 +499,10 @@ impl CacheMethods<crate::DomTypeHolder> for Cache {
         // Validate every request up front; one bad request rejects the whole batch untouched.
         let mut converted = Vec::with_capacity(requests.len());
         for info in &requests {
-            match request_info_to_cache_request(&global, info)
-                .and_then(|cache_request| {
-                    validate_put_request(&cache_request)?;
-                    Ok(cache_request)
-                }) {
+            match request_info_to_cache_request(&global, info).and_then(|cache_request| {
+                validate_put_request(&cache_request)?;
+                Ok(cache_request)
+            }) {
                 Ok(cache_request) => converted.push(cache_request),
                 Err(error) => {
                     promise.reject_error(cx, error);
@@ -534,20 +535,25 @@ impl CacheMethods<crate::DomTypeHolder> for Cache {
     }
 
     /// <https://w3c.github.io/ServiceWorker/#cache-put>
-    fn Put(&self, cx: &mut JSContext, request: RequestOrUSVString, response: &Response) -> Rc<Promise> {
+    fn Put(
+        &self,
+        cx: &mut JSContext,
+        request: RequestOrUSVString,
+        response: &Response,
+    ) -> Rc<Promise> {
         let global = self.global();
         let promise = Promise::new(cx, &global);
-        let cache_request = match request_info_to_cache_request(&global, &request)
-            .and_then(|cache_request| {
+        let cache_request =
+            match request_info_to_cache_request(&global, &request).and_then(|cache_request| {
                 validate_put_request(&cache_request)?;
                 Ok(cache_request)
             }) {
-            Ok(cache_request) => cache_request,
-            Err(error) => {
-                promise.reject_error(cx, error);
-                return promise;
-            },
-        };
+                Ok(cache_request) => cache_request,
+                Err(error) => {
+                    promise.reject_error(cx, error);
+                    return promise;
+                },
+            };
 
         // Spec: a disturbed or locked body rejects with a TypeError.
         if response.is_disturbed() || response.is_locked() {

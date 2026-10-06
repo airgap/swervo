@@ -3128,11 +3128,9 @@ where
         }
 
         for webview_id in self.retire_dead_event_loop(event_loop_id) {
-            self.constellation_to_embedder_proxy
-                .send(ConstellationToEmbedderMsg::ContentProcessTerminated(
-                    webview_id,
-                    reason.clone(),
-                ));
+            self.constellation_to_embedder_proxy.send(
+                ConstellationToEmbedderMsg::ContentProcessTerminated(webview_id, reason.clone()),
+            );
             self.replace_crashed_webview_with_crash_page(webview_id, &reason, &None);
         }
     }

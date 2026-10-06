@@ -39,7 +39,6 @@ use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use net_traits::blob_url_store::UrlWithBlobClaim;
 use net_traits::fetch::headers::get_value_from_header_list;
 use net_traits::http_status::HttpStatus;
-use net_traits::{CustomResponse, CustomResponseMediator, ResourceFetchTiming};
 use net_traits::policy_container::{EmbedderPolicyValue, RequestPolicyContainer};
 use net_traits::pub_domains::{is_same_site, reg_suffix};
 use net_traits::request::{
@@ -51,9 +50,10 @@ use net_traits::request::{
 };
 use net_traits::response::{CacheState, RedirectTaint, Response, ResponseBody, ResponseType};
 use net_traits::{
-    CookieSource, DOCUMENT_ACCEPT_HEADER_VALUE, NetworkError, RedirectEndValue, RedirectStartValue,
-    ReferrerPolicy, ResourceAttribute, ResourceFetchTimingContainer, ResourceTimeValue,
-    TlsSecurityInfo, TlsSecurityState,
+    CookieSource, CustomResponse, CustomResponseMediator, DOCUMENT_ACCEPT_HEADER_VALUE,
+    NetworkError, RedirectEndValue, RedirectStartValue, ReferrerPolicy, ResourceAttribute,
+    ResourceFetchTiming, ResourceFetchTimingContainer, ResourceTimeValue, TlsSecurityInfo,
+    TlsSecurityState,
 };
 use parking_lot::{Mutex, RwLock};
 use profile_traits::mem::{Report, ReportKind};
@@ -881,7 +881,11 @@ async fn intercept_with_service_worker(
         return None;
     }
     let load_url = request.current_url();
-    let sender = context.sw_managers.lock().get(&load_url.origin()).cloned()?;
+    let sender = context
+        .sw_managers
+        .lock()
+        .get(&load_url.origin())
+        .cloned()?;
     let (response_chan, response_port) = ipc::channel().ok()?;
     sender
         .send(CustomResponseMediator {
@@ -916,7 +920,6 @@ async fn intercept_with_service_worker(
 /// [HTTP fetch](https://fetch.spec.whatwg.org/#concept-http-fetch)
 #[async_recursion]
 #[allow(clippy::too_many_arguments)]
-
 pub(crate) async fn http_fetch(
     fetch_params: &mut FetchParams,
     cache: &mut CorsCache,

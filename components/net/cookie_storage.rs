@@ -247,15 +247,15 @@ impl CookieStorage {
     ) -> Option<String> {
         // Let cookie-list be the set of cookies from the cookie store, retaining only
         // those whose SameSite attribute admits this request context.
-        let cookie_list = self
-            .cookies_data_for_url(url, source)
-            .filter(|cookie| match same_site_context {
-                SameSiteContext::SameSite => true,
-                SameSiteContext::CrossSiteLaxAllowed => {
-                    cookie.same_site() != Some(SameSite::Strict)
-                },
-                SameSiteContext::CrossSite => cookie.same_site() == Some(SameSite::None),
-            });
+        let cookie_list =
+            self.cookies_data_for_url(url, source)
+                .filter(|cookie| match same_site_context {
+                    SameSiteContext::SameSite => true,
+                    SameSiteContext::CrossSiteLaxAllowed => {
+                        cookie.same_site() != Some(SameSite::Strict)
+                    },
+                    SameSiteContext::CrossSite => cookie.same_site() == Some(SameSite::None),
+                });
 
         let reducer = |acc: String, cookie: Cookie<'static>| -> String {
             // Serialize the cookie-list into a cookie-string by processing each cookie in the cookie-list in order:

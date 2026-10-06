@@ -131,7 +131,11 @@ impl ExternalSvgDocumentFetchContext {
             None,
             owner.origin().clone(),
             IsHTMLDocument::NonHTMLDocument,
-            Some("image/svg+xml".parse().expect("image/svg+xml is a MIME type")),
+            Some(
+                "image/svg+xml"
+                    .parse()
+                    .expect("image/svg+xml is a MIME type"),
+            ),
             None,
             DocumentActivity::Inactive,
             DocumentSource::FromParser,
@@ -205,10 +209,7 @@ impl FetchResponseListener for ExternalSvgDocumentFetchContext {
 
 impl ResourceTimingListener for ExternalSvgDocumentFetchContext {
     fn resource_timing_information(&self) -> (InitiatorType, ServoUrl) {
-        (
-            InitiatorType::LocalName("use".to_owned()),
-            self.url.clone(),
-        )
+        (InitiatorType::LocalName("use".to_owned()), self.url.clone())
     }
 
     fn resource_timing_global(&self) -> DomRoot<GlobalScope> {

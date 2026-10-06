@@ -652,7 +652,10 @@ impl ShapedTextSlice {
     /// The longest leading part of this left-to-right slice whose advance is at most
     /// `max_advance`, cut between characters (the glyphs of one character stay together).
     pub fn truncated_to_advance(&self, max_advance: Au) -> Arc<ShapedTextSlice> {
-        assert!(!self.shaped_text.is_rtl, "Only left-to-right text is truncated");
+        assert!(
+            !self.shaped_text.is_rtl,
+            "Only left-to-right text is truncated"
+        );
         let mut glyph_count = 0;
         let mut character_count = 0;
         let mut total_advance = Au::zero();

@@ -259,8 +259,19 @@ fn numeric_counter_representation(counter_style: &CounterStyle, value: i32) -> O
             return None;
         }
         const NUMERALS: [(i32, &str); 13] = [
-            (1000, "m"), (900, "cm"), (500, "d"), (400, "cd"), (100, "c"), (90, "xc"),
-            (50, "l"), (40, "xl"), (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i"),
+            (1000, "m"),
+            (900, "cm"),
+            (500, "d"),
+            (400, "cd"),
+            (100, "c"),
+            (90, "xc"),
+            (50, "l"),
+            (40, "xl"),
+            (10, "x"),
+            (9, "ix"),
+            (5, "v"),
+            (4, "iv"),
+            (1, "i"),
         ];
         let mut remaining = value;
         let mut representation = String::new();
@@ -270,7 +281,11 @@ fn numeric_counter_representation(counter_style: &CounterStyle, value: i32) -> O
                 remaining -= amount;
             }
         }
-        Some(if upper { representation.to_uppercase() } else { representation })
+        Some(if upper {
+            representation.to_uppercase()
+        } else {
+            representation
+        })
     };
     let lower_latin: Vec<char> = ('a'..='z').collect();
     let upper_latin: Vec<char> = ('A'..='Z').collect();
@@ -452,7 +467,11 @@ struct CounterWalk<'a> {
 impl CounterWalk<'_> {
     fn apply(&mut self, style: &ComputedValues, depth: usize) {
         let counters = style.get_counters();
-        for pair in counters.counter_reset.iter().filter(|pair| pair.name == *self.name) {
+        for pair in counters
+            .counter_reset
+            .iter()
+            .filter(|pair| pair.name == *self.name)
+        {
             match self.instances.last_mut() {
                 Some((creator_depth, value)) if *creator_depth == depth => *value = pair.value,
                 _ => self.instances.push((depth, pair.value)),
@@ -520,7 +539,8 @@ impl CounterWalk<'_> {
             return Some(self.values());
         }
         // The instances its children and pseudo-elements created end with this element.
-        self.instances.retain(|(creator_depth, _)| *creator_depth <= depth);
+        self.instances
+            .retain(|(creator_depth, _)| *creator_depth <= depth);
         None
     }
 }
@@ -562,7 +582,9 @@ pub(crate) fn apply_quote_item<I>(item: &ContentItem<I>, depth: &mut usize) -> O
             None
         },
         // A close-quote that would make the depth negative renders nothing.
-        ContentItem::CloseQuote => depth.checked_sub(1).inspect(|new_depth| *depth = *new_depth),
+        ContentItem::CloseQuote => depth
+            .checked_sub(1)
+            .inspect(|new_depth| *depth = *new_depth),
         ContentItem::NoCloseQuote => {
             *depth = depth.saturating_sub(1);
             None

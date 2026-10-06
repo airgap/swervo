@@ -43,21 +43,21 @@ impl MediaKeyMessageEvent {
         can_gc: CanGc,
     ) -> DomRoot<MediaKeyMessageEvent> {
         rooted!(&in(cx) let mut array = ptr::null_mut::<JSObject>());
-        let buffer_source = if message.is_empty() {
+        let buffer_source = RootedTraceableBox::new(if message.is_empty() {
             HeapBufferSource::<ArrayBufferU8>::default()
         } else {
-            create_buffer_source::<ArrayBufferU8>(cx.into(), message, array.handle_mut())
+            create_buffer_source::<ArrayBufferU8>(cx, message, array.handle_mut())
                 .expect("Creating an ArrayBuffer from the license message should never fail");
             HeapBufferSource::<ArrayBufferU8>::new(BufferSource::ArrayBuffer(Heap::boxed(
                 *array.handle(),
             )))
-        };
+        });
 
         let ev = reflect_dom_object_with_proto(
             Box::new(MediaKeyMessageEvent {
                 event: Event::new_inherited(),
                 message_type,
-                message: DomRefCell::new(buffer_source),
+                message: DomRefCell::new(*buffer_source.into_box()),
             }),
             global,
             None,

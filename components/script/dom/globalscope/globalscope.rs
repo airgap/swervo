@@ -111,6 +111,7 @@ use crate::dom::bindings::trace::{CustomTraceable, HashMapTracedValues, RootedTr
 use crate::dom::bindings::weakref::{DOMTracker, WeakRef};
 use crate::dom::blob::Blob;
 use crate::dom::broadcastchannel::BroadcastChannel;
+use crate::dom::cachestorage::CacheStorage;
 use crate::dom::dedicatedworkerglobalscope::{
     DedicatedWorkerControlMsg, DedicatedWorkerGlobalScope,
 };
@@ -123,7 +124,6 @@ use crate::dom::file::File;
 use crate::dom::globalscope::script_execution::{
     ErrorReporting, evaluate_script, fill_compile_options,
 };
-use crate::dom::cachestorage::CacheStorage;
 use crate::dom::idbfactory::IDBFactory;
 use crate::dom::media::mediasource::MediaSource;
 use crate::dom::messageport::MessagePort;
@@ -254,7 +254,7 @@ pub(crate) struct GlobalScope {
 
     /// Registry of `blob:` URLs minted for `MediaSource` objects via `URL.createObjectURL`,
     /// so an `HTMLMediaElement` loading such a URL can attach to the MediaSource (MSE).
-    media_source_map: DomRefCell<HashMapTracedValues<String, Dom<MediaSource>, FxBuildHasher>>,
+    media_source_map: DomRefCell<FxHashMap<String, Dom<MediaSource>>>,
 
     /// Timers (milliseconds) used by the Console API.
     console_timers: DomRefCell<HashMap<DOMString, Instant>>,
@@ -811,7 +811,7 @@ impl GlobalScope {
             indexeddb: Default::default(),
             caches: Default::default(),
             worker_map: DomRefCell::new(HashMapTracedValues::new_fx()),
-            media_source_map: DomRefCell::new(HashMapTracedValues::new_fx()),
+            media_source_map: Default::default(),
             console_timers: DomRefCell::new(Default::default()),
             module_map: DomRefCell::new(Default::default()),
             devtools_chan,
@@ -1058,13 +1058,13 @@ impl GlobalScope {
     pub(crate) fn get_media_source(&self, url: &str) -> Option<DomRoot<MediaSource>> {
         self.media_source_map
             .borrow()
-            .get(&url.to_owned())
+            .get(url)
             .map(|ms| DomRoot::from_ref(&**ms))
     }
 
     /// Remove a `MediaSource` blob-URL registration (`URL.revokeObjectURL`).
     pub(crate) fn revoke_media_source(&self, url: &str) {
-        self.media_source_map.borrow_mut().remove(&url.to_owned());
+        self.media_source_map.borrow_mut().remove(url);
     }
 
     /// Remove the routers for ports and broadcast-channels.

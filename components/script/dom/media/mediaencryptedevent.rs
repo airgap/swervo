@@ -43,21 +43,21 @@ impl MediaEncryptedEvent {
         can_gc: CanGc,
     ) -> DomRoot<MediaEncryptedEvent> {
         rooted!(&in(cx) let mut array = ptr::null_mut::<JSObject>());
-        let buffer_source = if init_data.is_empty() {
+        let buffer_source = RootedTraceableBox::new(if init_data.is_empty() {
             HeapBufferSource::<ArrayBufferU8>::default()
         } else {
-            create_buffer_source::<ArrayBufferU8>(cx.into(), init_data, array.handle_mut())
+            create_buffer_source::<ArrayBufferU8>(cx, init_data, array.handle_mut())
                 .expect("Creating an ArrayBuffer from init data should never fail");
             HeapBufferSource::<ArrayBufferU8>::new(BufferSource::ArrayBuffer(Heap::boxed(
                 *array.handle(),
             )))
-        };
+        });
 
         let ev = reflect_dom_object_with_proto(
             Box::new(MediaEncryptedEvent {
                 event: Event::new_inherited(),
                 init_data_type,
-                init_data: DomRefCell::new(buffer_source),
+                init_data: DomRefCell::new(*buffer_source.into_box()),
             }),
             global,
             None,

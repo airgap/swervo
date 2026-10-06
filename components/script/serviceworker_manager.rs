@@ -89,7 +89,6 @@ impl ServiceWorker {
 }
 
 /// When updating a registration, which worker are we targetting?
-#[expect(dead_code)]
 enum RegistrationUpdateTarget {
     Installing,
     Waiting,
@@ -622,10 +621,7 @@ impl ServiceWorkerManager {
         // (this engine activates immediately; see the reduced Activate rationale below).
         registration
             .update_registration_state(RegistrationUpdateTarget::Waiting, Some(new_worker.clone()));
-        registration.update_registration_state(
-            RegistrationUpdateTarget::Active,
-            Some(new_worker.clone()),
-        );
+        registration.update_registration_state(RegistrationUpdateTarget::Active, Some(new_worker));
 
         // Step 7: Invoke Resolve Job Promise with job and registration
         let client = job.client.clone();

@@ -177,7 +177,11 @@ pub(crate) fn process_text_range_rects_request(
         return Vec::new();
     };
     let text_run = text_run.borrow();
-    let Some(parent_box) = text_run.parent_box.as_ref().and_then(WeakLayoutBox::upgrade) else {
+    let Some(parent_box) = text_run
+        .parent_box
+        .as_ref()
+        .and_then(WeakLayoutBox::upgrade)
+    else {
         return Vec::new();
     };
     let Some(parent_fragments) = parent_box.with_base(|base| base.fragments().clone()) else {

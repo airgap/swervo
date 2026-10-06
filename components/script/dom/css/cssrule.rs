@@ -10,13 +10,13 @@ use script_bindings::reflector::Reflector;
 use style::shared_lock::{SharedRwLock, SharedRwLockReadGuard};
 use style::stylesheets::{CssRule as StyleCssRule, CssRuleType};
 
+use super::csscontainerrule::CSSContainerRule;
 use super::cssfontfacerule::CSSFontFaceRule;
 use super::cssimportrule::CSSImportRule;
 use super::csskeyframerule::CSSKeyframeRule;
 use super::csskeyframesrule::CSSKeyframesRule;
 use super::csslayerblockrule::CSSLayerBlockRule;
 use super::csslayerstatementrule::CSSLayerStatementRule;
-use super::csscontainerrule::CSSContainerRule;
 use super::cssmediarule::CSSMediaRule;
 use super::cssnamespacerule::CSSNamespaceRule;
 use super::cssnesteddeclarations::CSSNestedDeclarations;
@@ -122,7 +122,7 @@ impl CSSRule {
             StyleCssRule::Container(s) => {
                 DomRoot::upcast(CSSContainerRule::new(cx, window, parent_stylesheet, s))
             },
-            StyleCssRule::Document(_) => unimplemented!(),  // TODO
+            StyleCssRule::Document(_) => unimplemented!(), // TODO
             StyleCssRule::LayerBlock(s) => {
                 DomRoot::upcast(CSSLayerBlockRule::new(cx, window, parent_stylesheet, s))
             },
@@ -216,7 +216,7 @@ impl CSSRule {
                     rule.update_rule(s.clone(), guard);
                 }
             },
-            StyleCssRule::Document(_) => unimplemented!(),  // TODO
+            StyleCssRule::Document(_) => unimplemented!(), // TODO
             StyleCssRule::LayerBlock(s) => {
                 if let Some(rule) = self.downcast::<CSSLayerBlockRule>() {
                     rule.update_rule(s.clone(), guard);

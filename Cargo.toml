@@ -206,12 +206,12 @@ raw-window-handle = "0.6"
 rayon = "1"
 read-fonts = "0.39.2"
 regex = "1.12"
-resvg = "0.47.0"
+resvg = "0.48.1"
 rsa = "=0.10.0-rc.18"
 rusqlite = "0.37"
 rustc-demangle = "0.1"
 rustc-hash = "2.1.2"
-rustls = { version = "0.23", default-features = false, features = ["logging", "std", "tls12"] }
+rustls = { version = "0.23.45", default-features = false, features = ["logging", "std", "tls12"] }
 rustls-pki-types = "1.14"
 rustls-platform-verifier = "0.7.0"
 sea-query = { version = "=1.0.0-rc.31", default-features = false, features = ["backend-sqlite", "derive"] }
@@ -421,6 +421,13 @@ lto = "thin"
 codegen-units = 1
 
 [patch.crates-io]
+# Match NavGator's WebRender 0.69 fork: `-webkit-text-stroke` needs both the
+# `FontInstanceOptions::stroke_width` API and the FreeType glyph-stroking backend.
+# Keep the API, renderer, and memory-accounting types on the same revision.
+webrender = { git = "https://github.com/airgap/webrender", rev = "363698bd1a7d641fdd88814c460cf280e659b383" }
+webrender_api = { git = "https://github.com/airgap/webrender", rev = "363698bd1a7d641fdd88814c460cf280e659b383" }
+wr_malloc_size_of = { git = "https://github.com/airgap/webrender", rev = "363698bd1a7d641fdd88814c460cf280e659b383" }
+
 # If you need to temporarily test Servo with a local fork of some upstream
 # crate, add that here. Use the form:
 #
@@ -450,23 +457,18 @@ codegen-units = 1
 #
 # Or for Stylo:
 #
-# NavGator: `background-clip: text` needs a `background_clip::Clip::Text` variant that
-# upstream stylo only exposes to Gecko (`extra_gecko_values`). airgap/stylo promotes it
-# into the shared `values` list so Servo gets it too. This patch tree is servo/stylo at the
-# rev pinned above (bc25ec93) plus that one-line longhands.toml change — keep the rev bumped
-# in lockstep with the servo/stylo rev above. Branch: navgator-background-clip-text.
-# Now also carries the light-dark() resolution fix and fill/stroke + the SVG paint properties
-# enabled for Servo (inline-SVG serialization copies them in). Branch:
-# nicole/svg-paint-properties-servo.
+# Keep the fork aligned with the Servo APIs used by this tree, including ruby columns.
+# It also exposes `background-clip: text` and SVG paint properties to Servo and carries
+# the light-dark() resolution fix. Keep all Stylo crates on the same fork revision.
 [patch."https://github.com/servo/stylo"]
-selectors = { git = "https://github.com/airgap/stylo", rev = "23a4897b8769339a7eefdab7fc01e7ca3a438662" }
-servo_arc = { git = "https://github.com/airgap/stylo", rev = "23a4897b8769339a7eefdab7fc01e7ca3a438662" }
-stylo = { git = "https://github.com/airgap/stylo", rev = "23a4897b8769339a7eefdab7fc01e7ca3a438662" }
-stylo_atoms = { git = "https://github.com/airgap/stylo", rev = "23a4897b8769339a7eefdab7fc01e7ca3a438662" }
-stylo_dom = { git = "https://github.com/airgap/stylo", rev = "23a4897b8769339a7eefdab7fc01e7ca3a438662" }
-stylo_malloc_size_of = { git = "https://github.com/airgap/stylo", rev = "23a4897b8769339a7eefdab7fc01e7ca3a438662" }
-stylo_static_prefs = { git = "https://github.com/airgap/stylo", rev = "23a4897b8769339a7eefdab7fc01e7ca3a438662" }
-stylo_traits = { git = "https://github.com/airgap/stylo", rev = "23a4897b8769339a7eefdab7fc01e7ca3a438662" }
+selectors = { git = "https://github.com/airgap/stylo", rev = "cd2ec36a70548eaadd465cf8b84eed422024d410" }
+servo_arc = { git = "https://github.com/airgap/stylo", rev = "cd2ec36a70548eaadd465cf8b84eed422024d410" }
+stylo = { git = "https://github.com/airgap/stylo", rev = "cd2ec36a70548eaadd465cf8b84eed422024d410" }
+stylo_atoms = { git = "https://github.com/airgap/stylo", rev = "cd2ec36a70548eaadd465cf8b84eed422024d410" }
+stylo_dom = { git = "https://github.com/airgap/stylo", rev = "cd2ec36a70548eaadd465cf8b84eed422024d410" }
+stylo_malloc_size_of = { git = "https://github.com/airgap/stylo", rev = "cd2ec36a70548eaadd465cf8b84eed422024d410" }
+stylo_static_prefs = { git = "https://github.com/airgap/stylo", rev = "cd2ec36a70548eaadd465cf8b84eed422024d410" }
+stylo_traits = { git = "https://github.com/airgap/stylo", rev = "cd2ec36a70548eaadd465cf8b84eed422024d410" }
 #
 # Or for another Git dependency:
 #

@@ -257,7 +257,7 @@ impl PlatformFontMethods for PlatformFont {
         // We only handle 8-bit grayscale coverage. Color/bitmap glyphs (e.g. emoji) and other
         // pixel modes are skipped; the caller treats a missing glyph as contributing no
         // coverage to the mask.
-        if (bitmap.pixel_mode as u32) != (FT_PIXEL_MODE_GRAY as u32) {
+        if (bitmap.pixel_mode as u32) != FT_PIXEL_MODE_GRAY {
             return None;
         }
 

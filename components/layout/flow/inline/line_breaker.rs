@@ -66,7 +66,7 @@ impl LineBreaker {
 /// from Blink's `kAsciiLineBreakTable` (third_party/blink/renderer/platform/text/
 /// text_break_iterator.cc), which every Chromium-based browser uses instead of UAX #14 for such
 /// pairs. The visible difference is in URLs and paths: UAX #14 allows a break after every `/`,
-/// while Chrome keeps `https://example.com/very/long/path` together and only breaks after `-`
+/// while Chrome keeps <https://example.com/very/long/path> together and only breaks after `-`
 /// and `?`, and before an opening bracket that follows closing punctuation.
 fn apply_ascii_pair_breaks(string: &str, icu_linebreaks: Vec<usize>) -> Vec<usize> {
     let mut linebreaks = Vec::with_capacity(icu_linebreaks.len());

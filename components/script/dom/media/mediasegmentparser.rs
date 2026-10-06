@@ -243,7 +243,9 @@ impl MediaSegmentParser {
             state.estimated_frame_ns = start_ns - previous;
         }
         state.previous_block_ns = Some(start_ns);
-        let duration_ns = state.default_duration_ns.unwrap_or(state.estimated_frame_ns);
+        let duration_ns = state
+            .default_duration_ns
+            .unwrap_or(state.estimated_frame_ns);
         let start = start_ns as f64 / 1e9 + timestamp_offset;
         let end = (start_ns + duration_ns) as f64 / 1e9 + timestamp_offset;
         self.add_range(start, end);
@@ -380,7 +382,8 @@ impl MediaSegmentParser {
                     4;
                 let default_duration = state
                     .tfhd_default_duration
-                    .unwrap_or(state.trex_default_duration) as u64;
+                    .unwrap_or(state.trex_default_duration)
+                    as u64;
                 let mut total = 0u64;
                 for sample in 0..sample_count as usize {
                     total += if flags & 0x100 != 0 {

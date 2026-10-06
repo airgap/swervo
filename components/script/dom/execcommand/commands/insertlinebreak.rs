@@ -52,7 +52,11 @@ pub(crate) fn execute_insert_line_break_command(
     if !start_node.is::<Element>() &&
         !is_allowed_child(
             NodeOrString::String("br".to_owned()),
-            NodeOrString::Node(start_node.GetParentNode().expect("Must always have a parent")),
+            NodeOrString::Node(
+                start_node
+                    .GetParentNode()
+                    .expect("Must always have a parent"),
+            ),
         )
     {
         return true;
@@ -63,14 +67,18 @@ pub(crate) fn execute_insert_line_break_command(
         // active range's start node's parent and second argument equal to the active range's
         // start node's index.
         if active_range.start_offset() == 0 {
-            let parent = start_node.GetParentNode().expect("Must always have a parent");
+            let parent = start_node
+                .GetParentNode()
+                .expect("Must always have a parent");
             selection.collapse_current_range(&parent, start_node.index());
         } else if active_range.start_offset() == start_node.len() {
             // Step 6. If the active range's start node is a Text node and its start offset is the
             // length of its start node, call collapse() on the context object's selection, with
             // first argument equal to the active range's start node's parent and second argument
             // equal to one plus the active range's start node's index.
-            let parent = start_node.GetParentNode().expect("Must always have a parent");
+            let parent = start_node
+                .GetParentNode()
+                .expect("Must always have a parent");
             selection.collapse_current_range(&parent, 1 + start_node.index());
         }
     }

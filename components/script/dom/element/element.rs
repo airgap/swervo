@@ -1233,120 +1233,117 @@ impl<'dom> LayoutDom<'dom, Element> {
         // selectors don't match through the stylesheet path (selector names are lowercased
         // at parse; svg local names are matched case-sensitively). Author styles still win.
         if *self.namespace() == ns!(svg) &&
-            servo_config::pref!(dom_svg_foreignobject_native)
+            servo_config::pref!(dom_svg_foreignobject_native) &&
+            *self.local_name() == local_name!("foreignObject")
         {
-            if *self.local_name() == LocalName::from("foreignObject") {
-                push(PropertyDeclaration::Display(
-                    style::values::specified::Display::Block,
-                ));
-                // foreignObject establishes a containing block (an svg viewport); expressing
-                // it as position:relative keeps absolutely-positioned content (Discord's
-                // avatarStack) hoisting no further than the foreignObject box. Hoisting past
-                // it into the replaced svg's widget drops the boxes un-laid-out — the SC tree
-                // then found hoisted boxes with no fragment and the renderer panicked.
-                push(PropertyDeclaration::Position(
-                    style::values::specified::PositionProperty::Relative,
-                ));
-                // Geometry: x/y/width/height are user units in the enclosing svg viewport's
-                // coordinate system. The widget BFC lays this block out inside the replaced
-                // svg's content box, so express the fo rect as width/height plus top/left
-                // margins, scaled by the viewBox->viewport ratio when the svg carries numeric
-                // width/height attributes (a CSS-sized svg falls back to scale 1, matching
-                // the 1:1 common case). Without this the block fills the svg's content box at
-                // its origin — every viewBox-offset icon rendered shifted with its mask
-                // stretched to the wrong rect. Percentage/unparseable geometry is left alone.
-                fn parse_svg_length(value: &str) -> Option<f32> {
-                    let value = value.trim();
-                    let value = value.strip_suffix("px").unwrap_or(value).trim();
-                    let parsed: f32 = value.parse().ok()?;
-                    parsed.is_finite().then_some(parsed)
-                }
-                fn parse_view_box(value: &str) -> Option<[f32; 4]> {
-                    let mut numbers = value
-                        .split(|c: char| c.is_ascii_whitespace() || c == ',')
-                        .filter(|part| !part.is_empty())
-                        .map(str::parse::<f32>);
-                    let mut view_box = [0.0f32; 4];
-                    for slot in &mut view_box {
-                        *slot = numbers.next()?.ok()?;
-                        if !slot.is_finite() {
-                            return None;
-                        }
+            push(PropertyDeclaration::Display(
+                style::values::specified::Display::Block,
+            ));
+            // foreignObject establishes a containing block (an svg viewport); expressing
+            // it as position:relative keeps absolutely-positioned content (Discord's
+            // avatarStack) hoisting no further than the foreignObject box. Hoisting past
+            // it into the replaced svg's widget drops the boxes un-laid-out — the SC tree
+            // then found hoisted boxes with no fragment and the renderer panicked.
+            push(PropertyDeclaration::Position(
+                style::values::specified::PositionProperty::Relative,
+            ));
+            // Geometry: x/y/width/height are user units in the enclosing svg viewport's
+            // coordinate system. The widget BFC lays this block out inside the replaced
+            // svg's content box, so express the fo rect as width/height plus top/left
+            // margins, scaled by the viewBox->viewport ratio when the svg carries numeric
+            // width/height attributes (a CSS-sized svg falls back to scale 1, matching
+            // the 1:1 common case). Without this the block fills the svg's content box at
+            // its origin — every viewBox-offset icon rendered shifted with its mask
+            // stretched to the wrong rect. Percentage/unparseable geometry is left alone.
+            fn parse_svg_length(value: &str) -> Option<f32> {
+                let value = value.trim();
+                let value = value.strip_suffix("px").unwrap_or(value).trim();
+                let parsed: f32 = value.parse().ok()?;
+                parsed.is_finite().then_some(parsed)
+            }
+            fn parse_view_box(value: &str) -> Option<[f32; 4]> {
+                let mut numbers = value
+                    .split(|c: char| c.is_ascii_whitespace() || c == ',')
+                    .filter(|part| !part.is_empty())
+                    .map(str::parse::<f32>);
+                let mut view_box = [0.0f32; 4];
+                for slot in &mut view_box {
+                    *slot = numbers.next()?.ok()?;
+                    if !slot.is_finite() {
+                        return None;
                     }
-                    numbers.next().is_none().then_some(view_box)
                 }
-                let attr_num = |element: LayoutDom<Element>, name: &str| -> Option<f32> {
-                    element
-                        .get_attr_val_for_layout(&ns!(), &LocalName::from(name))
-                        .and_then(parse_svg_length)
-                };
-                let mut svg_ancestor = None;
-                let mut current = self.upcast::<Node>().composed_parent_node_ref();
-                while let Some(node) = current {
-                    if let Some(element) = node.downcast::<Element>() {
-                        if *element.namespace() == ns!(svg) &&
-                            *element.local_name() == local_name!("svg")
-                        {
-                            svg_ancestor = Some(element);
-                            break;
-                        }
-                    }
-                    current = node.composed_parent_node_ref();
-                }
-                if let (Some(svg), Some(fo_width), Some(fo_height)) = (
-                    svg_ancestor,
-                    attr_num(self, "width"),
-                    attr_num(self, "height"),
-                ) {
-                    let view_box = svg
-                        .get_attr_val_for_layout(&ns!(), &LocalName::from("viewBox"))
-                        .and_then(parse_view_box);
-                    let [min_x, min_y, vb_width, vb_height] =
-                        view_box.unwrap_or([0.0, 0.0, 0.0, 0.0]);
-                    let scale = |viewport: Option<f32>, view_box_extent: f32| -> f32 {
-                        match viewport {
-                            Some(v) if view_box_extent > 0.0 => v / view_box_extent,
-                            _ => 1.0,
-                        }
-                    };
-                    let scale_x = scale(attr_num(svg, "width"), vb_width);
-                    let scale_y = scale(attr_num(svg, "height"), vb_height);
-                    let fo_x = attr_num(self, "x").unwrap_or(0.0);
-                    let fo_y = attr_num(self, "y").unwrap_or(0.0);
-                    let px_size = |v: f32| {
-                        specified::Size::LengthPercentage(NonNegative(
-                            specified::LengthPercentage::Length(specified::NoCalcLength::from_px(
-                                v.max(0.0),
-                            )),
-                        ))
-                    };
-                    let px_margin = |v: f32| {
-                        specified::Margin::LengthPercentage(specified::LengthPercentage::Length(
-                            specified::NoCalcLength::from_px(v),
-                        ))
-                    };
-                    push(PropertyDeclaration::Width(px_size(fo_width * scale_x)));
-                    push(PropertyDeclaration::Height(px_size(fo_height * scale_y)));
-                    push(PropertyDeclaration::MarginLeft(px_margin(
-                        (fo_x - min_x) * scale_x,
-                    )));
-                    push(PropertyDeclaration::MarginTop(px_margin(
-                        (fo_y - min_y) * scale_y,
-                    )));
-                }
-                // Phase 2: composite the native content through the svg mask — the
-                // serializer synthesized a standalone mask document; feed it to the
-                // CSS mask-image pipeline (rasterize for_mask -> WR image-mask).
-                if let Some(url) = self
-                    .downcast::<crate::dom::svg::svgelement::SVGElement>()
-                    .and_then(|svg| svg.native_mask_document())
+                numbers.next().is_none().then_some(view_box)
+            }
+            let attr_num = |element: LayoutDom<Element>, name: &str| -> Option<f32> {
+                element
+                    .get_attr_val_for_layout(&ns!(), &LocalName::from(name))
+                    .and_then(parse_svg_length)
+            };
+            let mut svg_ancestor = None;
+            let mut current = self.upcast::<Node>().composed_parent_node_ref();
+            while let Some(node) = current {
+                if let Some(element) = node.downcast::<Element>() &&
+                    *element.namespace() == ns!(svg) &&
+                    *element.local_name() == local_name!("svg")
                 {
-                    push(PropertyDeclaration::MaskImage(
-                        style::properties::longhands::mask_image::SpecifiedValue(
-                            vec![specified::Image::for_cascade(url.into_url().into())].into(),
-                        ),
-                    ));
+                    svg_ancestor = Some(element);
+                    break;
                 }
+                current = node.composed_parent_node_ref();
+            }
+            if let (Some(svg), Some(fo_width), Some(fo_height)) = (
+                svg_ancestor,
+                attr_num(self, "width"),
+                attr_num(self, "height"),
+            ) {
+                let view_box = svg
+                    .get_attr_val_for_layout(&ns!(), &LocalName::from("viewBox"))
+                    .and_then(parse_view_box);
+                let [min_x, min_y, vb_width, vb_height] = view_box.unwrap_or([0.0, 0.0, 0.0, 0.0]);
+                let scale = |viewport: Option<f32>, view_box_extent: f32| -> f32 {
+                    match viewport {
+                        Some(v) if view_box_extent > 0.0 => v / view_box_extent,
+                        _ => 1.0,
+                    }
+                };
+                let scale_x = scale(attr_num(svg, "width"), vb_width);
+                let scale_y = scale(attr_num(svg, "height"), vb_height);
+                let fo_x = attr_num(self, "x").unwrap_or(0.0);
+                let fo_y = attr_num(self, "y").unwrap_or(0.0);
+                let px_size = |v: f32| {
+                    specified::Size::LengthPercentage(NonNegative(
+                        specified::LengthPercentage::Length(specified::NoCalcLength::from_px(
+                            v.max(0.0),
+                        )),
+                    ))
+                };
+                let px_margin = |v: f32| {
+                    specified::Margin::LengthPercentage(specified::LengthPercentage::Length(
+                        specified::NoCalcLength::from_px(v),
+                    ))
+                };
+                push(PropertyDeclaration::Width(px_size(fo_width * scale_x)));
+                push(PropertyDeclaration::Height(px_size(fo_height * scale_y)));
+                push(PropertyDeclaration::MarginLeft(px_margin(
+                    (fo_x - min_x) * scale_x,
+                )));
+                push(PropertyDeclaration::MarginTop(px_margin(
+                    (fo_y - min_y) * scale_y,
+                )));
+            }
+            // Phase 2: composite the native content through the svg mask — the
+            // serializer synthesized a standalone mask document; feed it to the
+            // CSS mask-image pipeline (rasterize for_mask -> WR image-mask).
+            if let Some(url) = self
+                .downcast::<crate::dom::svg::svgelement::SVGElement>()
+                .and_then(|svg| svg.native_mask_document())
+            {
+                push(PropertyDeclaration::MaskImage(
+                    style::properties::longhands::mask_image::SpecifiedValue(
+                        vec![specified::Image::for_cascade(url.into_url().into())].into(),
+                    ),
+                ));
             }
         }
 
@@ -1458,7 +1455,10 @@ impl<'dom> LayoutDom<'dom, Element> {
                     Some("reset") | Some("button") => None,
                     // <https://html.spec.whatwg.org/multipage/#attr-input-size> does not apply to
                     // these; the UA sheet sizes them like Chrome does.
-                    Some("date") | Some("time") | Some("datetime-local") | Some("month") |
+                    Some("date") |
+                    Some("time") |
+                    Some("datetime-local") |
+                    Some("month") |
                     Some("week") => None,
                     // Others
                     _ => match input_element.size_for_layout() {
@@ -1475,9 +1475,9 @@ impl<'dom> LayoutDom<'dom, Element> {
         };
         if let Some(size) = size {
             let value = specified::NoCalcLength::from_servo_character_width(size);
-            push(PropertyDeclaration::ServoTextControlWidth(text_control_size(
-                value,
-            )));
+            push(PropertyDeclaration::ServoTextControlWidth(
+                text_control_size(value),
+            ));
         }
 
         let width = if let Some(this) = self.downcast::<HTMLIFrameElement>() {
@@ -1595,9 +1595,9 @@ impl<'dom> LayoutDom<'dom, Element> {
             if cols > 0 {
                 // https://html.spec.whatwg.org/multipage/#textarea-effective-width
                 let value = specified::NoCalcLength::from_servo_textarea_columns(cols);
-                push(PropertyDeclaration::ServoTextControlWidth(text_control_size(
-                    value,
-                )));
+                push(PropertyDeclaration::ServoTextControlWidth(
+                    text_control_size(value),
+                ));
             }
         }
 
@@ -1609,9 +1609,9 @@ impl<'dom> LayoutDom<'dom, Element> {
             if rows > 0 {
                 // https://html.spec.whatwg.org/multipage/#textarea-effective-height
                 let value = specified::NoCalcLength::from_servo_textarea_rows(rows);
-                push(PropertyDeclaration::ServoTextControlHeight(text_control_size(
-                    value,
-                )));
+                push(PropertyDeclaration::ServoTextControlHeight(
+                    text_control_size(value),
+                ));
             }
         }
 

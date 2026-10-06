@@ -618,6 +618,8 @@ impl AdoptedStyleSheets {
     }
 
     /// <https://webidl.spec.whatwg.org/#observable-array-exotic-object-set-the-indexed-value>
+    // The operation needs both its DOM owner and the JavaScript proxy trap's result context.
+    #[expect(clippy::too_many_arguments)]
     fn set_indexed_value(
         &self,
         cx: &mut JSContext,
@@ -689,13 +691,14 @@ fn with_adopted_stylesheets_owner<R>(
     unsafe { GetProxyReservedSlot(proxy, 0, &mut slot) };
     let object = slot.to_object();
     if let Ok(document) = root_from_object_static::<Document>(object) {
-        let owner = StyleSheetListOwner::Document(Dom::from_ref(&*document));
-        return f(&owner, document.adopted_stylesheets(), &document.global());
+        // Keep the DomRoot alive throughout f, including any reentrant JavaScript calls.
+        let owner = &StyleSheetListOwner::Document(document.as_traced());
+        return f(owner, document.adopted_stylesheets(), &document.global());
     }
     let root = root_from_object_static::<ShadowRoot>(object)
         .expect("adoptedStyleSheets proxies are owned by a Document or a ShadowRoot");
-    let owner = StyleSheetListOwner::ShadowRoot(Dom::from_ref(&*root));
-    f(&owner, root.adopted_stylesheets(), &root.global())
+    let owner = &StyleSheetListOwner::ShadowRoot(root.as_traced());
+    f(owner, root.adopted_stylesheets(), &root.global())
 }
 
 fn is_length_id(cx: &JSContext, id: HandleId) -> bool {

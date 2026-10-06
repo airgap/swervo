@@ -207,10 +207,11 @@ fn parse_svg_document_in_memory(
         allow_dtd: true,
         ..Default::default()
     };
-    let document = usvg::roxmltree::Document::parse_with_options(text, xml_opt).map_err(|error| {
-        warn!("Error when parsing SVG data: {error}");
-        "Not a valid SVG document"
-    })?;
+    let document =
+        usvg::roxmltree::Document::parse_with_options(text, xml_opt).map_err(|error| {
+            warn!("Error when parsing SVG data: {error}");
+            "Not a valid SVG document"
+        })?;
     let root = document.root_element();
     let source = VectorImageSource {
         text: Arc::new(text.to_owned()),

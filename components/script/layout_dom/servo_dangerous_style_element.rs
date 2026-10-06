@@ -468,12 +468,14 @@ impl<'dom> style::dom::TElement for ServoDangerousStyleElement<'dom> {
     fn query_container_size(&self, display: &Display) -> Size2D<Option<app_units::Au>> {
         layout_api::CONTAINER_QUERIED.store(true, Ordering::Relaxed);
         let size = (!display.is_none())
-            .then(|| self.layout_element().as_node().layout_data()?.content_box_size())
+            .then(|| {
+                self.layout_element()
+                    .as_node()
+                    .layout_data()?
+                    .content_box_size()
+            })
             .flatten();
-        Size2D::new(
-            size.map(|size| size.width),
-            size.map(|size| size.height),
-        )
+        Size2D::new(size.map(|size| size.width), size.map(|size| size.height))
     }
 
     fn has_selector_flags(&self, flags: ElementSelectorFlags) -> bool {

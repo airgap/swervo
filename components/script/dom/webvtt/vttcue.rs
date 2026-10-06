@@ -10,18 +10,18 @@ use js::rust::HandleObject;
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_dom_object_with_proto_and_cx;
 
+use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use crate::dom::bindings::codegen::Bindings::VTTCueBinding::{
     self, AlignSetting, AutoKeyword, DirectionSetting, LineAlignSetting, PositionAlignSetting,
     VTTCueMethods,
 };
+use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use crate::dom::bindings::error::{Error, ErrorResult};
+use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::num::Finite;
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
-use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
-use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
-use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::documentfragment::DocumentFragment;
 use crate::dom::node::Node;
 use crate::dom::text::Text;
@@ -219,7 +219,11 @@ impl VTTCueMethods<crate::DomTypeHolder> for VTTCue {
     fn GetCueAsHTML(&self, cx: &mut JSContext) -> DomRoot<DocumentFragment> {
         let document = self.global().as_window().Document();
         let fragment = DocumentFragment::new(cx, &document);
-        let text = Text::new(cx, DOMString::from(cue_text_without_markup(&self.text.borrow().str())), &document);
+        let text = Text::new(
+            cx,
+            DOMString::from(cue_text_without_markup(&self.text.borrow().str())),
+            &document,
+        );
         fragment
             .upcast::<Node>()
             .AppendChild(cx, text.upcast())

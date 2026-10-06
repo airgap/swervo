@@ -23,8 +23,8 @@ use super::performanceentry::{EntryType, PerformanceEntry};
 use super::performancemark::PerformanceMark;
 use super::performancemeasure::PerformanceMeasure;
 use super::performancenavigation::PerformanceNavigation;
-use super::performancetiming::PerformanceTiming;
 use super::performanceobserver::PerformanceObserver as DOMPerformanceObserver;
+use super::performancetiming::PerformanceTiming;
 use crate::dom::PERFORMANCE_TIMING_ATTRIBUTES;
 use crate::dom::bindings::codegen::Bindings::PerformanceBinding::{
     DOMHighResTimeStamp, PerformanceEntryList as DOMPerformanceEntryList, PerformanceMethods,

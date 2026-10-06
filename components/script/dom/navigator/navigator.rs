@@ -6,14 +6,13 @@
 use std::cell::Cell;
 use std::convert::TryInto;
 use std::ops::Deref;
+use std::rc::Rc;
 use std::sync::LazyLock;
 
 use dom_struct::dom_struct;
 use embedder_traits::{EmbedderMsg, ProtocolHandlerUpdateRegistration, RegisterOrUnregister};
 use headers::HeaderMap;
 use http::header::{self, HeaderValue};
-use std::rc::Rc;
-
 use js::context::JSContext;
 use js::realm::CurrentRealm;
 use js::rust::MutableHandleValue;
@@ -32,6 +31,7 @@ use servo_config::pref;
 use servo_url::ServoUrl;
 
 use crate::body::Extractable;
+use crate::dom::bindings::codegen::Bindings::MediaKeySystemAccessBinding::MediaKeySystemConfiguration;
 use crate::dom::bindings::codegen::Bindings::NavigatorBinding::NavigatorMethods;
 #[cfg(feature = "gamepad")]
 use crate::dom::bindings::codegen::Bindings::PermissionStatusBinding::PermissionName;
@@ -39,11 +39,7 @@ use crate::dom::bindings::codegen::Bindings::WindowBinding::Window_Binding::Wind
 use crate::dom::bindings::codegen::Bindings::XMLHttpRequestBinding::BodyInit;
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::refcounted::Trusted;
-use crate::dom::bindings::codegen::Bindings::MediaKeySystemAccessBinding::MediaKeySystemConfiguration;
 use crate::dom::bindings::reflector::DomGlobal;
-use crate::dom::media::keysystem;
-use crate::dom::media::mediakeysystemaccess::MediaKeySystemAccess;
-use crate::dom::promise::Promise;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::bindings::str::{DOMString, USVString};
 use crate::dom::bindings::utils::to_frozen_array;
@@ -56,6 +52,8 @@ use crate::dom::csp::{GlobalCspReporting, Violation};
 use crate::dom::gamepad::Gamepad;
 use crate::dom::geolocation::Geolocation;
 use crate::dom::globalscope::GlobalScope;
+use crate::dom::media::keysystem;
+use crate::dom::media::mediakeysystemaccess::MediaKeySystemAccess;
 use crate::dom::mediadevices::MediaDevices;
 use crate::dom::mediasession::MediaSession;
 use crate::dom::mimetypearray::MimeTypeArray;
@@ -63,6 +61,7 @@ use crate::dom::navigatorinfo;
 use crate::dom::performance::performanceresourcetiming::InitiatorType;
 use crate::dom::permissions::Permissions;
 use crate::dom::pluginarray::PluginArray;
+use crate::dom::promise::Promise;
 use crate::dom::serviceworkercontainer::ServiceWorkerContainer;
 use crate::dom::servointernals::ServoInternals;
 use crate::dom::storagemanager::StorageManager;
@@ -316,11 +315,8 @@ impl NavigatorMethods<crate::DomTypeHolder> for Navigator {
         let promise = Promise::new_in_realm(&mut realm);
         match keysystem::evaluate(&key_system.to_string()) {
             keysystem::KeySystemSupport::Available => {
-                let access = MediaKeySystemAccess::new(
-                    &self.global(),
-                    key_system,
-                    CanGc::deprecated_note(),
-                );
+                let access =
+                    MediaKeySystemAccess::new(&self.global(), key_system, CanGc::deprecated_note());
                 promise.resolve_native(cx, &access);
             },
             // A recognized DRM whose CDM host is not bundled (LYK-1364), or an unknown key system:

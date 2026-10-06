@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use dom_struct::dom_struct;
-use js::context::JSContext;
+use js::context::{JSContext, JSContext as SafeJSContext};
 use js::gc::MutableHandleValue;
 use js::rust::HandleValue;
 use script_bindings::codegen::GenericBindings::IDBIndexBinding::IDBIndexMethods;
@@ -14,7 +14,6 @@ use storage_traits::indexeddb::{AsyncOperation, AsyncReadOnlyOperation};
 
 use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::IDBCursorDirection;
 use crate::dom::bindings::error::Fallible;
-use js::context::JSContext as SafeJSContext;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
@@ -25,7 +24,6 @@ use crate::dom::indexeddb::idbcursorwithvalue::IDBCursorWithValue;
 use crate::dom::indexeddb::idbobjectstore::IDBObjectStore;
 use crate::dom::indexeddb::idbrequest::IDBRequest;
 use crate::indexeddb::convert_value_to_key_range;
-use crate::script_runtime::CanGc;
 
 #[dom_struct]
 pub(crate) struct IDBIndex {

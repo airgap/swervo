@@ -30,8 +30,8 @@ use profile_traits::mem::{
     ProcessReports, ProfilerRegistration, Report, ReportKind, perform_memory_report,
 };
 use profile_traits::path;
-use rustc_hash::FxHashSet;
 use profile_traits::time::{self as profile_time};
+use rustc_hash::FxHashSet;
 use servo_base::generic_channel::{GenericSender, RoutedReceiver};
 use servo_base::id::{PainterId, PipelineId, WebViewId};
 use servo_canvas_traits::webgl::{WebGLContextId, WebGLThreads};

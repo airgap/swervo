@@ -19,19 +19,18 @@ use servo_constellation_traits::{
     ServiceWorkerAlgorithm, ServiceWorkerAlgorithmResult, ServiceWorkerRegistrationInfo,
 };
 use servo_url::{ImmutableOrigin, ServoUrl};
+use stylo_atoms::Atom;
 
 use crate::dom::bindings::codegen::Bindings::ServiceWorkerContainerBinding::{
     RegistrationOptions, ServiceWorkerContainerMethods,
 };
+use crate::dom::bindings::codegen::Bindings::ServiceWorkerRegistrationBinding::ServiceWorkerRegistrationMethods;
 use crate::dom::bindings::error::Error;
 use crate::dom::bindings::refcounted::Trusted;
-use crate::dom::bindings::codegen::Bindings::ServiceWorkerRegistrationBinding::ServiceWorkerRegistrationMethods;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::bindings::str::USVString;
 use crate::dom::bindings::structuredclone;
-use stylo_atoms::Atom;
-
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::promise::Promise;

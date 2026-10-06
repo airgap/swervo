@@ -283,8 +283,14 @@ impl AccessibilityTree {
 
     /// Whether `dom_child` of `dom_node` is inert, which hides it and its subtree from assistive
     /// technology. <https://html.spec.whatwg.org/multipage/#inert-subtrees>
-    fn is_inert_child(&self, dom_node: &ServoLayoutNode<'_>, dom_child: &ServoLayoutNode<'_>) -> bool {
-        let leads_to_modal_dialog = self.modal_dialog_and_ancestors.contains(&dom_child.opaque());
+    fn is_inert_child(
+        &self,
+        dom_node: &ServoLayoutNode<'_>,
+        dom_child: &ServoLayoutNode<'_>,
+    ) -> bool {
+        let leads_to_modal_dialog = self
+            .modal_dialog_and_ancestors
+            .contains(&dom_child.opaque());
         // Ancestors of the modal dialog are inert themselves, but stay in the tree to hold it.
         if self
             .modal_dialog_and_ancestors
@@ -318,12 +324,10 @@ impl AccessibilityTree {
                 let local_name = dom_element.local_name().to_ascii_lowercase();
                 node.set_html_tag(&local_name);
                 // Record this element's `id` so aria-labelledby idrefs can resolve to it.
-                if let Some(elem_id) =
-                    dom_element.attribute_as_str(&ns!(), &local_name!("id"))
+                if let Some(elem_id) = dom_element.attribute_as_str(&ns!(), &local_name!("id")) &&
+                    !elem_id.is_empty()
                 {
-                    if !elem_id.is_empty() {
-                        self.element_id_to_node_id.insert(elem_id.into(), id);
-                    }
+                    self.element_id_to_node_id.insert(elem_id.into(), id);
                 }
             }
         }
@@ -493,10 +497,12 @@ fn role_from_dom_node(dom_node: &ServoLayoutNode<'_>) -> Role {
     };
 
     // An explicit ARIA `role` attribute overrides the native role (first recognised token wins).
-    if let Some(role_attr) = element.attribute_as_str(&ns!(), &local_name!("role")) {
-        if let Some(role) = role_attr.split_whitespace().find_map(aria_role_to_accesskit) {
-            return role;
-        }
+    if let Some(role_attr) = element.attribute_as_str(&ns!(), &local_name!("role")) &&
+        let Some(role) = role_attr
+            .split_whitespace()
+            .find_map(aria_role_to_accesskit)
+    {
+        return role;
     }
 
     let local_name = element.local_name().to_ascii_lowercase();

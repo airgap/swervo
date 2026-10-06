@@ -263,8 +263,11 @@ impl PrefetchSink {
                 let script_type = script_type.trim_matches(HTML_SPACE_CHARACTERS);
                 script_type.is_empty() || SCRIPT_JS_MIMES.contains(&script_type)
             },
-            (None, Some(language)) if !language.value.is_empty() => SCRIPT_JS_MIMES
-                .contains(&format!("text/{}", language.value).to_ascii_lowercase().as_str()),
+            (None, Some(language)) if !language.value.is_empty() => SCRIPT_JS_MIMES.contains(
+                &format!("text/{}", language.value)
+                    .to_ascii_lowercase()
+                    .as_str(),
+            ),
             (None, _) => true,
         }
     }

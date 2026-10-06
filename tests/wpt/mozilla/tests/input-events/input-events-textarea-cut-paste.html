@@ -1,71 +1,138 @@
 <!DOCTYPE html>
 <meta charset="utf-8">
-<title>Cut and Paste should trigger corresponding InputEvent</title>
+<title>Clipboard shortcuts edit text through cancellable clipboard events</title>
 <script src="/resources/testharness.js"></script>
 <script src="/resources/testharnessreport.js"></script>
 <script src="/resources/testdriver.js"></script>
 <script src="/resources/testdriver-actions.js"></script>
 <script src="/resources/testdriver-vendor.js"></script>
-<script type="text/javascript" src="pointerevent_support.js"></script>
-<textarea id="test1_plain">plain</textarea>
+<body>
 <script>
+const modifier = navigator.platform.includes("Mac") ? "\uE03D" : "\uE009";
 
-function resolveWhen(condition) {
-  return new Promise((resolve, reject) => {
-    function tick() {
-      if (condition())
-        resolve();
-      else
-        requestAnimationFrame(tick.bind(this));
-    }
-    tick();
-  });
+function textControl(test, tag, value) {
+    const control = document.createElement(tag);
+    control.value = value;
+    document.body.appendChild(control);
+    test.add_cleanup(() => control.remove());
+    return control;
 }
 
-let modifier_key = "\uE009";
-if(navigator.platform.includes('Mac'))
-    modifier_key = "\uE03D";
-const commands = {
-    COPY: 'copy',
-    CUT: 'cut',
-    PASTE: 'paste',
-}
-function selectTextCommand(target, command) {
-  let command_key = "";
-  if(command == "copy")
-    command_key = "c";
-  else if (command == "cut")
-    command_key = "x";
-  else if (command == "paste")
-    command_key = "v";
-  target.focus();
-  return new test_driver.Actions()
-      .keyDown(modifier_key)
-      .keyDown("a")
-      .keyUp("a")
-      .keyDown(command_key)
-      .keyUp(command_key)
-      .keyUp(modifier_key)
-      .send();
+async function shortcut(control, key) {
+    control.focus();
+    await new test_driver.Actions()
+        .keyDown(modifier).keyDown(key).keyUp(key).keyUp(modifier).send();
+    // Input events are queued after the clipboard default action. Also give
+    // negative tests time to observe any incorrectly queued input event.
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 }
 
-function selectTextCutAndPaste(target1, target2) {
-  return selectTextCommand(target1, commands.CUT).then(() => {
-    return selectTextCommand(target2, commands.PASTE);
-  })
+async function copyText(test, value) {
+    const source = textControl(test, "textarea", value);
+    source.select();
+    await shortcut(source, "c");
 }
 
 promise_test(async test => {
-  const expectedEventLog = ['input-deleteByCut', 'input-insertFromPaste'];
-  const actualEventLog = [];
-  const text1 = document.getElementById("test1_plain");
+    const control = textControl(test, "textarea", "plain");
+    const events = [];
+    for (const type of ["cut", "paste"]) {
+        control.addEventListener(type, test.step_func(event => {
+            assert_true(event.isTrusted, `${type} comes from the keyboard shortcut`);
+            assert_true(event.cancelable, `${type} can be canceled`);
+            events.push(type);
+            assert_equals(control.value, type === "cut" ? "plain" : "",
+                          "Clipboard event precedes the edit");
+            if (type === "paste") {
+                assert_equals(event.clipboardData.getData("text/plain"), "plain");
+            }
+        }));
+    }
+    control.addEventListener("input", test.step_func(event => {
+        events.push(`input-${event.inputType}`);
+        if (event.inputType === "insertFromPaste") {
+            assert_equals(event.data, "plain");
+        }
+    }));
+    control.select();
+    await shortcut(control, "x");
+    assert_equals(control.value, "", "Cut removes selected text");
+    await shortcut(control, "v");
+    assert_equals(control.value, "plain", "Paste restores the cut text exactly once");
+    assert_array_equals(events, ["cut", "input-deleteByCut", "paste", "input-insertFromPaste"]);
+}, "Event order and data on textarea.");
 
-  text1.addEventListener('input', test.step_func(function() {
-      actualEventLog.push(`${event.type}-${event.inputType || '[null]'}`);
-  }));
-  await selectTextCutAndPaste(text1, text1);
-  await resolveWhen(() => { return actualEventLog.length == expectedEventLog.length });
-  assert_array_equals(actualEventLog, expectedEventLog,
-                      `Expected: ${expectedEventLog}; Actual: ${actualEventLog}.`);
-}, 'Event order and data on textarea.');
+for (const tag of ["input", "textarea"]) {
+    promise_test(async test => {
+        await copyText(test, "abc");
+        const control = textControl(test, tag, "defg");
+        control.setSelectionRange(1, 3);
+        const events = [];
+        control.addEventListener("keydown", test.step_func(event => {
+            if (event.key.toLowerCase() === "v") {
+                events.push("keydown");
+                assert_equals(control.value, "defg", "keydown does not paste synchronously");
+            }
+        }));
+        control.addEventListener("paste", test.step_func(event => {
+            events.push("paste");
+            assert_true(event.isTrusted);
+            assert_equals(control.value, "defg", "paste listener runs before insertion");
+            assert_equals(event.clipboardData.getData("text/plain"), "abc");
+        }));
+        control.addEventListener("input", test.step_func(event => {
+            events.push("input");
+            assert_equals(event.inputType, "insertFromPaste");
+            assert_equals(event.data, "abc");
+        }));
+        await shortcut(control, "v");
+        assert_equals(control.value, "dabcg", "Paste replaces the selected text exactly once");
+        assert_equals(control.selectionStart, 4);
+        assert_equals(control.selectionEnd, 4);
+        assert_array_equals(events, ["keydown", "paste", "input"]);
+    }, `Trusted paste replaces the selection in ${tag} after keydown and paste events`);
+}
+
+for (const canceledEvent of ["keydown", "paste"]) {
+    promise_test(async test => {
+        await copyText(test, "abc");
+        const control = textControl(test, "textarea", "defg");
+        control.setSelectionRange(1, 3);
+        const events = [];
+        control.addEventListener("keydown", test.step_func(event => {
+            if (event.key.toLowerCase() === "v") {
+                events.push("keydown");
+                if (canceledEvent === "keydown") event.preventDefault();
+            }
+        }));
+        control.addEventListener("paste", test.step_func(event => {
+            events.push("paste");
+            assert_true(event.isTrusted);
+            if (canceledEvent === "paste") event.preventDefault();
+        }));
+        control.addEventListener("input", () => events.push("input"));
+        await shortcut(control, "v");
+        assert_equals(control.value, "defg", "Canceled paste leaves the text unchanged");
+        assert_equals(control.selectionStart, 1);
+        assert_equals(control.selectionEnd, 3);
+        assert_array_equals(events, canceledEvent === "keydown" ? ["keydown"] : ["keydown", "paste"]);
+    }, `Canceling ${canceledEvent} prevents clipboard insertion and input events`);
+}
+
+promise_test(async test => {
+    const control = textControl(test, "textarea", "defg");
+    control.setSelectionRange(1, 3);
+    const data = new DataTransfer();
+    data.setData("text/plain", "abc");
+    const event = new ClipboardEvent("paste", {bubbles: true, cancelable: true, clipboardData: data});
+    assert_false(event.isTrusted);
+    let inputEvents = 0;
+    control.addEventListener("input", () => ++inputEvents);
+    control.dispatchEvent(event);
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    assert_equals(control.value, "defg", "Untrusted paste cannot insert supplied clipboard data");
+    assert_equals(control.selectionStart, 1);
+    assert_equals(control.selectionEnd, 3);
+    assert_equals(inputEvents, 0);
+}, "Synthetic paste does not edit text or dispatch input");
 </script>

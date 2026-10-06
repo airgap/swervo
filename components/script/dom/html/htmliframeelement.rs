@@ -77,7 +77,7 @@ enum LazyLoadResumptionSteps {
     /// The step labeled navigate of
     /// <https://html.spec.whatwg.org/multipage/#process-the-iframe-attributes>.
     Navigate {
-        load_data: LoadData,
+        load_data: Box<LoadData>,
         history_handling: NavigationHistoryBehavior,
         mode: ProcessingMode,
     },
@@ -446,7 +446,7 @@ impl HTMLIFrameElement {
             } => {
                 let target_snapshot_params = snapshot_self(self);
                 self.navigate_or_reload_child_browsing_context(
-                    load_data,
+                    *load_data,
                     history_handling,
                     mode,
                     target_snapshot_params,
@@ -608,7 +608,7 @@ impl HTMLIFrameElement {
             // Step 2.6.1. Set element's lazy load resumption steps to the rest of this algorithm
             // starting with the step labeled navigate.
             *self.lazy_load_resumption_steps.borrow_mut() = LazyLoadResumptionSteps::Navigate {
-                load_data,
+                load_data: Box::new(load_data),
                 history_handling,
                 mode,
             };
