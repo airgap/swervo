@@ -206,6 +206,23 @@ jobs:
             target/selection-modify-wpt.log
             target/selection-modify-wptreport.json
           if-no-files-found: warn
+      - name: Clipboard event regressions
+        id: clipboard_regression
+        if: ${{ inputs.unit-tests }}
+        run: |
+          ./mach test-wpt --profile ${{ inputs.profile }} --processes 1 --timeout-multiplier 2 \
+            --log-raw target/clipboard-wpt.log \
+            --log-wptreport target/clipboard-wptreport.json \
+            /_mozilla/input-events/input-events-textarea-cut-paste.html
+      - name: Archive clipboard regression results
+        if: ${{ always() && inputs.unit-tests && steps.clipboard_regression.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: clipboard-regression-${{ inputs.profile }}
+          path: |
+            target/clipboard-wpt.log
+            target/clipboard-wptreport.json
+          if-no-files-found: warn
       - name: Smoketest
         run: xvfb-run ./mach smoketest --profile ${{ inputs.profile  }}
       - name: Script tests

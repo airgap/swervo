@@ -10,7 +10,7 @@
 use keyboard_types::{Key, Modifiers, NamedKey};
 use script::test::DOMString;
 use script::test::textinput::{ClipboardProvider, Direction, SelectionDirection, TextInput};
-use script::textinput::Lines;
+use script::textinput::{KeyReaction, Lines};
 use servo_base::text::{Utf8CodeUnitLength, Utf16CodeUnitLength};
 use servo_base::{RopeIndex, RopeMovement};
 
@@ -523,21 +523,50 @@ fn test_textinput_set_content() {
 }
 
 #[test]
-fn test_clipboard_paste() {
+fn test_clipboard_shortcuts_defer_to_clipboard_events() {
+    struct UnusedClipboard;
+
+    impl ClipboardProvider for UnusedClipboard {
+        fn get_text(&mut self) -> Result<String, String> {
+            panic!("keydown must not read the clipboard before the paste event");
+        }
+
+        fn set_text(&mut self, _: String) {
+            panic!("keydown must not write the clipboard before the copy or cut event");
+        }
+    }
+
     #[cfg(target_os = "macos")]
     const MODIFIERS: Modifiers = Modifiers::META;
     #[cfg(not(target_os = "macos"))]
     const MODIFIERS: Modifiers = Modifiers::CONTROL;
 
-    let mut textinput = TextInput::new(
-        Lines::Single,
-        DOMString::from("defg"),
-        DummyClipboardContext::new("abc"),
-    );
-    assert_eq!(textinput.get_content(), "defg");
-    assert_eq!(textinput.edit_point().code_point, 0);
-    textinput.handle_keydown_aux(Key::Character("v".to_owned()), MODIFIERS, false);
-    assert_eq!(textinput.get_content(), "abcdefg");
+    for key in ["x", "c", "v"] {
+        for selected in [false, true] {
+            let mut textinput =
+                TextInput::new(Lines::Single, DOMString::from("defg"), UnusedClipboard);
+            textinput.modify_edit_point(1, RopeMovement::Grapheme);
+            if selected {
+                textinput.modify_selection(2, RopeMovement::Grapheme);
+            }
+            let end = RopeIndex::new(0, if selected { 3 } else { 1 });
+
+            let reaction = textinput.handle_keydown_aux(
+                Key::Character(key.to_owned()),
+                MODIFIERS,
+                cfg!(target_os = "macos"),
+            );
+
+            // DocumentEventHandler dispatches the cancellable clipboard event after
+            // keydown. Its default action, not this method, performs the edit.
+            // Browser coverage: input-events-textarea-cut-paste.html.
+            assert!(matches!(reaction, KeyReaction::Nothing));
+            assert_eq!(textinput.get_content(), "defg");
+            assert_eq!(textinput.selection_start(), RopeIndex::new(0, 1));
+            assert_eq!(textinput.selection_end(), end);
+            assert_eq!(textinput.edit_point(), end);
+        }
+    }
 }
 
 #[test]
