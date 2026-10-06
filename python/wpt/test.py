@@ -566,6 +566,24 @@ class TestFullSyncRun(unittest.TestCase):
     def test_synchronize_with_non_upstreamable_changes(self) -> None:
         self.assertListEqual(self.run_test("synchronize.json", ["non-wpt.diff"]), [])
 
+    def test_upstreamable_commits_exclude_commit_message_bodies(self) -> None:
+        diffs = [
+            ["18746.diff", "tmp author", "tmp@tmp.com", "First WPT change\n\nFirst commit body."],
+            ["non-wpt.diff", "tmp author", "tmp@tmp.com", "Non-WPT change\n\nNon-WPT commit body."],
+            ["wpt.diff", "tmp author", "tmp@tmp.com", "Second WPT change\n\nSecond commit body."],
+        ]
+        head_sha = self.mock_servo_repository_state(diffs)
+        assert SYNC is not None
+        step = CreateOrUpdateBranchForPRStep(
+            {"commits": len(diffs), "head": {"sha": head_sha}}, SYNC.servo.get_pull_request(19612)
+        )
+        commits = step._get_upstreamable_commits_from_local_servo_repo(SYNC)
+
+        self.assertEqual(len(commits), 2)
+        self.assertListEqual([commit["message"].strip() for commit in commits], [diffs[0][3], diffs[2][3]])
+        for commit in commits:
+            self.assertTrue(commit["diff"].startswith(b"diff --git "))
+
     def test_merge_upstream_pr_after_merge(self) -> None:
         self.assertListEqual(
             self.run_test("merged.json", ["18746.diff"], [MockPullRequest("servo:servo_export_19620", 100)]),

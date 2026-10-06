@@ -113,9 +113,9 @@ class CreateOrUpdateBranchForPRStep(Step):
             # have to fetch the commit diffs from GitHub.
             # NB: The output of git show might include binary files or non-UTF8 text,
             # so store the content of the diff as a `bytes`.
-            diff = local_servo_repo.run_without_encoding(
-                "show", "--binary", "--format=%b", sha, "--", UPSTREAMABLE_PATH
-            )
+            # Omit the commit message so non-WPT commits produce no output,
+            # rather than a message body or a newline on newer Git versions.
+            diff = local_servo_repo.run_without_encoding("show", "--binary", "--format=", sha, "--", UPSTREAMABLE_PATH)
 
             # Retrieve the diff of any changes to files that are relevant
             if diff:
