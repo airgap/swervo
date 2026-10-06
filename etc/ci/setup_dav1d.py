@@ -223,8 +223,10 @@ def cargo_environment(prefix: Path, target: str) -> dict[str, str]:
             encoding="utf-8",
         )
         wrapper.chmod(0o755)
-        # Exact triples have precedence over the underscore form used by mach.
+        # Keep the exact triple for pkg-config-rs's highest-priority lookup, and
+        # its shell-safe alias because mach's /bin/sh launcher may drop names with hyphens.
         result[f"PKG_CONFIG_{target}"] = wrapper.as_posix()
+        result[f"PKG_CONFIG_{target.replace('-', '_')}"] = wrapper.as_posix()
     return result
 
 
