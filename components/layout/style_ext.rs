@@ -540,7 +540,9 @@ impl ComputedValuesExt for ComputedValues {
             },
             _ => false,
         };
-        if self.flags.contains(ComputedValueFlags::IS_ROOT_ELEMENT_STYLE) ||
+        if self
+            .flags
+            .contains(ComputedValueFlags::IS_ROOT_ELEMENT_STYLE) ||
             !can_be_scroll_container ||
             !AxesOverflow::from(self).establishes_scroll_container()
         {

@@ -25,8 +25,8 @@ use dom_struct::dom_struct;
 use embedder_traits::user_contents::UserScript;
 use embedder_traits::{
     AlertResponse, ConfirmResponse, EmbedderMsg, JavaScriptEvaluationError, PromptResponse,
-    ScreenMetrics, ScriptToEmbedderChan, SimpleDialogRequest, Theme, UntrustedNodeAddress, ViewportDetails,
-    WebDriverJSResult, WebDriverLoadStatus,
+    ScreenMetrics, ScriptToEmbedderChan, SimpleDialogRequest, Theme, UntrustedNodeAddress,
+    ViewportDetails, WebDriverJSResult, WebDriverLoadStatus,
 };
 use euclid::{Point2D, Rect, Scale, Size2D, Vector2D};
 use fonts::{CspViolationHandler, FontContext, NetworkTimingHandler, WebFontDocumentContext};
@@ -162,6 +162,7 @@ use crate::dom::fetchlaterresult::FetchLaterResult;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::history::History;
 use crate::dom::html::htmlcollection::{CollectionFilter, HTMLCollection};
+use crate::dom::html::htmlelement::HTMLElement;
 use crate::dom::html::htmliframeelement::HTMLIFrameElement;
 use crate::dom::idbfactory::IDBFactory;
 use crate::dom::inputevent::HitTestResult;
@@ -169,7 +170,6 @@ use crate::dom::location::Location;
 use crate::dom::medialist::MediaList;
 use crate::dom::mediaquerylist::{MediaQueryList, MediaQueryListMatchState};
 use crate::dom::mediaquerylistevent::MediaQueryListEvent;
-use crate::dom::html::htmlelement::HTMLElement;
 use crate::dom::messageevent::MessageEvent;
 use crate::dom::navigator::Navigator;
 use crate::dom::node::{Node, NodeDamage, NodeTraits, from_untrusted_node_address};
@@ -2138,9 +2138,7 @@ impl WindowMethods<crate::DomTypeHolder> for Window {
 
         // Step 1.3: Let y be the value of the top dictionary member of options, if
         // present, or the viewport’s current scroll position on the y axis otherwise.
-        let y = options
-            .top
-            .map_or(self.scroll_offset().y, |top| top as f32);
+        let y = options.top.map_or(self.scroll_offset().y, |top| top as f32);
 
         // The rest of the specification continues from `Self::scroll`.
         self.scroll(cx, x, y, options.parent.behavior, None);
@@ -3482,7 +3480,10 @@ impl Window {
 
     /// The caret positions in the text of `node`, by line. Positions after a line break are
     /// left out: they are the start of the next line.
-    #[expect(unsafe_code, reason = "Rooting live DOM node addresses from synchronous layout")]
+    #[expect(
+        unsafe_code,
+        reason = "Rooting live DOM node addresses from synchronous layout"
+    )]
     pub(crate) fn caret_stops_query(&self, node: &Node) -> Vec<LaidOutCaretLine> {
         // Inactive documents skip reflow; discarded iframe documents can retain their
         // activity flag. Only query a live context's connected tree, whose layout can
@@ -4072,7 +4073,10 @@ impl Window {
         for node in pending_svg_element_for_serialization.into_iter() {
             let node = unsafe { from_untrusted_node_address(node) };
             let svg = node.downcast::<SVGSVGElement>().unwrap();
-            if !pending_svgs.iter().any(|pending| std::ptr::eq(&**pending, svg)) {
+            if !pending_svgs
+                .iter()
+                .any(|pending| std::ptr::eq(&**pending, svg))
+            {
                 pending_svgs.push(Dom::from_ref(svg));
             }
         }

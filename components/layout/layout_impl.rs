@@ -6,10 +6,10 @@
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
-use std::ops::Range;
-use std::sync::atomic::Ordering;
 use std::fmt::Debug;
+use std::ops::Range;
 use std::rc::Rc;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock};
 
 use app_units::Au;
@@ -65,7 +65,6 @@ use style::font_metrics::FontMetrics;
 use style::global_style_data::GLOBAL_STYLE_DATA;
 use style::invalidation::element::restyle_hints::RestyleHint;
 use style::invalidation::stylesheets::StylesheetInvalidationSet;
-use style::values::computed::ContainerType;
 use style::media_queries::{MediaList, MediaType};
 use style::properties::style_structs::Font;
 use style::properties::{ComputedValues, LonghandId, NonCustomPropertyId, PropertyId, ShorthandId};
@@ -80,7 +79,7 @@ use style::stylist::Stylist;
 use style::traversal::DomTraversal;
 use style::traversal_flags::TraversalFlags;
 use style::values::computed::font::GenericFontFamily;
-use style::values::computed::{CSSPixelLength, FontSize, Length, NonNegativeLength};
+use style::values::computed::{CSSPixelLength, ContainerType, FontSize, Length, NonNegativeLength};
 use style::values::specified::font::{KeywordInfo, QueryFontMetricsFlags};
 use style::{Zero, driver};
 use style_traits::{CSSPixel, SpeculativePainter};
@@ -90,10 +89,11 @@ use webrender_api::ExternalScrollId;
 use webrender_api::units::{DevicePixel, LayoutVector2D};
 
 use crate::accessibility_tree::AccessibilityTree;
+use crate::cell::WeakRefCell;
 use crate::context::{CachedImageOrError, ImageResolver, LayoutContext};
 use crate::display_list::{DisplayListBuilder, HitTest, PaintTimingHandler, StackingContextTree};
-use crate::cell::WeakRefCell;
 use crate::dom::{LayoutBox, NodeExt};
+use crate::fragment_tree::Fragment;
 use crate::query::{
     find_character_offset_in_fragment_descendants, get_the_text_steps,
     has_sticky_inclusive_ancestor, is_fixed_to_untransformed_viewport, process_box_area_request,
@@ -105,7 +105,6 @@ use crate::query::{
     process_scroll_container_query, process_text_range_rects_request,
     root_transform_for_layout_node,
 };
-use crate::fragment_tree::Fragment;
 use crate::traversal::{RecalcStyle, compute_damage_and_rebuild_box_tree};
 use crate::{BoxTree, FragmentTree};
 
@@ -416,10 +415,7 @@ impl Layout for LayoutThread {
         })
     }
 
-    fn query_accessibility_node(
-        &self,
-        node_id: accesskit::NodeId,
-    ) -> Option<UntrustedNodeAddress> {
+    fn query_accessibility_node(&self, node_id: accesskit::NodeId) -> Option<UntrustedNodeAddress> {
         self.accessibility_tree
             .borrow()
             .as_ref()?
@@ -1303,8 +1299,7 @@ impl LayoutThread {
 
         let traversal = RecalcStyle::new(layout_context);
         let token = {
-            let shared =
-                DomTraversal::<ServoDangerousStyleElement>::shared_context(&traversal);
+            let shared = DomTraversal::<ServoDangerousStyleElement>::shared_context(&traversal);
             RecalcStyle::pre_traverse(root_element, shared)
         };
         if !token.should_traverse() {
@@ -1380,7 +1375,13 @@ impl LayoutThread {
                         return false;
                     }
                     let size = base.fragments().iter().find_map(|fragment| {
-                        Some(fragment.retrieve_box_fragment()?.content_rect().size.to_untyped())
+                        Some(
+                            fragment
+                                .retrieve_box_fragment()?
+                                .content_rect()
+                                .size
+                                .to_untyped(),
+                        )
                     });
                     if let Some(size) = size {
                         sizes.insert(*node, size);
@@ -1435,8 +1436,7 @@ impl LayoutThread {
             .process_style(dangerous_root_element, Some(&snapshot_map));
 
         if self.previously_highlighted_dom_node.get() != reflow_request.highlighted_dom_node ||
-            *self.previously_painted_selection.borrow() !=
-                reflow_request.document_selection
+            *self.previously_painted_selection.borrow() != reflow_request.document_selection
         {
             // Need to manually force layout to build a new display list regardless of whether the box tree
             // changed or not.
@@ -1791,8 +1791,7 @@ impl LayoutThread {
         self.need_new_display_list.set(false);
         self.previously_highlighted_dom_node
             .set(reflow_request.highlighted_dom_node);
-        *self.previously_painted_selection.borrow_mut() =
-            reflow_request.document_selection.clone();
+        *self.previously_painted_selection.borrow_mut() = reflow_request.document_selection.clone();
         true
     }
 

@@ -21,6 +21,7 @@ mod http_loader;
 mod image_cache;
 mod resource_thread;
 mod subresource_integrity;
+mod svg_text;
 use std::sync::Arc;
 
 use content_security_policy as csp;

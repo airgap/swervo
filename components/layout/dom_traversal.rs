@@ -549,17 +549,17 @@ pub(crate) fn generate_pseudo_element_content(
                         };
                         // Levels deeper than the list of pairs reuse its last pair.
                         let maybe_quote = match &pseudo_element_info.style.get_list().quotes {
-                            Quotes::QuoteList(quote_list) => {
-                                quote_list.0.get(depth).or(quote_list.0.last()).map(
-                                    |quote_pair| {
-                                        get_quote_from_pair(
-                                            item,
-                                            &*quote_pair.opening,
-                                            &*quote_pair.closing,
-                                        )
-                                    },
-                                )
-                            },
+                            Quotes::QuoteList(quote_list) => quote_list
+                                .0
+                                .get(depth)
+                                .or(quote_list.0.last())
+                                .map(|quote_pair| {
+                                    get_quote_from_pair(
+                                        item,
+                                        &*quote_pair.opening,
+                                        &*quote_pair.closing,
+                                    )
+                                }),
                             Quotes::Auto => {
                                 let lang = &pseudo_element_info.style.get_font()._x_lang;
                                 let quotes = quotes_for_lang(lang.0.as_ref(), depth);

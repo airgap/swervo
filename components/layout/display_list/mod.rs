@@ -12,11 +12,11 @@ use euclid::{Box2D, Point2D, Rect, Scale, SideOffsets2D, Size2D, UnknownUnit, Ve
 use fonts::{FontRef, ShapedTextSlice};
 use gradient::WebRenderGradient;
 use layout_api::{DocumentSelection, ReflowStatistics};
-use rustc_hash::FxHashMap;
 use net_traits::image_cache::Image as CachedImage;
 use paint_api::display_list::{PaintDisplayListInfo, SpatialTreeNodeInfo};
 use paint_api::{CrossProcessPaintApi, SerializableImageData};
 use pixels::{CorsStatus, ImageFrame, ImageMetadata, PixelFormat, RasterImage};
+use rustc_hash::FxHashMap;
 use servo_arc::Arc as ServoArc;
 use servo_base::id::{PipelineId, ScrollTreeNodeId, WebViewId};
 use servo_config::opts::{DiagnosticsLogging, DiagnosticsLoggingOption};
@@ -24,6 +24,7 @@ use servo_config::{pref, prefs};
 use servo_url::ServoUrl;
 use style::Zero;
 use style::color::{AbsoluteColor, ColorSpace};
+use style::computed_value_flags::ComputedValueFlags;
 use style::computed_values::background_blend_mode::SingleComputedValue as BackgroundBlendMode;
 use style::computed_values::background_clip::single_value::T as BackgroundClip;
 use style::computed_values::border_image_outset::T as BorderImageOutset;
@@ -33,7 +34,6 @@ use style::computed_values::text_decoration_style::{
     T as ComputedTextDecorationStyle, T as TextDecorationStyle,
 };
 use style::dom::OpaqueNode;
-use style::computed_value_flags::ComputedValueFlags;
 use style::properties::ComputedValues;
 use style::properties::longhands::visibility::computed_value::T as Visibility;
 use style::properties::style_structs::Border;
@@ -562,9 +562,15 @@ impl<'a> DisplayListBuilder<'a> {
         // Pending rasterization leaves the context unmasked this frame; the rasterization
         // machinery triggers a repaint when the mask image is ready.
         if has_mask &&
-            let Some(mask_chain) =
-                BuilderForBoxFragment::new(&fragment.with_style(), stacking_context.containing_block_origin)
-                    .build_mask_clip_chain(self, stacking_context.scroll_tree_node_id, clip_chain_id)
+            let Some(mask_chain) = BuilderForBoxFragment::new(
+                &fragment.with_style(),
+                stacking_context.containing_block_origin,
+            )
+            .build_mask_clip_chain(
+                self,
+                stacking_context.scroll_tree_node_id,
+                clip_chain_id,
+            )
         {
             clip_chain_id = Some(mask_chain);
         }
@@ -805,7 +811,6 @@ impl<'a> DisplayListBuilder<'a> {
 }
 
 impl PaintTraversalHandler for DisplayListBuilder<'_> {
-
     /// A tuple composed of the number of real WebRender stacking contexts pushed
     /// and the previous `Self::current_reference_frame_scroll_node_id` value of
     /// the `DisplayListBuilder` when a stacking context was visited (or `None` if
@@ -1139,11 +1144,10 @@ impl Fragment {
                     .text_origins
                     .as_ref()
                     .is_some_and(|text_origins| text_origins.is_editable)
-        }) ||
-            state
-                .text_decorations
-                .iter()
-                .any(|item| !item.line.is_empty());
+        }) || state
+            .text_decorations
+            .iter()
+            .any(|item| !item.line.is_empty());
 
         let (glyphs, largest_advance) = glyphs(
             &fragment.glyphs,
@@ -1185,7 +1189,10 @@ impl Fragment {
             None => Au::zero(),
         };
         let glyph_bounds = rect
-            .inflate(largest_advance.scale_by(2.0) + stroke_overflow, stroke_overflow)
+            .inflate(
+                largest_advance.scale_by(2.0) + stroke_overflow,
+                stroke_overflow,
+            )
             .to_webrender();
         let common = builder.common_properties(state, glyph_bounds, &parent_style);
 
@@ -1279,7 +1286,10 @@ impl Fragment {
                     rgba(fill_color),
                 ),
                 (
-                    Box2D::new(Point2D::new(start, clip.min.y), Point2D::new(end, clip.max.y)),
+                    Box2D::new(
+                        Point2D::new(start, clip.min.y),
+                        Point2D::new(end, clip.max.y),
+                    ),
                     selected_text_color,
                 ),
                 (
@@ -1576,7 +1586,8 @@ impl Fragment {
                 source_start <= line_end &&
                 (source_end > line_end ||
                     (source_end == line_end &&
-                        dom_range.end == *source.dom_offsets.last().expect("Has an end offset") &&
+                        dom_range.end ==
+                            *source.dom_offsets.last().expect("Has an end offset") &&
                         text_origins
                             .sources
                             .last()
@@ -1614,26 +1625,27 @@ impl Fragment {
 
         // The selected characters of the inline formatting context, whether they are a caret, and
         // whether the line break ending the line is selected.
-        let (selection, is_caret, selects_line_break) = match (
-            &offsets.shared_selection,
-            &offsets.text_origins,
-        ) {
-            (Some(shared_selection), _) => {
-                let shared_selection = shared_selection.borrow();
-                if !shared_selection.enabled {
-                    return None;
-                }
-                (
-                    shared_selection.character_range.clone(),
-                    shared_selection.range.is_empty(),
-                    false,
-                )
-            },
-            (None, Some(text_origins)) => {
-                Self::document_selection_in_text_fragment(builder, fragment, offsets, text_origins)?
-            },
-            (None, None) => return None,
-        };
+        let (selection, is_caret, selects_line_break) =
+            match (&offsets.shared_selection, &offsets.text_origins) {
+                (Some(shared_selection), _) => {
+                    let shared_selection = shared_selection.borrow();
+                    if !shared_selection.enabled {
+                        return None;
+                    }
+                    (
+                        shared_selection.character_range.clone(),
+                        shared_selection.range.is_empty(),
+                        false,
+                    )
+                },
+                (None, Some(text_origins)) => Self::document_selection_in_text_fragment(
+                    builder,
+                    fragment,
+                    offsets,
+                    text_origins,
+                )?,
+                (None, None) => return None,
+            };
 
         if offsets.character_range.start > selection.end ||
             offsets.character_range.end < selection.start
@@ -1645,10 +1657,7 @@ impl Fragment {
         // layout will push an empty fragment in order to trigger painting of the cursor on an empty line.
         // This code ensure that it is only painted if the cursor is on the starting index of the empty
         // fragment.
-        if fragment.is_empty_for_text_cursor &&
-            !offsets
-                .character_range
-                .contains(&selection.start)
+        if fragment.is_empty_for_text_cursor && !offsets.character_range.contains(&selection.start)
         {
             return None;
         }
@@ -1659,9 +1668,7 @@ impl Fragment {
         let mut end_advance = None;
         for glyph_store in fragment.glyphs.iter() {
             let glyph_store_character_count = glyph_store.character_count();
-            if current_character_index + glyph_store_character_count <
-                selection.start
-            {
+            if current_character_index + glyph_store_character_count < selection.start {
                 current_advance += glyph_store.total_advance() +
                     (justification_adjustment * glyph_store.total_word_separators() as i32);
                 current_character_index += glyph_store_character_count;
@@ -2146,7 +2153,6 @@ impl<'a> BuilderForBoxFragment<'a> {
         if !self.fragment.is_table_grid_with_collapsed_borders() {
             self.build_border(builder, state);
         }
-
 
         let overflow = self
             .fragment

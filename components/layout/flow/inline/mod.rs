@@ -107,16 +107,13 @@ use style::computed_values::word_break::T as WordBreak;
 use style::context::{QuirksMode, SharedStyleContext};
 use style::dom::OpaqueNode;
 use style::properties::ComputedValues;
-use style::selector_parser::PseudoElement;
-use style::values::computed::{Overflow, OverflowWrap, UserSelect};
-use style::values::specified::box_::{Display as StyloDisplay, DisplayInside};
-use style::values::specified::text::TextOverflowSide;
 use style::properties::style_structs::InheritedText;
-use style::values::computed::BaselineShift;
+use style::selector_parser::PseudoElement;
+use style::values::computed::{BaselineShift, Overflow, OverflowWrap, UserSelect};
 use style::values::generics::box_::BaselineShiftKeyword;
 use style::values::generics::font::LineHeight;
-use style::values::specified::box_::BaselineSource;
-use style::values::specified::text::TextAlignKeyword;
+use style::values::specified::box_::{BaselineSource, Display as StyloDisplay, DisplayInside};
+use style::values::specified::text::{TextAlignKeyword, TextOverflowSide};
 use style::values::specified::{AlignmentBaseline, TextAlignLast, TextJustify};
 use text_run::{TextRun, get_font_for_first_font_for_style};
 use unicode_bidi::{BidiInfo, Level};
@@ -1451,7 +1448,9 @@ impl InlineFormattingContextLayout<'_> {
             },
             LineItem::InlineEndBoxPaddingBorderMargin(identifier) => {
                 let pbm = pbm(identifier);
-                pbm.padding.inline_end + pbm.border.inline_end + pbm.margin.inline_end.auto_is(Au::zero)
+                pbm.padding.inline_end +
+                    pbm.border.inline_end +
+                    pbm.margin.inline_end.auto_is(Au::zero)
             },
             LineItem::TextRun(_, text_run) => text_run
                 .text
@@ -1489,15 +1488,16 @@ impl InlineFormattingContextLayout<'_> {
                 used > available
             })
             .unwrap_or(line_items.len().saturating_sub(1));
-        let Some(font_text_run) = line_items[..=overflow_index]
-            .iter()
-            .rev()
-            .find_map(|item| match item {
-                LineItem::TextRun(_, text_run) if !text_run.info.bidi_level.is_rtl() => {
-                    Some(text_run)
-                },
-                _ => None,
-            })
+        let Some(font_text_run) =
+            line_items[..=overflow_index]
+                .iter()
+                .rev()
+                .find_map(|item| match item {
+                    LineItem::TextRun(_, text_run) if !text_run.info.bidi_level.is_rtl() => {
+                        Some(text_run)
+                    },
+                    _ => None,
+                })
         else {
             return;
         };
@@ -1553,7 +1553,10 @@ impl InlineFormattingContextLayout<'_> {
         // Floats and absolutely positioned boxes later on the line are still laid out; only
         // the in-flow content past the ellipsis is dropped.
         kept.extend(items.filter(|item| {
-            matches!(item, LineItem::AbsolutelyPositioned(..) | LineItem::Float(..))
+            matches!(
+                item,
+                LineItem::AbsolutelyPositioned(..) | LineItem::Float(..)
+            )
         }));
         *line_items = kept;
     }
@@ -3092,8 +3095,9 @@ impl IndependentFormattingContext {
 
         // The annotation of a ruby column overflows the line box instead of growing it, as in
         // Chrome, where it sits in the leading above the line or above the first line.
-        let annotation_block_size =
-            ruby_annotation_block_size(&fragment).to_logical(container_writing_mode).block;
+        let annotation_block_size = ruby_annotation_block_size(&fragment)
+            .to_logical(container_writing_mode)
+            .block;
         let (block_sizes, baseline_offset_in_parent) = self.get_block_sizes_and_baseline_offset(
             layout,
             size.block - annotation_block_size,

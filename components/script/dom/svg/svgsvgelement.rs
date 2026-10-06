@@ -39,13 +39,13 @@ use crate::dom::element::attributes::storage::AttrRef;
 use crate::dom::element::{AttributeMutation, CustomElementCreationMode, Element, ElementCreator};
 use crate::dom::html::htmlimageelement::HTMLImageElement;
 use crate::dom::iterators::ShadowIncluding;
-use crate::dom::text::Text;
 use crate::dom::node::virtualmethods::VirtualMethods;
 use crate::dom::node::{
     ChildrenMutation, CloneChildrenFlag, Node, NodeDamage, NodeTraits, UnbindContext,
 };
 use crate::dom::svg::svggraphicselement::SVGGraphicsElement;
 use crate::dom::svg::svgimageelement::SVGImageElement;
+use crate::dom::text::Text;
 
 #[dom_struct]
 pub(crate) struct SVGSVGElement {
@@ -127,9 +127,10 @@ impl SVGSVGElement {
         cloned_nodes.extend(self.process_foreign_objects(cx));
         cloned_nodes.extend(self.process_external_references(cx, &mut referenced_ids));
 
-        let rewrite_attributes = |element: &Element, attributes: &mut Vec<(QualName, AttrValue)>| {
-            self.rewrite_serialized_attributes(element, attributes, &href_rewrites)
-        };
+        let rewrite_attributes =
+            |element: &Element, attributes: &mut Vec<(QualName, AttrValue)>| {
+                self.rewrite_serialized_attributes(element, attributes, &href_rewrites)
+            };
         let serialize_result = self
             .upcast::<Node>()
             .xml_serialize_with_attribute_rewrite(TraversalScope::IncludeNode, &rewrite_attributes);
@@ -273,11 +274,10 @@ impl SVGSVGElement {
             None,
         );
         let inlined_id = format!("external-use-{}-{id}", href_rewrites.len());
-        cloned_node.downcast::<Element>().unwrap().set_atomic_attribute(
-            cx,
-            &local_name!("id"),
-            DOMString::from(&*inlined_id),
-        );
+        cloned_node
+            .downcast::<Element>()
+            .unwrap()
+            .set_atomic_attribute(cx, &local_name!("id"), DOMString::from(&*inlined_id));
         href_rewrites.push((DomRoot::from_ref(use_element), format!("#{inlined_id}")));
         Some(self.append_in_defs(cx, &cloned_node))
     }
@@ -381,8 +381,7 @@ impl SVGSVGElement {
                     } else {
                         href.to_string()
                     };
-                    if let Some(id) = effective_href.strip_prefix('#').filter(|id| !id.is_empty())
-                    {
+                    if let Some(id) = effective_href.strip_prefix('#').filter(|id| !id.is_empty()) {
                         referenced_ids.push(id.to_owned());
                     }
                 }
@@ -484,10 +483,8 @@ impl SVGSVGElement {
         if effective_href.is_empty() || effective_href.starts_with("data:") {
             return None;
         }
-        let preserve_aspect_ratio = element.get_attribute_string_value_with_namespace(
-            &ns!(),
-            &local_name!("preserveAspectRatio"),
-        );
+        let preserve_aspect_ratio = element
+            .get_attribute_string_value_with_namespace(&ns!(), &local_name!("preserveAspectRatio"));
         match image.image_data()? {
             Image::Raster(raster) => {
                 Some((png_data_url(raster.as_snapshot())?, preserve_aspect_ratio))
@@ -803,7 +800,8 @@ impl SVGSVGElement {
                 let Some(length) = length_percentage.0.to_length() else {
                     continue;
                 };
-                attributes.retain(|(attribute, _)| attribute.ns != ns!() || attribute.local != name);
+                attributes
+                    .retain(|(attribute, _)| attribute.ns != ns!() || attribute.local != name);
                 attributes.push((
                     QualName::new(None, ns!(), name),
                     AttrValue::String(length.px().to_string()),
@@ -868,10 +866,8 @@ impl SVGSVGElement {
         let is_root = std::ptr::eq(element, self.upcast::<Element>());
         // Inline declarations are serialized too, and resvg can't read all of them (`var()`,
         // lowercase `currentcolor`), so every paint property they name is re-emitted computed.
-        let inline_style = element.get_attribute_string_value_with_namespace(
-            &ns!(),
-            &local_name!("style"),
-        );
+        let inline_style =
+            element.get_attribute_string_value_with_namespace(&ns!(), &local_name!("style"));
 
         let mut declarations = String::new();
         for property in SVG_PAINT_PROPERTIES {
@@ -1141,7 +1137,11 @@ fn paint_server_id(paint: &SVGPaint) -> Option<String> {
         return None;
     };
     let url = url.url()?;
-    Some(percent_decode_str(url.fragment()?).decode_utf8_lossy().into_owned())
+    Some(
+        percent_decode_str(url.fragment()?)
+            .decode_utf8_lossy()
+            .into_owned(),
+    )
 }
 
 /// `value` with each `var(--name[, fallback])` replaced by the custom property's computed value

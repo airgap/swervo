@@ -1145,9 +1145,11 @@ impl IndependentFormattingContext {
             pbm,
             depends_on_block_constraints,
             ..
-        } = self.layout_style().content_box_sizes_and_padding_border_margin(
-            &containing_block.for_in_flow_block_level_child_sizing(self),
-        );
+        } = self
+            .layout_style()
+            .content_box_sizes_and_padding_border_margin(
+                &containing_block.for_in_flow_block_level_child_sizing(self),
+            );
 
         let (margin_block_start, margin_block_end) =
             solve_block_margins_for_in_flow_block_level(&pbm);

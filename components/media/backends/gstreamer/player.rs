@@ -250,9 +250,9 @@ impl PlayerInner {
                 .push_end_of_stream()
                 .map(|_| ())
                 .map_err(|_| PlayerError::EOSFailed),
-            Some(PlayerSource::MediaSource(ref source)) => source
-                .end_of_stream()
-                .map_err(|_| PlayerError::EOSFailed),
+            Some(PlayerSource::MediaSource(ref source)) => {
+                source.end_of_stream().map_err(|_| PlayerError::EOSFailed)
+            },
             _ => Ok(()),
         }
     }
@@ -534,8 +534,7 @@ impl GStreamerPlayer {
         // `servocencdecrypt` element (registered at backend init). Set proactively — the demuxer's
         // context query fires before any decryptor is plugged, so it can't answer for itself.
         {
-            let mut context =
-                gstreamer::Context::new("drm-preferred-decryption-system-id", true);
+            let mut context = gstreamer::Context::new("drm-preferred-decryption-system-id", true);
             context.get_mut().unwrap().structure_mut().set(
                 "decryption-system-id",
                 "1077efec-c0b2-4d02-ace3-3c1e52e2fb4b",
@@ -562,25 +561,28 @@ impl GStreamerPlayer {
                 };
                 let observer = observer.clone();
                 let fired = fired.clone();
-                sink_pad.add_probe(gstreamer::PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
-                    if let Some(gstreamer::PadProbeData::Event(ref event)) = info.data &&
-                        let gstreamer::EventView::Protection(protection) = event.view()
-                    {
-                        let (_system_id, data, _origin) = protection.get();
-                        if !fired.swap(true, std::sync::atomic::Ordering::Relaxed) &&
-                            let Ok(map) = data.map_readable()
+                sink_pad.add_probe(
+                    gstreamer::PadProbeType::EVENT_DOWNSTREAM,
+                    move |_pad, info| {
+                        if let Some(gstreamer::PadProbeData::Event(ref event)) = info.data &&
+                            let gstreamer::EventView::Protection(protection) = event.view()
                         {
-                            let _ = notify!(
-                                observer,
-                                PlayerEvent::NeedKey {
-                                    init_data_type: "cenc".to_string(),
-                                    init_data: map.to_vec(),
-                                }
-                            );
+                            let (_system_id, data, _origin) = protection.get();
+                            if !fired.swap(true, std::sync::atomic::Ordering::Relaxed) &&
+                                let Ok(map) = data.map_readable()
+                            {
+                                let _ = notify!(
+                                    observer,
+                                    PlayerEvent::NeedKey {
+                                        init_data_type: "cenc".to_string(),
+                                        init_data: map.to_vec(),
+                                    }
+                                );
+                            }
                         }
-                    }
-                    gstreamer::PadProbeReturn::Ok
-                });
+                        gstreamer::PadProbeReturn::Ok
+                    },
+                );
             });
         }
 
@@ -1110,13 +1112,7 @@ impl Player for GStreamerPlayer {
         inner.add_source_buffer()
     }
 
-    inner_player_proxy!(
-        push_source_buffer_data,
-        source_buffer,
-        usize,
-        data,
-        Vec<u8>
-    );
+    inner_player_proxy!(push_source_buffer_data, source_buffer, usize, data, Vec<u8>);
 
     fn render_use_gl(&self) -> bool {
         self.render.lock().unwrap().is_gl()

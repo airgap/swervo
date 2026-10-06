@@ -9,11 +9,14 @@ use std::cell::Cell;
 use std::ffi::CString;
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_dom_object;
 use stylo_atoms::Atom;
 
-use crate::dom::bindings::codegen::Bindings::SourceBufferBinding::{AppendMode, SourceBufferMethods};
+use crate::dom::bindings::codegen::Bindings::SourceBufferBinding::{
+    AppendMode, SourceBufferMethods,
+};
 use crate::dom::bindings::codegen::UnionTypes::ArrayBufferViewOrArrayBuffer;
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::inheritance::Castable;
@@ -25,7 +28,6 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::media::mediasegmentparser::MediaSegmentParser;
 use crate::dom::media::mediasource::MediaSource;
 use crate::dom::timeranges::{TimeRanges, TimeRangesContainer};
-use js::context::JSContext;
 use crate::script_runtime::CanGc;
 
 #[dom_struct]
@@ -168,9 +170,7 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
         }
         // The range must be ordered and valid: 0 <= start < end. Reject NaN explicitly.
         if start.is_nan() || end.is_nan() || start < 0.0 || start >= end {
-            return Err(Error::Type(
-                CString::new("Invalid remove range").unwrap(),
-            ));
+            return Err(Error::Type(CString::new("Invalid remove range").unwrap()));
         }
         // Run the removal asynchronously. The player's stream can't drop data it already took,
         // but `buffered` drops the range, which is what players managing their buffer check.

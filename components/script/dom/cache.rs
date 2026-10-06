@@ -15,16 +15,14 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use dom_struct::dom_struct;
-use servo_base::generic_channel::GenericCallback;
-use servo_url::ServoUrl;
-use storage_traits::cache_storage::{CacheApiRequest, CacheApiResponse, CacheStorageThreadMsg};
-
 use js::context::JSContext;
 use js::realm::CurrentRealm;
 use js::rust::HandleValue as SafeHandleValue;
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
-use servo_base::generic_channel::GenericSend;
+use servo_base::generic_channel::{GenericCallback, GenericSend};
+use servo_url::ServoUrl;
+use storage_traits::cache_storage::{CacheApiRequest, CacheApiResponse, CacheStorageThreadMsg};
 
 use crate::body::BodyMixin;
 use crate::dom::bindings::codegen::Bindings::CacheBinding::{CacheMethods, CacheQueryOptions};
@@ -38,11 +36,11 @@ use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::ByteString;
 use crate::dom::cachestorage::{CacheReplyHandler, native_query_options};
-use crate::dom::request::Request;
-use crate::dom::response::Response;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::promise::Promise;
 use crate::dom::promisenativehandler::{Callback, PromiseNativeHandler};
+use crate::dom::request::Request;
+use crate::dom::response::Response;
 use crate::fetch::Fetch;
 use crate::realms::enter_auto_realm;
 
@@ -501,11 +499,10 @@ impl CacheMethods<crate::DomTypeHolder> for Cache {
         // Validate every request up front; one bad request rejects the whole batch untouched.
         let mut converted = Vec::with_capacity(requests.len());
         for info in &requests {
-            match request_info_to_cache_request(&global, info)
-                .and_then(|cache_request| {
-                    validate_put_request(&cache_request)?;
-                    Ok(cache_request)
-                }) {
+            match request_info_to_cache_request(&global, info).and_then(|cache_request| {
+                validate_put_request(&cache_request)?;
+                Ok(cache_request)
+            }) {
                 Ok(cache_request) => converted.push(cache_request),
                 Err(error) => {
                     promise.reject_error(cx, error);
@@ -538,20 +535,25 @@ impl CacheMethods<crate::DomTypeHolder> for Cache {
     }
 
     /// <https://w3c.github.io/ServiceWorker/#cache-put>
-    fn Put(&self, cx: &mut JSContext, request: RequestOrUSVString, response: &Response) -> Rc<Promise> {
+    fn Put(
+        &self,
+        cx: &mut JSContext,
+        request: RequestOrUSVString,
+        response: &Response,
+    ) -> Rc<Promise> {
         let global = self.global();
         let promise = Promise::new(cx, &global);
-        let cache_request = match request_info_to_cache_request(&global, &request)
-            .and_then(|cache_request| {
+        let cache_request =
+            match request_info_to_cache_request(&global, &request).and_then(|cache_request| {
                 validate_put_request(&cache_request)?;
                 Ok(cache_request)
             }) {
-            Ok(cache_request) => cache_request,
-            Err(error) => {
-                promise.reject_error(cx, error);
-                return promise;
-            },
-        };
+                Ok(cache_request) => cache_request,
+                Err(error) => {
+                    promise.reject_error(cx, error);
+                    return promise;
+                },
+            };
 
         // Spec: a disturbed or locked body rejects with a TypeError.
         if response.is_disturbed() || response.is_locked() {

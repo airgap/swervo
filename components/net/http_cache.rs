@@ -11,13 +11,12 @@ use std::ops::Bound;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
+use base64::Engine;
 use headers::{
     CacheControl, ContentRange, Expires, HeaderMapExt, LastModified, Pragma, Range, Vary,
 };
-use base64::Engine;
 use http::{HeaderMap, Method, StatusCode, header};
 use log::{debug, error};
-use serde::{Deserialize, Serialize};
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use malloc_size_of_derive::MallocSizeOf;
 use net_traits::http_status::HttpStatus;
@@ -27,6 +26,7 @@ use net_traits::{CacheEntryDescriptor, FetchMetadata, Metadata, ResourceFetchTim
 use parking_lot::Mutex as ParkingLotMutex;
 use quick_cache::sync::{Cache, DefaultLifecycle, PlaceholderGuard};
 use quick_cache::{DefaultHashBuilder, UnitWeighter};
+use serde::{Deserialize, Serialize};
 use servo_arc::Arc;
 use servo_config::pref;
 use servo_url::ServoUrl;
@@ -267,9 +267,10 @@ impl HttpCache {
                 });
             }
             if !resources.is_empty() {
-                cache
-                    .entries
-                    .insert(CacheKey::from_url(url), std::sync::Arc::new(TokioRwLock::new(resources)));
+                cache.entries.insert(
+                    CacheKey::from_url(url),
+                    std::sync::Arc::new(TokioRwLock::new(resources)),
+                );
             }
         }
         cache

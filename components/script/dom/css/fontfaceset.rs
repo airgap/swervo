@@ -32,8 +32,7 @@ use style::values::computed::{FontStretch, FontStyle, FontSynthesis, FontWeight}
 use style::values::generics::font::FontStyle as GenericFontStyle;
 use style::values::specified::font::{
     FontFamily as SpecifiedFontFamily, FontStretch as SpecifiedFontStretch,
-    FontStyle as SpecifiedFontStyleProperty, FontWeight as SpecifiedFontWeight,
-    SpecifiedFontStyle,
+    FontStyle as SpecifiedFontStyleProperty, FontWeight as SpecifiedFontWeight, SpecifiedFontStyle,
 };
 use style_traits::ParsingMode;
 

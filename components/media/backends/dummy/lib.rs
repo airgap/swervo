@@ -31,8 +31,8 @@ use servo_media_streams::{MediaOutput, MediaSocket, MediaStream, MediaStreamType
 use servo_media_traits::{ClientContextId, MediaInstance};
 use servo_media_webrtc::{
     BundlePolicy, DataChannelId, DataChannelInit, DataChannelMessage, IceCandidate,
-    SessionDescription, WebRtcBackend, WebRtcController, WebRtcControllerBackend, WebRtcError,
-    WebRtcDataChannelResult, WebRtcResult, WebRtcSignaller, thread,
+    SessionDescription, WebRtcBackend, WebRtcController, WebRtcControllerBackend,
+    WebRtcDataChannelResult, WebRtcError, WebRtcResult, WebRtcSignaller, thread,
 };
 
 pub struct DummyBackend;

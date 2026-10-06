@@ -118,7 +118,11 @@ impl HanKerningData {
 
     /// The byte offsets, relative to `range.start`, of the characters in `text[range]` to set
     /// half-width. The characters just outside `range` count as neighbours.
-    pub(crate) fn trimmed_punctuation(&self, text: &str, range: std::ops::Range<usize>) -> Vec<usize> {
+    pub(crate) fn trimmed_punctuation(
+        &self,
+        text: &str,
+        range: std::ops::Range<usize>,
+    ) -> Vec<usize> {
         let mut previous = text[..range.start]
             .chars()
             .next_back()

@@ -283,8 +283,14 @@ impl AccessibilityTree {
 
     /// Whether `dom_child` of `dom_node` is inert, which hides it and its subtree from assistive
     /// technology. <https://html.spec.whatwg.org/multipage/#inert-subtrees>
-    fn is_inert_child(&self, dom_node: &ServoLayoutNode<'_>, dom_child: &ServoLayoutNode<'_>) -> bool {
-        let leads_to_modal_dialog = self.modal_dialog_and_ancestors.contains(&dom_child.opaque());
+    fn is_inert_child(
+        &self,
+        dom_node: &ServoLayoutNode<'_>,
+        dom_child: &ServoLayoutNode<'_>,
+    ) -> bool {
+        let leads_to_modal_dialog = self
+            .modal_dialog_and_ancestors
+            .contains(&dom_child.opaque());
         // Ancestors of the modal dialog are inert themselves, but stay in the tree to hold it.
         if self
             .modal_dialog_and_ancestors

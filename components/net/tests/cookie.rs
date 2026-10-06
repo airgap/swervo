@@ -642,7 +642,10 @@ fn test_same_site_attribute_filtering() {
         .cookies_for_url_with_same_site(&url, source, SameSiteContext::SameSite)
         .unwrap();
     for name in ["strictc", "laxc", "nonec", "plainc"] {
-        assert!(same.contains(name), "same-site should include {name}: {same}");
+        assert!(
+            same.contains(name),
+            "same-site should include {name}: {same}"
+        );
     }
 
     // Cross-site top-level navigation with a safe method (Lax-allowed): Strict withheld,
@@ -650,14 +653,23 @@ fn test_same_site_attribute_filtering() {
     let lax = storage
         .cookies_for_url_with_same_site(&url, source, SameSiteContext::CrossSiteLaxAllowed)
         .unwrap();
-    assert!(!lax.contains("strictc"), "lax-allowed must drop Strict: {lax}");
+    assert!(
+        !lax.contains("strictc"),
+        "lax-allowed must drop Strict: {lax}"
+    );
     for name in ["laxc", "nonec", "plainc"] {
-        assert!(lax.contains(name), "lax-allowed should include {name}: {lax}");
+        assert!(
+            lax.contains(name),
+            "lax-allowed should include {name}: {lax}"
+        );
     }
 
     // Cross-site subresource: only SameSite=None cookies attach.
     let cross = storage
         .cookies_for_url_with_same_site(&url, source, SameSiteContext::CrossSite)
         .unwrap();
-    assert_eq!(cross, "nonec=1", "cross-site must send only SameSite=None: {cross}");
+    assert_eq!(
+        cross, "nonec=1",
+        "cross-site must send only SameSite=None: {cross}"
+    );
 }

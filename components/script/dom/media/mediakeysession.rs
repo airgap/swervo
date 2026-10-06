@@ -28,9 +28,9 @@ use crate::dom::bindings::codegen::Bindings::MediaKeySystemAccessBinding::MediaK
 use crate::dom::bindings::codegen::UnionTypes::ArrayBufferViewOrArrayBuffer;
 use crate::dom::bindings::error::Error;
 use crate::dom::bindings::inheritance::Castable;
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
-use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::event::Event;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
@@ -127,7 +127,9 @@ impl MediaKeySessionMethods<crate::DomTypeHolder> for MediaKeySession {
                 request.as_bytes(),
                 can_gc,
             );
-            event.upcast::<Event>().fire(cx, self.upcast::<EventTarget>());
+            event
+                .upcast::<Event>()
+                .fire(cx, self.upcast::<EventTarget>());
         }
 
         promise.resolve_native(cx, &());
@@ -146,8 +148,10 @@ impl MediaKeySessionMethods<crate::DomTypeHolder> for MediaKeySession {
             ArrayBufferViewOrArrayBuffer::ArrayBuffer(b) => b.to_vec(),
         };
         let Ok(json) = serde_json::from_slice::<serde_json::Value>(&data) else {
-            promise
-                .reject_error(cx, Error::Type(CString::new("invalid Clear Key license").unwrap()));
+            promise.reject_error(
+                cx,
+                Error::Type(CString::new("invalid Clear Key license").unwrap()),
+            );
             return promise;
         };
         let mut stored = 0usize;
@@ -200,12 +204,8 @@ fn parse_pssh_key_ids(data: &[u8]) -> Vec<Vec<u8>> {
     let mut key_ids = Vec::new();
     let mut pos = 0usize;
     while pos + 32 <= data.len() {
-        let box_size = u32::from_be_bytes([
-            data[pos],
-            data[pos + 1],
-            data[pos + 2],
-            data[pos + 3],
-        ]) as usize;
+        let box_size =
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         if &data[pos + 4..pos + 8] != b"pssh" || box_size < 32 {
             break;
         }
@@ -215,12 +215,9 @@ fn parse_pssh_key_ids(data: &[u8]) -> Vec<Vec<u8>> {
         let mut off = pos + 28;
         if version >= 1 {
             if off + 4 <= box_end {
-                let kid_count = u32::from_be_bytes([
-                    data[off],
-                    data[off + 1],
-                    data[off + 2],
-                    data[off + 3],
-                ]) as usize;
+                let kid_count =
+                    u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
+                        as usize;
                 off += 4;
                 for _ in 0..kid_count {
                     if off + 16 > box_end {
@@ -232,12 +229,9 @@ fn parse_pssh_key_ids(data: &[u8]) -> Vec<Vec<u8>> {
             }
         } else if off + 4 <= box_end {
             // Version 0: [u32 data_size][data]; Clear Key data is concatenated 16-byte key ids.
-            let data_size = u32::from_be_bytes([
-                data[off],
-                data[off + 1],
-                data[off + 2],
-                data[off + 3],
-            ]) as usize;
+            let data_size =
+                u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
+                    as usize;
             off += 4;
             let data_end = (off + data_size).min(box_end);
             while off + 16 <= data_end {

@@ -495,8 +495,9 @@ fn insert_paragraph_in_editing_host(
     let new_paragraph = |cx: &mut JSContext| -> DomRoot<Node> {
         DomRoot::upcast(document.create_element(cx, tag.str()))
     };
-    let new_line_break =
-        |cx: &mut JSContext| -> DomRoot<Node> { DomRoot::upcast(document.create_element(cx, "br")) };
+    let new_line_break = |cx: &mut JSContext| -> DomRoot<Node> {
+        DomRoot::upcast(document.create_element(cx, "br"))
+    };
     let append = |cx: &mut JSContext, parent: &Node, child: &Node| {
         parent
             .AppendChild(cx, child)
@@ -577,11 +578,12 @@ fn insert_paragraph_in_editing_host(
         let next = if *node == *editing_host {
             editing_host.children().nth(offset as usize)
         } else {
-            node.inclusive_ancestors(ShadowIncluding::No).find(|ancestor| {
-                ancestor
-                    .GetParentNode()
-                    .is_some_and(|parent| *parent == *editing_host)
-            })
+            node.inclusive_ancestors(ShadowIncluding::No)
+                .find(|ancestor| {
+                    ancestor
+                        .GetParentNode()
+                        .is_some_and(|parent| *parent == *editing_host)
+                })
         };
         let paragraph = new_paragraph(cx);
         let line_break = new_line_break(cx);
@@ -657,7 +659,9 @@ fn insert_paragraph_in_editing_host(
 }
 
 fn shallow_clone_without_id(cx: &mut JSContext, document: &Document, node: &Node) -> DomRoot<Node> {
-    let element = node.downcast::<Element>().expect("Must always be an element");
+    let element = node
+        .downcast::<Element>()
+        .expect("Must always be an element");
     let clone = document.create_element(cx, element.local_name());
     element.copy_all_attributes_to_other_element(cx, &clone);
     clone.remove_attribute_by_name(cx, &local_name!("id"));

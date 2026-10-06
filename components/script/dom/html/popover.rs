@@ -228,9 +228,9 @@ impl HTMLElement {
             // >       in popover mode is "hint"; and effectiveType is the Auto state, then set
             // >       effectiveType to the Hint state.
             if effective_type == PopoverState::Auto &&
-                ancestor
-                    .as_ref()
-                    .is_some_and(|ancestor| ancestor.opened_in_popover_mode() == Some(PopoverState::Hint))
+                ancestor.as_ref().is_some_and(|ancestor| {
+                    ancestor.opened_in_popover_mode() == Some(PopoverState::Hint)
+                })
             {
                 effective_type = PopoverState::Hint;
             }
@@ -286,7 +286,11 @@ impl HTMLElement {
 
             // > 14.8. If the result of running topmost auto or hint popover on document is null,
             // >       then set shouldRestoreFocus to true.
-            if document.top_layer().topmost_auto_or_hint_popover().is_none() {
+            if document
+                .top_layer()
+                .topmost_auto_or_hint_popover()
+                .is_none()
+            {
                 should_restore_focus = true;
             }
 

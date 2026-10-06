@@ -21,9 +21,7 @@ pub struct WebRtcController {
 }
 
 impl WebRtcController {
-    pub fn new<T: WebRtcBackend>(
-        signaller: Box<dyn WebRtcSignaller>,
-    ) -> Result<Self, WebRtcError> {
+    pub fn new<T: WebRtcBackend>(signaller: Box<dyn WebRtcSignaller>) -> Result<Self, WebRtcError> {
         let (sender, receiver) = channel();
 
         let t = WebRtcController { sender };

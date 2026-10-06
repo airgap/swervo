@@ -181,10 +181,14 @@ impl ValidityState {
             let has_range_limitations = is_candidate && input.has_range_limitations();
             let out_of_range = invalid_flags
                 .intersects(ValidationFlags::RANGE_UNDERFLOW | ValidationFlags::RANGE_OVERFLOW);
-            self.element
-                .set_state(ElementState::INRANGE, has_range_limitations && !out_of_range);
-            self.element
-                .set_state(ElementState::OUTOFRANGE, has_range_limitations && out_of_range);
+            self.element.set_state(
+                ElementState::INRANGE,
+                has_range_limitations && !out_of_range,
+            );
+            self.element.set_state(
+                ElementState::OUTOFRANGE,
+                has_range_limitations && out_of_range,
+            );
         }
 
         if let Some(form_control) = self.element.as_maybe_form_control() &&

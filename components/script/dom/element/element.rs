@@ -1300,8 +1300,7 @@ impl<'dom> LayoutDom<'dom, Element> {
                 let view_box = svg
                     .get_attr_val_for_layout(&ns!(), &LocalName::from("viewBox"))
                     .and_then(parse_view_box);
-                let [min_x, min_y, vb_width, vb_height] =
-                    view_box.unwrap_or([0.0, 0.0, 0.0, 0.0]);
+                let [min_x, min_y, vb_width, vb_height] = view_box.unwrap_or([0.0, 0.0, 0.0, 0.0]);
                 let scale = |viewport: Option<f32>, view_box_extent: f32| -> f32 {
                     match viewport {
                         Some(v) if view_box_extent > 0.0 => v / view_box_extent,
@@ -1456,7 +1455,10 @@ impl<'dom> LayoutDom<'dom, Element> {
                     Some("reset") | Some("button") => None,
                     // <https://html.spec.whatwg.org/multipage/#attr-input-size> does not apply to
                     // these; the UA sheet sizes them like Chrome does.
-                    Some("date") | Some("time") | Some("datetime-local") | Some("month") |
+                    Some("date") |
+                    Some("time") |
+                    Some("datetime-local") |
+                    Some("month") |
                     Some("week") => None,
                     // Others
                     _ => match input_element.size_for_layout() {
@@ -1473,9 +1475,9 @@ impl<'dom> LayoutDom<'dom, Element> {
         };
         if let Some(size) = size {
             let value = specified::NoCalcLength::from_servo_character_width(size);
-            push(PropertyDeclaration::ServoTextControlWidth(text_control_size(
-                value,
-            )));
+            push(PropertyDeclaration::ServoTextControlWidth(
+                text_control_size(value),
+            ));
         }
 
         let width = if let Some(this) = self.downcast::<HTMLIFrameElement>() {
@@ -1593,9 +1595,9 @@ impl<'dom> LayoutDom<'dom, Element> {
             if cols > 0 {
                 // https://html.spec.whatwg.org/multipage/#textarea-effective-width
                 let value = specified::NoCalcLength::from_servo_textarea_columns(cols);
-                push(PropertyDeclaration::ServoTextControlWidth(text_control_size(
-                    value,
-                )));
+                push(PropertyDeclaration::ServoTextControlWidth(
+                    text_control_size(value),
+                ));
             }
         }
 
@@ -1607,9 +1609,9 @@ impl<'dom> LayoutDom<'dom, Element> {
             if rows > 0 {
                 // https://html.spec.whatwg.org/multipage/#textarea-effective-height
                 let value = specified::NoCalcLength::from_servo_textarea_rows(rows);
-                push(PropertyDeclaration::ServoTextControlHeight(text_control_size(
-                    value,
-                )));
+                push(PropertyDeclaration::ServoTextControlHeight(
+                    text_control_size(value),
+                ));
             }
         }
 

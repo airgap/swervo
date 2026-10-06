@@ -26,12 +26,12 @@ use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::document::Document;
-use crate::dom::eventtarget::EventTarget;
-use crate::dom::node::{Node, NodeTraits};
-use crate::dom::range::Range;
 use crate::dom::element::Element;
+use crate::dom::eventtarget::EventTarget;
 use crate::dom::html::htmlbrelement::HTMLBRElement;
 use crate::dom::iterators::ShadowIncluding;
+use crate::dom::node::{Node, NodeTraits};
+use crate::dom::range::Range;
 use crate::dom::text::Text;
 use crate::dom::window::{LaidOutCaretLine, LaidOutCaretStop, Window};
 
@@ -132,7 +132,8 @@ impl Selection {
         self.document.clear_command_overrides();
 
         // Layout paints the caret and selected text of editing hosts.
-        self.document.add_restyle_reason(RestyleReason::SelectionChanged);
+        self.document
+            .add_restyle_reason(RestyleReason::SelectionChanged);
 
         // Step 1. If target's has scheduled selectionchange event is true, abort these steps.
         if self.has_scheduled_selectionchange_event.get() {
@@ -282,7 +283,8 @@ impl Selection {
         // Like in other browsers, a selection stays in the editing host it starts in, and one
         // that starts outside editing hosts does not enter them.
         let editing_host = if extend {
-            self.anchor_node().and_then(|anchor| anchor.editing_host_of())
+            self.anchor_node()
+                .and_then(|anchor| anchor.editing_host_of())
         } else {
             hit_node.editing_host_of()
         };
@@ -347,13 +349,9 @@ impl Selection {
                     .downcast::<Text>()
                     .and_then(|text| word_around(&text.data(), stop.offset))
                 {
-                    Some(word) => self.SetBaseAndExtent(
-                        cx,
-                        &stop.node,
-                        word.start,
-                        &stop.node,
-                        word.end,
-                    ),
+                    Some(word) => {
+                        self.SetBaseAndExtent(cx, &stop.node, word.start, &stop.node, word.end)
+                    },
                     None => self.Collapse(cx, Some(&stop.node), stop.offset),
                 }
             },
@@ -383,8 +381,7 @@ impl Selection {
         let index = editing_host.index();
         let backward = extend &&
             self.anchor_node().is_some_and(|anchor| {
-                bp_position(&parent, index, &anchor, self.anchor_offset()) ==
-                    Some(Ordering::Less)
+                bp_position(&parent, index, &anchor, self.anchor_offset()) == Some(Ordering::Less)
             });
         (parent, if backward { index + 1 } else { index })
     }
@@ -458,9 +455,7 @@ impl Selection {
         // break is not.
         let is_word_character_between = |first: usize, second: usize| {
             let (first, second) = (positions[first], positions[second]);
-            first.0 == second.0 &&
-                character_before(stop_at(second))
-                    .is_some_and(is_word_character)
+            first.0 == second.0 && character_before(stop_at(second)).is_some_and(is_word_character)
         };
 
         let mut line_goal_x = None;
@@ -475,8 +470,7 @@ impl Selection {
                 {
                     target += 1;
                 }
-                while target + 1 < positions.len() &&
-                    is_word_character_between(target, target + 1)
+                while target + 1 < positions.len() && is_word_character_between(target, target + 1)
                 {
                     target += 1;
                 }
@@ -694,8 +688,11 @@ pub(crate) fn closest_caret_stop(
     lines: &[LaidOutCaretLine],
     point: Point2D<Au, CSSPixel>,
 ) -> Option<(&LaidOutCaretLine, &LaidOutCaretStop)> {
-    let distance_to_line =
-        |line: &LaidOutCaretLine| (line.top - point.y).max(point.y - line.bottom).max(Au::zero());
+    let distance_to_line = |line: &LaidOutCaretLine| {
+        (line.top - point.y)
+            .max(point.y - line.bottom)
+            .max(Au::zero())
+    };
     let line = lines.iter().min_by_key(|line| distance_to_line(line))?;
     let stop = line
         .stops
@@ -735,11 +732,7 @@ fn word_around(text: &str, offset: u32) -> Option<std::ops::Range<u32>> {
         }
     };
     let (word_start, character) = characters[index];
-    let range_end = |index: usize| {
-        characters
-            .get(index + 1)
-            .map_or(start, |(start, _)| *start)
-    };
+    let range_end = |index: usize| characters.get(index + 1).map_or(start, |(start, _)| *start);
     if class(character) == 2 {
         return Some(word_start..range_end(index));
     }
@@ -829,7 +822,8 @@ fn paragraph_around(
     let start = match &content[first] {
         BlockContent::Text(text) => (text.clone(), 0),
         BlockContent::LineBreak(node) | BlockContent::Block(node) => (
-            node.GetParentNode().expect("Content of a block has a parent"),
+            node.GetParentNode()
+                .expect("Content of a block has a parent"),
             node.index(),
         ),
     };

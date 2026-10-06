@@ -191,8 +191,8 @@ pub fn apply_sandbox(policy: &Policy) -> SandboxOutcome {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn apply_landlock(policy: &Policy) -> (Option<LandlockStatus>, bool) {
     use landlock::{
-        ABI, AccessFs, AccessNet, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetCreatedAttr,
-        RulesetStatus,
+        ABI, AccessFs, AccessNet, CompatLevel, Compatible, Ruleset, RulesetAttr,
+        RulesetCreatedAttr, RulesetStatus,
     };
 
     // Request the highest ABI we know about; BestEffort downgrades on older
@@ -455,8 +455,13 @@ fn apply_seccomp() -> bool {
     // net is brokered to the parent (fetch is IPC over AF_UNIX), so AF_UNIX is the only family
     // content legitimately needs; here-verified on kernel 6.8 (render OK). Dword/Eq compares
     // the low 32 bits (the `int domain`) of arg0, the robust standard form.
-    match SeccompCondition::new(0, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, libc::AF_UNIX as u64)
-        .and_then(|cond| SeccompRule::new(vec![cond]))
+    match SeccompCondition::new(
+        0,
+        SeccompCmpArgLen::Dword,
+        SeccompCmpOp::Eq,
+        libc::AF_UNIX as u64,
+    )
+    .and_then(|cond| SeccompRule::new(vec![cond]))
     {
         Ok(rule) => {
             rules.insert(libc::SYS_socket, vec![rule]);
@@ -470,7 +475,10 @@ fn apply_seccomp() -> bool {
     let target_arch: TargetArch = match std::env::consts::ARCH.try_into() {
         Ok(a) => a,
         Err(e) => {
-            log::warn!("seccomp: unsupported target arch {}: {e}", std::env::consts::ARCH);
+            log::warn!(
+                "seccomp: unsupported target arch {}: {e}",
+                std::env::consts::ARCH
+            );
             return false;
         },
     };
@@ -483,16 +491,37 @@ fn apply_seccomp() -> bool {
     // ABSENT from `allow`, so they hit this Errno(EPERM) default. Keep them out.
     debug_assert!(
         ![
-            libc::SYS_ptrace, libc::SYS_process_vm_readv, libc::SYS_process_vm_writev,
-            libc::SYS_userfaultfd, libc::SYS_bpf, libc::SYS_keyctl, libc::SYS_add_key,
-            libc::SYS_request_key, libc::SYS_perf_event_open, libc::SYS_kexec_load,
-            libc::SYS_kexec_file_load, libc::SYS_mount, libc::SYS_umount2,
-            libc::SYS_pivot_root, libc::SYS_chroot, libc::SYS_setns, libc::SYS_unshare,
-            libc::SYS_personality, libc::SYS_modify_ldt, libc::SYS_seccomp,
-            libc::SYS_open_by_handle_at, libc::SYS_name_to_handle_at, libc::SYS_iopl,
-            libc::SYS_ioperm, libc::SYS_init_module, libc::SYS_finit_module,
-            libc::SYS_delete_module, libc::SYS_open, libc::SYS_io_uring_setup,
-            libc::SYS_io_uring_enter, libc::SYS_io_uring_register,
+            libc::SYS_ptrace,
+            libc::SYS_process_vm_readv,
+            libc::SYS_process_vm_writev,
+            libc::SYS_userfaultfd,
+            libc::SYS_bpf,
+            libc::SYS_keyctl,
+            libc::SYS_add_key,
+            libc::SYS_request_key,
+            libc::SYS_perf_event_open,
+            libc::SYS_kexec_load,
+            libc::SYS_kexec_file_load,
+            libc::SYS_mount,
+            libc::SYS_umount2,
+            libc::SYS_pivot_root,
+            libc::SYS_chroot,
+            libc::SYS_setns,
+            libc::SYS_unshare,
+            libc::SYS_personality,
+            libc::SYS_modify_ldt,
+            libc::SYS_seccomp,
+            libc::SYS_open_by_handle_at,
+            libc::SYS_name_to_handle_at,
+            libc::SYS_iopl,
+            libc::SYS_ioperm,
+            libc::SYS_init_module,
+            libc::SYS_finit_module,
+            libc::SYS_delete_module,
+            libc::SYS_open,
+            libc::SYS_io_uring_setup,
+            libc::SYS_io_uring_enter,
+            libc::SYS_io_uring_register,
         ]
         .iter()
         .any(|denied| allow.contains(denied)),

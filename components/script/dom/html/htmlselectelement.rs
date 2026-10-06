@@ -527,7 +527,13 @@ impl HTMLSelectElement {
         let current = self
             .list_box_anchor
             .get()
-            .or_else(|| options.iter().rev().find(|option| option.Selected()).cloned())
+            .or_else(|| {
+                options
+                    .iter()
+                    .rev()
+                    .find(|option| option.Selected())
+                    .cloned()
+            })
             .and_then(|current| options.iter().position(|option| *option == current));
         let last = options.len().saturating_sub(1);
         let target = match (event.key(), current) {
@@ -544,9 +550,7 @@ impl HTMLSelectElement {
         };
         let extend = event.modifiers().contains(Modifiers::SHIFT);
         self.select_list_box_rows(cx, target, false, extend);
-        target
-            .upcast::<Element>()
-            .ScrollIntoViewIfNeeded(cx, false);
+        target.upcast::<Element>().ScrollIntoViewIfNeeded(cx, false);
         true
     }
 
@@ -582,7 +586,8 @@ impl HTMLSelectElement {
 
         let mut selection_did_change = false;
         for (index, candidate) in options.iter().enumerate() {
-            let in_range = range.contains(&index) && !candidate.upcast::<Element>().disabled_state();
+            let in_range =
+                range.contains(&index) && !candidate.upcast::<Element>().disabled_state();
             let should_be_selected = match (multiple, toggle, extend) {
                 (true, true, false) if index == target => !candidate.Selected(),
                 (true, true, _) => candidate.Selected() || in_range,

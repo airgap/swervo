@@ -111,6 +111,7 @@ use crate::dom::bindings::trace::{CustomTraceable, HashMapTracedValues, RootedTr
 use crate::dom::bindings::weakref::{DOMTracker, WeakRef};
 use crate::dom::blob::Blob;
 use crate::dom::broadcastchannel::BroadcastChannel;
+use crate::dom::cachestorage::CacheStorage;
 use crate::dom::dedicatedworkerglobalscope::{
     DedicatedWorkerControlMsg, DedicatedWorkerGlobalScope,
 };
@@ -123,7 +124,6 @@ use crate::dom::file::File;
 use crate::dom::globalscope::script_execution::{
     ErrorReporting, evaluate_script, fill_compile_options,
 };
-use crate::dom::cachestorage::CacheStorage;
 use crate::dom::idbfactory::IDBFactory;
 use crate::dom::media::mediasource::MediaSource;
 use crate::dom::messageport::MessagePort;

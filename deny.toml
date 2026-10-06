@@ -32,7 +32,7 @@ ignore = [
     # See the comment above `bincode` entry in Cargo.toml.
     "RUSTSEC-2025-0141",
     # The crate `ttf-parser` is unmaintained.
-    # This is a dependency of `usvg`, `rustybuzz`, `fontdb`.
+    # This remains a dependency of `owned_ttf_parser` and `plotters`.
     # We will need to wait for upstream actions.
     "RUSTSEC-2026-0192",
     # Vulnerability in `quick-xml`: Quadratic run time when checking a start
@@ -195,6 +195,12 @@ skip = [
     "vello_cpu",
     "fearless_simd",
 
+    # usvg 0.48 uses base64 0.23 while HTTP consumers still require 0.22.
+    "base64",
+    # usvg's maintained font stack uses font-types 0.12, while egui and
+    # existing fontations consumers still require 0.11.
+    "font-types",
+
     # Duplicated by resvg/image
     "pastey",
     "roxmltree",
@@ -220,10 +226,4 @@ skip = [
 allow-git = [
     "https://github.com/airgap/stylo",
     "https://github.com/airgap/webrender",
-]
-
-# github.com organizations to allow git sources for
-[sources.allow-org]
-github = [
-    "servo",
 ]

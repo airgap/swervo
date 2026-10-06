@@ -517,12 +517,9 @@ impl WebView {
     /// changed. Script caches what [`WebViewDelegate::screen_geometry`] reports and only asks
     /// again after this call (or after a viewport resize).
     pub fn notify_screen_geometry_changed(&self) {
-        self.inner()
-            .servo
-            .constellation_proxy()
-            .send(EmbedderToConstellationMessage::ScreenGeometryChanged(
-                self.id(),
-            ))
+        self.inner().servo.constellation_proxy().send(
+            EmbedderToConstellationMessage::ScreenGeometryChanged(self.id()),
+        )
     }
 
     /// Load the given URL into this [`WebView`] using the default request headers.

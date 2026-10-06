@@ -23,7 +23,7 @@ use unicode_bidi::{BidiInfo, Level};
 
 use super::inline_box::{InlineBoxContainerState, InlineBoxIdentifier, InlineBoxTreePathToken};
 use super::{
-    TextOrigins, InlineFormattingContextLayout, LineBlockSizes, SharedInlineStyles, line_height,
+    InlineFormattingContextLayout, LineBlockSizes, SharedInlineStyles, TextOrigins, line_height,
 };
 use crate::cell::ArcRefCell;
 use crate::flow::inline::text_run::FontAndScriptInfo;
@@ -280,12 +280,15 @@ impl LineItemLayout<'_, '_> {
         // White space trimmed at the end of the line leaves text runs without glyphs, which
         // produce no fragments.
         if let Some(LineItem::TextRun(_, text_run)) =
-            line_items.iter_mut().rev().find(|line_item| match line_item {
-                LineItem::TextRun(_, text_run) => {
-                    !text_run.text.is_empty() || text_run.is_empty_for_text_cursor
-                },
-                _ => line_item.is_in_flow_content(),
-            }) &&
+            line_items
+                .iter_mut()
+                .rev()
+                .find(|line_item| match line_item {
+                    LineItem::TextRun(_, text_run) => {
+                        !text_run.text.is_empty() || text_run.is_empty_for_text_cursor
+                    },
+                    _ => line_item.is_in_flow_content(),
+                }) &&
             let Some(offsets) = text_run.offsets.as_mut()
         {
             offsets.ends_line = true;

@@ -12,8 +12,8 @@ use style::context::SharedStyleContext;
 use style::logical_geometry::Direction;
 use style::properties::ComputedValues;
 use style::selector_parser::PseudoElement;
-use style::values::specified::Overflow;
 use style::values::generics::length::GenericLengthPercentageOrAuto;
+use style::values::specified::Overflow;
 use style::values::specified::align::AlignFlags;
 
 use crate::context::LayoutContext;
@@ -195,33 +195,35 @@ impl IndependentFormattingContext {
                 // svg raster paints below, the widget IFC's fragments lay out, paint, and
                 // hit-test on top. Only foreignObjects get boxes (`traverse_svg_foreign_objects`).
                 let node = node_and_style_info.node;
-                let is_native_foreign_object_host = matches!(
-                    contents.kind,
-                    crate::replaced::ReplacedContentKind::SVGElement { .. }
-                ) && servo_config::pref!(dom_svg_foreignobject_native);
+                let is_native_foreign_object_host =
+                    matches!(
+                        contents.kind,
+                        crate::replaced::ReplacedContentKind::SVGElement { .. }
+                    ) && servo_config::pref!(dom_svg_foreignobject_native);
                 let widget = (node.pseudo_element_chain().is_empty() &&
                     (node.is_root_of_user_agent_widget() || is_native_foreign_object_host))
-                .then(|| {
-                    let widget_info = node_and_style_info
-                        .with_pseudo_element(context, PseudoElement::ServoAnonymousBox)
-                        .expect("Should always be able to construct info for anonymous boxes.");
-                    // Use a block formatting context for the widget, since the display inside is always flow.
-                    let widget_contents = IndependentFormattingContextContents::Flow(
-                        BlockFormattingContext::construct(
-                            context,
-                            &widget_info,
-                            NonReplacedContents::OfElement,
+                    .then(|| {
+                        let widget_info = node_and_style_info
+                            .with_pseudo_element(context, PseudoElement::ServoAnonymousBox)
+                            .expect("Should always be able to construct info for anonymous boxes.");
+                        // Use a block formatting context for the widget, since the display inside is always flow.
+                        let widget_contents = IndependentFormattingContextContents::Flow(
+                            BlockFormattingContext::construct(
+                                context,
+                                &widget_info,
+                                NonReplacedContents::OfElement,
+                                propagated_data,
+                                false, /* is_list_item */
+                            ),
+                        );
+                        let widget_base =
+                            LayoutBoxBase::new((&widget_info).into(), widget_info.style);
+                        ArcRefCell::new(IndependentFormattingContext::new(
+                            widget_base,
+                            widget_contents,
                             propagated_data,
-                            false, /* is_list_item */
-                        ),
-                    );
-                    let widget_base = LayoutBoxBase::new((&widget_info).into(), widget_info.style);
-                    ArcRefCell::new(IndependentFormattingContext::new(
-                        widget_base,
-                        widget_contents,
-                        propagated_data,
-                    ))
-                });
+                        ))
+                    });
 
                 return IndependentFormattingContextContents::Replaced(contents, widget);
             },
@@ -312,9 +314,9 @@ impl IndependentFormattingContext {
                 depends_on_block_constraints: false,
             };
         }
-        let result = self
-            .base
-            .inline_content_sizes(layout_context, constraint_space, &self.contents);
+        let result =
+            self.base
+                .inline_content_sizes(layout_context, constraint_space, &self.contents);
         // Replaced boxes transfer their aspect ratio in their own content sizes.
         if self.is_replaced() {
             return result;
@@ -543,7 +545,11 @@ impl IndependentFormattingContext {
                     })
                     .flatten();
                 let mut result = multicol_result.unwrap_or_else(|| {
-                    bfc.layout(layout_context, positioning_context, containing_block_for_children)
+                    bfc.layout(
+                        layout_context,
+                        positioning_context,
+                        containing_block_for_children,
+                    )
                 });
                 // A `<textarea>`'s `rows` attribute gives its intrinsic block size whatever its
                 // text, which scrolls instead (Chrome's `TextAreaIntrinsicBlockSize`). The UA sheet

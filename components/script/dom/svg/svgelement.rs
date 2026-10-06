@@ -3,8 +3,16 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use dom_struct::dom_struct;
+use html5ever::{LocalName, Prefix, local_name, ns};
+use js::context::JSContext;
+use js::rust::HandleObject;
 use layout_api::SVG_PAINT_PROPERTIES;
+use script_bindings::cell::DomRefCell;
+use script_bindings::codegen::GenericBindings::ElementBinding::ScrollLogicalPosition;
+use script_bindings::codegen::GenericBindings::WindowBinding::ScrollBehavior;
+use script_bindings::str::DOMString;
 use servo_arc::Arc as ServoArc;
+use servo_url::ServoUrl;
 use style::attr::AttrValue;
 use style::properties::{
     Importance, LonghandId, PropertyDeclarationBlock, PropertyId, SourcePropertyDeclaration,
@@ -12,14 +20,6 @@ use style::properties::{
 };
 use style::stylesheets::{CssRuleType, Origin, UrlExtraData};
 use style_traits::ParsingMode;
-use html5ever::{LocalName, Prefix, local_name, ns};
-use js::context::JSContext;
-use js::rust::HandleObject;
-use script_bindings::codegen::GenericBindings::ElementBinding::ScrollLogicalPosition;
-use script_bindings::codegen::GenericBindings::WindowBinding::ScrollBehavior;
-use script_bindings::cell::DomRefCell;
-use script_bindings::str::DOMString;
-use servo_url::ServoUrl;
 use stylo_dom::ElementState;
 
 use crate::dom::bindings::codegen::Bindings::HTMLOrSVGElementBinding::FocusOptions;
@@ -141,7 +141,12 @@ impl<'dom> crate::dom::bindings::root::LayoutDom<'dom, SVGElement> {
     /// Layout-side read of the synthesized foreignObject mask document (LYK-136 phase 2).
     #[expect(unsafe_code)]
     pub(crate) fn native_mask_document(self) -> Option<ServoUrl> {
-        unsafe { self.unsafe_get().native_mask_document.borrow_for_layout().clone() }
+        unsafe {
+            self.unsafe_get()
+                .native_mask_document
+                .borrow_for_layout()
+                .clone()
+        }
     }
 }
 
@@ -158,7 +163,8 @@ impl VirtualMethods for SVGElement {
     }
 
     fn attribute_affects_presentational_hints(&self, attr: AttrRef<'_>) -> bool {
-        if attr.namespace() == &ns!() && presentation_attribute_property(attr.local_name()).is_some()
+        if attr.namespace() == &ns!() &&
+            presentation_attribute_property(attr.local_name()).is_some()
         {
             return true;
         }

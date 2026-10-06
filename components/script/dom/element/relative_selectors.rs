@@ -59,9 +59,8 @@ fn note_invalidated_anchor(anchor: ServoDangerousStyleElement<'_>, result: &Inva
         return;
     }
     let anchor: *const Element = unsafe { anchor.element.as_ref() };
-    INVALIDATED_ANCHORS.with_borrow_mut(|anchors| {
-        anchors.push((anchor, result.has_invalidated_siblings()))
-    });
+    INVALIDATED_ANCHORS
+        .with_borrow_mut(|anchors| anchors.push((anchor, result.has_invalidated_siblings())));
 }
 
 /// Servo's element snapshots stay in the document's pending restyles until the next reflow, so
@@ -165,11 +164,12 @@ impl Element {
     /// The search directions an element inserted here (or removed from here) takes part in.
     fn inherited_relative_selector_search_direction(&self) -> ElementSelectorFlags {
         let node = self.upcast::<Node>();
-        let mut inherited = node.GetParentElement().map_or(ElementSelectorFlags::empty(), |p| {
-            p.get_selector_flags().intersection(
-                ElementSelectorFlags::RELATIVE_SELECTOR_SEARCH_DIRECTION_ANCESTOR,
-            )
-        });
+        let mut inherited = node
+            .GetParentElement()
+            .map_or(ElementSelectorFlags::empty(), |p| {
+                p.get_selector_flags()
+                    .intersection(ElementSelectorFlags::RELATIVE_SELECTOR_SEARCH_DIRECTION_ANCESTOR)
+            });
         if let Some(prev_sibling) = node
             .preceding_siblings()
             .find_map(DomRoot::downcast::<Element>)
@@ -189,27 +189,31 @@ impl Element {
             return;
         }
         self.invalidate_relative_selectors(|stylist, element| {
-            invalidator(stylist.quirks_mode(), element, SiblingTraversalMap::default())
-                .invalidate_relative_selectors_for_this(
-                    stylist,
-                    |element, scope, data, quirks_mode, collector| {
-                        data.relative_selector_invalidation_map()
-                            .state_affecting_selectors
-                            .lookup_with_additional(
-                                *element,
-                                quirks_mode,
-                                None,
-                                &[],
-                                changed,
-                                |dependency| {
-                                    if dependency.state.intersects(changed) {
-                                        collector.add_dependency(&dependency.dep, *element, scope);
-                                    }
-                                    true
-                                },
-                            );
-                    },
-                );
+            invalidator(
+                stylist.quirks_mode(),
+                element,
+                SiblingTraversalMap::default(),
+            )
+            .invalidate_relative_selectors_for_this(
+                stylist,
+                |element, scope, data, quirks_mode, collector| {
+                    data.relative_selector_invalidation_map()
+                        .state_affecting_selectors
+                        .lookup_with_additional(
+                            *element,
+                            quirks_mode,
+                            None,
+                            &[],
+                            changed,
+                            |dependency| {
+                                if dependency.state.intersects(changed) {
+                                    collector.add_dependency(&dependency.dep, *element, scope);
+                                }
+                                true
+                            },
+                        );
+                },
+            );
         });
     }
 
@@ -253,33 +257,47 @@ impl Element {
                 }
             }
             let new_id = element.id().cloned();
-            invalidator(stylist.quirks_mode(), element, SiblingTraversalMap::default())
-                .invalidate_relative_selectors_for_this(
-                    stylist,
-                    |element, scope, data, quirks_mode, collector| {
-                        let map = data.relative_selector_invalidation_map();
-                        if is_id {
-                            for id in old_id.iter().chain(new_id.iter()) {
-                                for dependency in map.id_to_selector.get(id, quirks_mode).into_iter().flatten() {
-                                    collector.add_dependency(dependency, *element, scope);
-                                }
-                            }
-                        }
-                        for class in &changed_classes {
-                            for dependency in map.class_to_selector.get(class, quirks_mode).into_iter().flatten() {
+            invalidator(
+                stylist.quirks_mode(),
+                element,
+                SiblingTraversalMap::default(),
+            )
+            .invalidate_relative_selectors_for_this(
+                stylist,
+                |element, scope, data, quirks_mode, collector| {
+                    let map = data.relative_selector_invalidation_map();
+                    if is_id {
+                        for id in old_id.iter().chain(new_id.iter()) {
+                            for dependency in map
+                                .id_to_selector
+                                .get(id, quirks_mode)
+                                .into_iter()
+                                .flatten()
+                            {
                                 collector.add_dependency(dependency, *element, scope);
                             }
                         }
+                    }
+                    for class in &changed_classes {
                         for dependency in map
-                            .other_attribute_affecting_selectors
-                            .get(style::LocalName::cast(name))
+                            .class_to_selector
+                            .get(class, quirks_mode)
                             .into_iter()
                             .flatten()
                         {
                             collector.add_dependency(dependency, *element, scope);
                         }
-                    },
-                );
+                    }
+                    for dependency in map
+                        .other_attribute_affecting_selectors
+                        .get(style::LocalName::cast(name))
+                        .into_iter()
+                        .flatten()
+                    {
+                        collector.add_dependency(dependency, *element, scope);
+                    }
+                },
+            );
         });
     }
 
@@ -298,9 +316,9 @@ impl Element {
             // `.a:has(+ .b)` or `:has(.a + .b)`.
             if let (Some(prev_sibling), Some(next_sibling)) =
                 (element.prev_sibling_element(), next_sibling) &&
-                prev_sibling.relative_selector_search_direction().intersects(
-                    ElementSelectorFlags::RELATIVE_SELECTOR_SEARCH_DIRECTION_SIBLING,
-                )
+                prev_sibling
+                    .relative_selector_search_direction()
+                    .intersects(ElementSelectorFlags::RELATIVE_SELECTOR_SEARCH_DIRECTION_SIBLING)
             {
                 element.apply_selector_flags(
                     ElementSelectorFlags::RELATIVE_SELECTOR_SEARCH_DIRECTION_SIBLING,
@@ -311,8 +329,12 @@ impl Element {
                 Some(_) => DomMutationOperation::Insert,
                 None => DomMutationOperation::Append,
             };
-            invalidator(stylist.quirks_mode(), element, SiblingTraversalMap::default())
-                .invalidate_relative_selectors_for_dom_mutation(true, stylist, inherited, operation);
+            invalidator(
+                stylist.quirks_mode(),
+                element,
+                SiblingTraversalMap::default(),
+            )
+            .invalidate_relative_selectors_for_dom_mutation(true, stylist, inherited, operation);
         });
     }
 
@@ -326,18 +348,23 @@ impl Element {
             return;
         }
         self.invalidate_relative_selectors(|stylist, element| {
-            if let (Some(prev_sibling), Some(next_sibling)) =
-                (element.prev_sibling_element(), element.next_sibling_element())
-            {
+            if let (Some(prev_sibling), Some(next_sibling)) = (
+                element.prev_sibling_element(),
+                element.next_sibling_element(),
+            ) {
                 invalidate_for_sibling_side_effects(stylist, prev_sibling, next_sibling);
             }
-            invalidator(stylist.quirks_mode(), element, SiblingTraversalMap::default())
-                .invalidate_relative_selectors_for_dom_mutation(
-                    true,
-                    stylist,
-                    inherited,
-                    DomMutationOperation::Remove,
-                );
+            invalidator(
+                stylist.quirks_mode(),
+                element,
+                SiblingTraversalMap::default(),
+            )
+            .invalidate_relative_selectors_for_dom_mutation(
+                true,
+                stylist,
+                inherited,
+                DomMutationOperation::Remove,
+            );
         });
     }
 
@@ -370,7 +397,8 @@ impl Element {
                 .flat_map(|child| child.inclusively_following_siblings())
                 .filter_map(DomRoot::downcast::<Element>)
             {
-                sibling.invalidate_relative_selectors_for_tree_structure(TSStateForInvalidation::NTH);
+                sibling
+                    .invalidate_relative_selectors_for_tree_structure(TSStateForInvalidation::NTH);
             }
         }
         if flags.intersects(ElementSelectorFlags::HAS_EDGE_CHILD_SELECTOR) &&
@@ -386,27 +414,31 @@ impl Element {
 
     fn invalidate_relative_selectors_for_tree_structure(&self, state: TSStateForInvalidation) {
         self.invalidate_relative_selectors(|stylist, element| {
-            invalidator(stylist.quirks_mode(), element, SiblingTraversalMap::default())
-                .invalidate_relative_selectors_for_this(
-                    stylist,
-                    |element, scope, data, quirks_mode, collector| {
-                        data.relative_invalidation_map_attributes()
-                            .ts_state_to_selector
-                            .lookup_with_additional(
-                                *element,
-                                quirks_mode,
-                                None,
-                                &[],
-                                ElementState::empty(),
-                                |dependency| {
-                                    if dependency.state.intersects(state) {
-                                        collector.add_dependency(&dependency.dep, *element, scope);
-                                    }
-                                    true
-                                },
-                            );
-                    },
-                );
+            invalidator(
+                stylist.quirks_mode(),
+                element,
+                SiblingTraversalMap::default(),
+            )
+            .invalidate_relative_selectors_for_this(
+                stylist,
+                |element, scope, data, quirks_mode, collector| {
+                    data.relative_invalidation_map_attributes()
+                        .ts_state_to_selector
+                        .lookup_with_additional(
+                            *element,
+                            quirks_mode,
+                            None,
+                            &[],
+                            ElementState::empty(),
+                            |dependency| {
+                                if dependency.state.intersects(state) {
+                                    collector.add_dependency(&dependency.dep, *element, scope);
+                                }
+                                true
+                            },
+                        );
+                },
+            );
         });
     }
 }

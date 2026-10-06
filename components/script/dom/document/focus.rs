@@ -20,16 +20,16 @@ use servo_constellation_traits::{
     RemoteFocusOperation, ScriptToConstellationMessage, SequentialFocusDirection,
 };
 
+use crate::dom::bindings::codegen::Bindings::HTMLInputElementBinding::HTMLInputElementMethods;
+use crate::dom::bindings::codegen::Bindings::HTMLTextAreaElementBinding::HTMLTextAreaElementMethods;
 use crate::dom::bindings::root::MutNullableDom;
+use crate::dom::bindings::str::DOMString;
 use crate::dom::focusevent::FocusEventType;
 use crate::dom::node::focus::FocusNavigationScopeOwner;
 use crate::dom::types::{
     Element, EventTarget, FocusEvent, HTMLElement, HTMLIFrameElement, HTMLInputElement,
     HTMLTextAreaElement, KeyboardEvent, Window,
 };
-use crate::dom::bindings::codegen::Bindings::HTMLInputElementBinding::HTMLInputElementMethods;
-use crate::dom::bindings::codegen::Bindings::HTMLTextAreaElementBinding::HTMLTextAreaElementMethods;
-use crate::dom::bindings::str::DOMString;
 use crate::dom::{Document, Event, EventBubbles, EventCancelable, Node, NodeTraits};
 use crate::realms::enter_auto_realm;
 

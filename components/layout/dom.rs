@@ -287,13 +287,15 @@ impl GenericLayoutDataTrait for DOMLayoutData {
     }
 
     fn content_box_size(&self) -> Option<euclid::default::Size2D<app_units::Au>> {
-        self.0
-            .borrow()
-            .fragments()
-            .iter()
-            .find_map(|fragment| {
-                Some(fragment.retrieve_box_fragment()?.content_rect().size.to_untyped())
-            })
+        self.0.borrow().fragments().iter().find_map(|fragment| {
+            Some(
+                fragment
+                    .retrieve_box_fragment()?
+                    .content_rect()
+                    .size
+                    .to_untyped(),
+            )
+        })
     }
 }
 

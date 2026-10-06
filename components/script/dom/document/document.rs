@@ -167,8 +167,8 @@ use crate::dom::history::History;
 use crate::dom::html::htmlallcollection::HTMLAllCollection;
 use crate::dom::html::htmlanchorelement::HTMLAnchorElement;
 use crate::dom::html::htmlareaelement::HTMLAreaElement;
-use crate::dom::html::htmlbrelement::HTMLBRElement;
 use crate::dom::html::htmlbaseelement::HTMLBaseElement;
+use crate::dom::html::htmlbrelement::HTMLBRElement;
 use crate::dom::html::htmlcollection::{CollectionFilter, HTMLCollection};
 use crate::dom::html::htmlelement::HTMLElement;
 use crate::dom::html::htmlembedelement::HTMLEmbedElement;
@@ -177,8 +177,8 @@ use crate::dom::html::htmlheadelement::HTMLHeadElement;
 use crate::dom::html::htmlhtmlelement::HTMLHtmlElement;
 use crate::dom::html::htmliframeelement::HTMLIFrameElement;
 use crate::dom::html::htmlimageelement::HTMLImageElement;
-use crate::dom::html::htmlmediaelement::HTMLMediaElement;
 use crate::dom::html::htmlinputelement::HTMLInputElement;
+use crate::dom::html::htmlmediaelement::HTMLMediaElement;
 use crate::dom::html::htmlscriptelement::{HTMLScriptElement, ScriptResult};
 use crate::dom::html::htmltextareaelement::HTMLTextAreaElement;
 use crate::dom::html::htmltitleelement::HTMLTitleElement;
@@ -1329,14 +1329,11 @@ impl Document {
         if self.svg_serialization_in_progress.get() {
             return;
         }
-        let listeners: Vec<DomRoot<SVGSVGElement>> = match self
-            .svg_id_reference_listeners
-            .borrow()
-            .get(id)
-        {
-            Some(listeners) => listeners.iter().map(|svg| svg.as_rooted()).collect(),
-            None => return,
-        };
+        let listeners: Vec<DomRoot<SVGSVGElement>> =
+            match self.svg_id_reference_listeners.borrow().get(id) {
+                Some(listeners) => listeners.iter().map(|svg| svg.as_rooted()).collect(),
+                None => return,
+            };
         for svg in listeners {
             svg.invalidate_cached_serialized_subtree_and_rasterization_result();
         }
@@ -1365,9 +1362,9 @@ impl Document {
                 ExternalSvgDocument::Failed => None,
             },
             Vacant(entry) => {
-                entry.insert(ExternalSvgDocument::Pending(HashSet::from([Dom::from_ref(
-                    requester,
-                )])));
+                entry.insert(ExternalSvgDocument::Pending(HashSet::from([
+                    Dom::from_ref(requester),
+                ])));
                 drop(documents);
                 fetch_external_svg_document(self, url);
                 None
@@ -3733,9 +3730,9 @@ impl Document {
         debug_assert!(*element.owner_document() == *self);
         // Step 2. If doc's lazy load intersection observer is null, set it to a new
         // IntersectionObserver instance, initialized as follows: ...
-        let observer = self.lazy_load_intersection_observer.or_init(|| {
-            IntersectionObserver::new_lazy_load_observer(cx, &self.window)
-        });
+        let observer = self
+            .lazy_load_intersection_observer
+            .or_init(|| IntersectionObserver::new_lazy_load_observer(cx, &self.window));
         // Step 3. Call doc's lazy load intersection observer's observe method with element as
         // the argument.
         observer.observe_target_element(element);
@@ -4572,36 +4569,42 @@ impl Document {
             "domComplete" => self.navigation_timing().dom_complete.get(),
             "loadEventStart" => self.navigation_timing().load_event_start.get(),
             "loadEventEnd" => self.navigation_timing().load_event_end.get(),
-            "redirectStart" | "redirectEnd" | "fetchStart" | "domainLookupStart" |
-            "domainLookupEnd" | "connectStart" | "connectEnd" | "secureConnectionStart" |
-            "requestStart" | "responseStart" | "responseEnd" | "domLoading" => self
-                .resource_fetch_timing()
-                .as_ref()
-                .and_then(|timing| {
-                    // <https://w3c.github.io/navigation-timing/#dom-performancetiming-domainlookupstart>
-                    // and its siblings: with no DNS lookup or new connection (a reused
-                    // connection, a cached response) these equal fetchStart.
-                    let fetch_start = timing.fetch_start;
-                    let connect_start = timing.connect_start.or(fetch_start);
-                    match name {
-                        "redirectStart" => timing.redirect_start,
-                        "redirectEnd" => timing.redirect_end,
-                        "fetchStart" => fetch_start,
-                        "domainLookupStart" => timing.domain_lookup_start.or(fetch_start),
-                        // The network layer doesn't record the end of the lookup; the
-                        // connection starts right after it.
-                        "domainLookupEnd" => connect_start,
-                        "connectStart" => connect_start,
-                        "connectEnd" => timing.connect_end.or(connect_start),
-                        "secureConnectionStart" => timing.secure_connection_start,
-                        "requestStart" => timing.request_start,
-                        "responseStart" => timing.response_start,
-                        "responseEnd" => timing.response_end,
-                        // The document is created, and starts loading, as its response arrives.
-                        "domLoading" => timing.response_start,
-                        _ => unreachable!(),
-                    }
-                }),
+            "redirectStart" |
+            "redirectEnd" |
+            "fetchStart" |
+            "domainLookupStart" |
+            "domainLookupEnd" |
+            "connectStart" |
+            "connectEnd" |
+            "secureConnectionStart" |
+            "requestStart" |
+            "responseStart" |
+            "responseEnd" |
+            "domLoading" => self.resource_fetch_timing().as_ref().and_then(|timing| {
+                // <https://w3c.github.io/navigation-timing/#dom-performancetiming-domainlookupstart>
+                // and its siblings: with no DNS lookup or new connection (a reused
+                // connection, a cached response) these equal fetchStart.
+                let fetch_start = timing.fetch_start;
+                let connect_start = timing.connect_start.or(fetch_start);
+                match name {
+                    "redirectStart" => timing.redirect_start,
+                    "redirectEnd" => timing.redirect_end,
+                    "fetchStart" => fetch_start,
+                    "domainLookupStart" => timing.domain_lookup_start.or(fetch_start),
+                    // The network layer doesn't record the end of the lookup; the
+                    // connection starts right after it.
+                    "domainLookupEnd" => connect_start,
+                    "connectStart" => connect_start,
+                    "connectEnd" => timing.connect_end.or(connect_start),
+                    "secureConnectionStart" => timing.secure_connection_start,
+                    "requestStart" => timing.request_start,
+                    "responseStart" => timing.response_start,
+                    "responseEnd" => timing.response_end,
+                    // The document is created, and starts loading, as its response arrives.
+                    "domLoading" => timing.response_start,
+                    _ => unreachable!(),
+                }
+            }),
             _ => {
                 return Err(Error::Operation(Some(format!(
                     "{name} hasn't been implemented."
@@ -5387,7 +5390,10 @@ impl Document {
         // a caret position with its properties set as follows: the offset node is the text
         // input box and the offset is the offset into its text.
         if element.is::<HTMLInputElement>() || element.is::<HTMLTextAreaElement>() {
-            let offset = self.window.text_index_query_on_node(node, point).unwrap_or(0);
+            let offset = self
+                .window
+                .text_index_query_on_node(node, point)
+                .unwrap_or(0);
             return Some((DomRoot::from_ref(node), offset as u32, None));
         }
 

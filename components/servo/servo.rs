@@ -45,6 +45,10 @@ use servo_config::prefs::{PrefValue, Preferences};
 use servo_config::{opts, pref, prefs};
 #[cfg(target_os = "macos")]
 use servo_constellation::content_process_sandbox_profile;
+use servo_constellation::{
+    Constellation, ConstellationToEmbedderMsg, FromEmbedderLogger, FromScriptLogger,
+    InitialConstellationState, NewScriptEventLoopProcessInfo, UnprivilegedContent,
+};
 #[cfg(all(
     not(target_os = "macos"),
     not(target_os = "windows"),
@@ -57,10 +61,6 @@ use servo_constellation::content_process_sandbox_profile;
     not(target_env = "ohos"),
 ))]
 use servo_constellation::{apply_sandbox, content_process_policy};
-use servo_constellation::{
-    Constellation, ConstellationToEmbedderMsg, FromEmbedderLogger, FromScriptLogger,
-    InitialConstellationState, NewScriptEventLoopProcessInfo, UnprivilegedContent,
-};
 use servo_constellation_traits::{EmbedderToConstellationMessage, ScriptToConstellationSender};
 use servo_geometry::{
     DeviceIndependentIntRect, convert_rect_to_css_pixel, convert_size_to_css_pixel,
@@ -562,7 +562,9 @@ impl ServoInner {
             },
             EmbedderMsg::DownloadStarted(webview_id, url, path) => {
                 if let Some(webview) = self.get_webview_handle(webview_id) {
-                    webview.delegate().notify_download_started(webview, url, path);
+                    webview
+                        .delegate()
+                        .notify_download_started(webview, url, path);
                 }
             },
             EmbedderMsg::DownloadCompleted(webview_id, path, success) => {

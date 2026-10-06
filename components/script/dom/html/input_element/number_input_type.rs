@@ -36,10 +36,7 @@ impl NumberInputType {
             return spin_button.as_rooted();
         }
 
-        let inner_container = self
-            .text_input_widget
-            .borrow()
-            .inner_container(cx, input);
+        let inner_container = self.text_input_widget.borrow().inner_container(cx, input);
         let spin_button = Element::create(
             cx,
             QualName::new(None, ns!(html), local_name!("div")),
@@ -69,7 +66,10 @@ impl NumberInputType {
         mouse_event: &MouseEvent,
     ) -> Option<StepDirection> {
         let rect = self.spin_button(cx, input).GetBoundingClientRect(cx);
-        let (x, y) = (f64::from(mouse_event.ClientX()), f64::from(mouse_event.ClientY()));
+        let (x, y) = (
+            f64::from(mouse_event.ClientX()),
+            f64::from(mouse_event.ClientY()),
+        );
         if rect.Width() <= 0.0 ||
             x < rect.X() ||
             x >= rect.X() + rect.Width() ||

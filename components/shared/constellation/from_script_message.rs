@@ -32,8 +32,8 @@ use servo_base::Epoch;
 use servo_base::generic_channel::{GenericCallback, GenericReceiver, GenericSender, SendResult};
 use servo_base::id::{
     BroadcastChannelRouterId, BrowsingContextId, HistoryStateId, MessagePortId,
-    MessagePortRouterId, PipelineId, PipelineNamespaceRequest, ScriptEventLoopId,
-    ServiceWorkerId, ServiceWorkerRegistrationId, WebViewId,
+    MessagePortRouterId, PipelineId, PipelineNamespaceRequest, ScriptEventLoopId, ServiceWorkerId,
+    ServiceWorkerRegistrationId, WebViewId,
 };
 use servo_canvas_traits::canvas::{CanvasId, CanvasMsg};
 use servo_canvas_traits::webgl::WebGLChan;

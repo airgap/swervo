@@ -427,8 +427,7 @@ impl FontFace {
     /// The [[FontStatusPromise]], rejecting it first if construction failed to parse the
     /// descriptors (see `Self::new_failed_font_face`).
     fn font_status_promise(&self, cx: &mut JSContext) -> Rc<Promise> {
-        if self.status.get() == FontFaceLoadStatus::Error && self.font_status_promise.is_pending()
-        {
+        if self.status.get() == FontFaceLoadStatus::Error && self.font_status_promise.is_pending() {
             self.font_status_promise
                 .reject_error(cx, Error::Syntax(None));
         }

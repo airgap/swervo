@@ -55,9 +55,8 @@ impl SVGAElement {
 impl SVGAElementMethods<crate::DomTypeHolder> for SVGAElement {
     /// <https://svgwg.org/svg2-draft/linking.html#__svg__SVGAElement__target>
     fn Target(&self, cx: &mut JSContext) -> DomRoot<SVGAnimatedString> {
-        self.target.or_init(|| {
-            SVGAnimatedString::new(cx, self.upcast::<Element>(), local_name!("target"))
-        })
+        self.target
+            .or_init(|| SVGAnimatedString::new(cx, self.upcast::<Element>(), local_name!("target")))
     }
 
     /// <https://svgwg.org/svg2-draft/types.html#__svg__SVGURIReference__href>
