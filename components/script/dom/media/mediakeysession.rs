@@ -23,7 +23,6 @@ use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_dom_object;
 use stylo_atoms::Atom;
 
-use crate::dom::bindings::codegen::Bindings::EventBinding::EventMethods;
 use crate::dom::bindings::codegen::Bindings::MediaKeySessionBinding::MediaKeySessionMethods;
 use crate::dom::bindings::codegen::Bindings::MediaKeySystemAccessBinding::MediaKeyMessageType;
 use crate::dom::bindings::codegen::UnionTypes::ArrayBufferViewOrArrayBuffer;

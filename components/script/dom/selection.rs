@@ -538,7 +538,7 @@ impl Selection {
                     .filter(|(_, position)| position.0 == current_line)
                     .map(|(index, _)| index);
                 if forward {
-                    on_line.last()
+                    on_line.next_back()
                 } else {
                     on_line.next()
                 }

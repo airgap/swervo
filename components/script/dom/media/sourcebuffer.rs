@@ -166,8 +166,8 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
         if !self.media_source.is_open() || self.updating.get() {
             return Err(Error::InvalidState(None));
         }
-        // The range must be valid: 0 <= start < end.
-        if !(start >= 0.0) || !(start < end) {
+        // The range must be ordered and valid: 0 <= start < end. Reject NaN explicitly.
+        if start.is_nan() || end.is_nan() || start < 0.0 || start >= end {
             return Err(Error::Type(
                 CString::new("Invalid remove range").unwrap(),
             ));

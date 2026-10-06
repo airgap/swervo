@@ -2651,8 +2651,7 @@ impl Window {
         let root_element = self.Document().GetDocumentElement();
         self.perform_a_scroll(
             cx,
-            x,
-            y,
+            Vector2D::new(x, y),
             scroll_id,
             behavior,
             root_element.as_deref(),
@@ -2677,13 +2676,13 @@ impl Window {
     pub(crate) fn perform_a_scroll(
         &self,
         cx: &mut JSContext,
-        x: f32,
-        y: f32,
+        position: LayoutVector2D,
         scroll_id: ExternalScrollId,
         behavior: ScrollBehavior,
         element: Option<&Element>,
         origin: Option<LayoutVector2D>,
     ) {
+        let (x, y) = (position.x, position.y);
         // Step 1: Abort any ongoing smooth scroll for box.
         self.abort_smooth_scroll(scroll_id);
 
@@ -3361,7 +3360,14 @@ impl Window {
         // Step 6.
         // > Perform a scroll of box to position, element as the associated element and behavior as
         // > the scroll behavior.
-        self.perform_a_scroll(cx, x, y, scroll_id, behavior, Some(element), origin);
+        self.perform_a_scroll(
+            cx,
+            Vector2D::new(x, y),
+            scroll_id,
+            behavior,
+            Some(element),
+            origin,
+        );
     }
 
     pub(crate) fn resolved_style_query(
@@ -3476,7 +3482,17 @@ impl Window {
 
     /// The caret positions in the text of `node`, by line. Positions after a line break are
     /// left out: they are the start of the next line.
+    #[expect(unsafe_code, reason = "Rooting live DOM node addresses from synchronous layout")]
     pub(crate) fn caret_stops_query(&self, node: &Node) -> Vec<LaidOutCaretLine> {
+        // Inactive documents skip reflow; discarded iframe documents can retain their
+        // activity flag. Only query a live context's connected tree, whose layout can
+        // be refreshed before reading raw addresses.
+        if !self.Document().is_fully_active() ||
+            self.undiscarded_window_proxy().is_none() ||
+            !node.is_connected()
+        {
+            return Vec::new();
+        }
         self.layout_reflow(QueryMsg::CaretStopsQuery);
         let lines = self
             .layout
@@ -3487,6 +3503,10 @@ impl Window {
             .filter_map(|line| {
                 let mut stops: Vec<LaidOutCaretStop> = Vec::new();
                 for stop in line.stops {
+                    // SAFETY: these addresses come from the layout query immediately after
+                    // reflow of this active document's connected tree. No script runs or GC
+                    // occurs between that query and conversion, so its nodes are still live.
+                    // The conversion roots each node; the returned stops retain those DomRoots.
                     let node = unsafe { from_untrusted_node_address(stop.node) };
                     // The text of text controls is in their user agent shadow trees, which
                     // positions in the document never enter.
@@ -3983,7 +4003,7 @@ impl Window {
     #[expect(unsafe_code)]
     fn handle_pending_images_post_reflow(
         &self,
-        cx: &mut JSContext,
+        _cx: &mut JSContext,
         pending_images: Vec<PendingImage>,
         pending_rasterization_images: Vec<PendingRasterizationImage>,
         pending_svg_element_for_serialization: Vec<UntrustedNodeAddress>,

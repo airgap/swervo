@@ -27,6 +27,9 @@ mod object_data_model;
 mod object_store_index_model;
 mod object_store_model;
 
+/// An index value and its primary key, both in their serialized storage representation.
+type SerializedIndexEntry = (Vec<u8>, Vec<u8>);
+
 fn range_to_query(range: IndexedDBKeyRange) -> Condition {
     // Special case for optimization
     if let Some(singleton) = range.as_singleton() {
@@ -419,7 +422,7 @@ impl SqliteEngine {
         unique: bool,
         range: IndexedDBKeyRange,
         count: Option<u32>,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Error> {
+    ) -> Result<Vec<SerializedIndexEntry>, Error> {
         let table = if unique { "unique_index_data" } else { "index_data" };
         let (mut conds, binds) = Self::index_value_conditions(&range);
         conds.insert(0, "index_id = ?".to_string());

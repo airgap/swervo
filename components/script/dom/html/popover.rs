@@ -25,7 +25,7 @@ use crate::dom::event::{Event, EventBubbles, EventCancelable};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::html::htmlbuttonelement::HTMLButtonElement;
 use crate::dom::html::htmlelement::HTMLElement;
-use crate::dom::html::htmlformelement::{FormControl, FormControlElementHelpers};
+use crate::dom::html::htmlformelement::FormControlElementHelpers;
 use crate::dom::html::input_element::HTMLInputElement;
 use crate::dom::input_element::input_type::InputType;
 use crate::dom::iterators::ShadowIncluding;

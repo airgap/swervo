@@ -35,7 +35,7 @@ use stylo_dom::ElementState;
 
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::root::{Dom, DomRoot, LayoutDom, ToLayout};
+use crate::dom::bindings::root::{DomRoot, LayoutDom, LayoutFromRaw};
 use crate::dom::element::Element;
 use crate::dom::node::{ChildrenMutation, Node, NodeTraits};
 use crate::layout_dom::ServoDangerousStyleElement;
@@ -130,9 +130,9 @@ impl Element {
         let window = self.owner_window();
         {
             let layout = window.layout();
-            let element = Dom::from_ref(self);
             with_layout_state(|| {
-                let element: LayoutDom<'_, Element> = unsafe { element.to_layout() };
+                // Borrow the live element for the layout-only traversal; no script runs here.
+                let element = LayoutDom::from_raw(self);
                 invalidate(layout.stylist(), ServoDangerousStyleElement::from(element))
             });
         }

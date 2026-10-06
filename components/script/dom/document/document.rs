@@ -237,6 +237,8 @@ use crate::task_source::TaskSourceName;
 use crate::timers::{OneshotTimerCallback, OneshotTimers};
 use crate::xpath::parse_expression;
 
+type CaretPositionWithRect = (DomRoot<Node>, u32, Option<Rect<Au, CSSPixel>>);
+
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum FireMouseEventType {
     Move,
@@ -1380,19 +1382,24 @@ impl Document {
         url: ServoUrl,
         document: Option<DomRoot<Document>>,
     ) {
-        let result = match document {
-            Some(document) => ExternalSvgDocument::Loaded(Dom::from_ref(&*document)),
-            None => ExternalSvgDocument::Failed,
+        let requesters = {
+            let mut documents = self.external_svg_documents.borrow_mut();
+            let Some(state) = documents.get_mut(&url) else {
+                unreachable!("external svg document finished without a pending fetch");
+            };
+            let ExternalSvgDocument::Pending(requesters) = state else {
+                unreachable!("external svg document finished without a pending fetch");
+            };
+            // Root the requesters before replacing their traced pending state. Release the
+            // map borrow before invalidation, which can reenter external document lookup.
+            let requesters: Vec<DomRoot<SVGSVGElement>> =
+                requesters.iter().map(|svg| svg.as_rooted()).collect();
+            *state = match document.as_ref() {
+                Some(document) => ExternalSvgDocument::Loaded(document.as_traced()),
+                None => ExternalSvgDocument::Failed,
+            };
+            requesters
         };
-        let previous = self
-            .external_svg_documents
-            .borrow_mut()
-            .insert(url, result);
-        let Some(ExternalSvgDocument::Pending(requesters)) = previous else {
-            unreachable!("external svg document finished without a pending fetch");
-        };
-        let requesters: Vec<DomRoot<SVGSVGElement>> =
-            requesters.iter().map(|svg| svg.as_rooted()).collect();
         for svg in requesters {
             svg.invalidate_cached_serialized_subtree_and_rasterization_result();
         }
@@ -4990,7 +4997,6 @@ impl Document {
     /// it would be the last element, we therefore would not mess with the ordering.
     ///
     /// <https://drafts.csswg.org/cssom/#documentorshadowroot-final-css-style-sheets>
-    #[cfg_attr(crown, expect(crown::unrooted_must_root))]
     pub(crate) fn append_constructed_stylesheet(
         &self,
         cx: &mut JSContext,
@@ -5366,7 +5372,7 @@ impl Document {
         &self,
         x: Finite<f64>,
         y: Finite<f64>,
-    ) -> Option<(DomRoot<Node>, u32, Option<Rect<Au, CSSPixel>>)> {
+    ) -> Option<CaretPositionWithRect> {
         // Step 1. If there is no viewport associated with the document, return null.
         // Step 2. If either argument is negative, x is greater than the viewport width
         // excluding the size of a rendered scroll bar (if any), or y is greater than the

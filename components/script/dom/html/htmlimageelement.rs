@@ -2148,7 +2148,7 @@ impl VirtualMethods for HTMLImageElement {
                     self.update_the_image_data(cx);
                 }
             },
-            &local_name!("loading") => {
+            &local_name!("loading") if self.Loading() == "eager" => {
                 // https://html.spec.whatwg.org/multipage/#attr-img-loading
                 // > When the loading attribute's state is changed to the Eager state, the user
                 // > agent must run these steps:
@@ -2156,9 +2156,7 @@ impl VirtualMethods for HTMLImageElement {
                 // > 2. If resumptionSteps is null, then return.
                 // > 3. Set the img's lazy load resumption steps to null.
                 // > 4. Invoke resumptionSteps.
-                if self.Loading() == "eager" {
-                    self.invoke_lazy_load_resumption_steps(cx);
-                }
+                self.invoke_lazy_load_resumption_steps(cx);
             },
             _ => {},
         }

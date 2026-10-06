@@ -25,7 +25,6 @@ use crate::dom::indexeddb::idbcursorwithvalue::IDBCursorWithValue;
 use crate::dom::indexeddb::idbobjectstore::IDBObjectStore;
 use crate::dom::indexeddb::idbrequest::IDBRequest;
 use crate::indexeddb::convert_value_to_key_range;
-use crate::script_runtime::CanGc;
 
 #[dom_struct]
 pub(crate) struct IDBIndex {

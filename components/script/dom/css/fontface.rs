@@ -479,7 +479,7 @@ impl FontFace {
             return;
         }
         self.remove_from_font_matching();
-        self.add_to_font_matching(&self.global().as_window());
+        self.add_to_font_matching(self.global().as_window());
     }
 
     /// Implements the body of the setter for the descriptor attributes of the [`FontFace`] interface.

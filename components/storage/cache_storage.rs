@@ -109,21 +109,19 @@ fn request_matches(
 
     // Vary: every listed request-header must have the same value now as when stored; `*` never
     // matches.
-    if !options.ignore_vary {
-        if let Some(vary) = &entry.vary {
-            for field in vary.split(',') {
-                let field = field.trim();
-                if field.is_empty() {
-                    continue;
-                }
-                if field == "*" {
-                    return false;
-                }
-                if header_value(&query.headers, field) !=
-                    header_value(&entry.request_headers, field)
-                {
-                    return false;
-                }
+    if !options.ignore_vary &&
+        let Some(vary) = &entry.vary
+    {
+        for field in vary.split(',') {
+            let field = field.trim();
+            if field.is_empty() {
+                continue;
+            }
+            if field == "*" {
+                return false;
+            }
+            if header_value(&query.headers, field) != header_value(&entry.request_headers, field) {
+                return false;
             }
         }
     }

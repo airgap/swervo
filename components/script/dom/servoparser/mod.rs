@@ -963,7 +963,7 @@ fn navgator_detect_download(metadata: Option<&Metadata>, url: &ServoUrl) -> Opti
         .filter(|f| !f.is_empty())
         .or_else(|| {
             url.path_segments()
-                .and_then(|s| s.last().map(|s| s.to_string()))
+                .and_then(|mut s| s.next_back().map(|s| s.to_string()))
                 .filter(|s| !s.is_empty())
         })
         .unwrap_or_else(|| "download".to_string());
@@ -1472,17 +1472,16 @@ impl FetchResponseListener for ParserContext {
         self.parser = Some(Trusted::new(&*parser));
         // NavGator: if this navigation is an attachment, stream it to disk as a download
         // instead of rendering it. The (blank) document still completes; chunks go to the file.
-        if error.is_none() {
-            if let Some(path) = navgator_detect_download(metadata.as_ref(), &self.url) {
-                if let Ok(file) = std::fs::File::create(&path) {
-                    window.send_to_embedder(EmbedderMsg::DownloadStarted(
-                        self.webview_id,
-                        self.url.to_string(),
-                        path.clone(),
-                    ));
-                    self.download = Some((file, path));
-                }
-            }
+        if error.is_none() &&
+            let Some(path) = navgator_detect_download(metadata.as_ref(), &self.url) &&
+            let Ok(file) = std::fs::File::create(&path)
+        {
+            window.send_to_embedder(EmbedderMsg::DownloadStarted(
+                self.webview_id,
+                self.url.to_string(),
+                path.clone(),
+            ));
+            self.download = Some((file, path));
         }
         self.navigation_params = NavigationParams {
             policy_container,

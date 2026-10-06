@@ -77,14 +77,8 @@ jobs:
       - name: Setup dav1d
         uses: ./.github/actions/setup-dav1d
       - name: Clippy
-        id: clippy
         run: |
           ./mach clippy --locked --github-annotations -- -- --deny warnings
-      # Temporary diagnosis: keep the strict check above as the failure gate while
-      # collecting warnings in dependent crates that would otherwise stay unbuilt.
-      - name: Collect remaining Clippy diagnostics
-        if: ${{ failure() && steps.clippy.outcome == 'failure' }}
-        run: ./mach clippy --locked -- -- --warn warnings
       - name: Tidy
         env:
           CI_PULL_REQUEST_BODY: ${{ github.event.pull_request.body }}

@@ -1031,10 +1031,10 @@ fn serialize_reference_closure(cx: &mut JSContext, subtree: &Node) -> String {
             } else {
                 href.to_string()
             };
-            if let Some(id) = effective_href.strip_prefix('#') {
-                if !id.is_empty() {
-                    referenced_ids.push(id.to_owned());
-                }
+            if let Some(id) = effective_href.strip_prefix('#') &&
+                !id.is_empty()
+            {
+                referenced_ids.push(id.to_owned());
             }
         }
 
@@ -1095,7 +1095,7 @@ fn rasterizer_value(style: &ComputedValues, property: LonghandId) -> String {
 }
 
 fn rasterizer_color(color: &AbsoluteColor) -> String {
-    let [red, green, blue, alpha] = *color.clone().into_srgb_legacy().raw_components();
+    let [red, green, blue, alpha] = *(*color).into_srgb_legacy().raw_components();
     let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
     format!(
         "rgba({}, {}, {}, {})",

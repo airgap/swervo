@@ -3,7 +3,6 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::cell::Cell;
-use std::ptr::NonNull;
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
@@ -12,7 +11,6 @@ use js::jsval::{JSVal, UndefinedValue};
 use js::rust::{HandleValue, MutableHandleValue};
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
-use script_bindings::script_runtime::CanGc;
 use storage_traits::indexeddb::{
     AsyncOperation, AsyncReadOnlyOperation, IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord,
 };
@@ -33,7 +31,6 @@ use crate::dom::indexeddb::idbtransaction::IDBTransaction;
 use crate::indexeddb::{convert_value_to_key, key_type_to_jsval};
 
 #[derive(JSTraceable, MallocSizeOf)]
-#[expect(unused)]
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
 pub(crate) enum ObjectStoreOrIndex {
     ObjectStore(Dom<IDBObjectStore>),

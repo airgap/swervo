@@ -25,7 +25,6 @@ use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::bindings::str::{DOMString, USVString};
 use crate::dom::bindings::codegen::UnionTypes::BlobOrMediaSource;
-use crate::dom::blob::Blob;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::url::urlhelper::UrlHelper;
 use crate::dom::url::urlsearchparams::URLSearchParams;

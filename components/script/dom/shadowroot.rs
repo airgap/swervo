@@ -244,7 +244,6 @@ impl ShadowRoot {
     }
 
     /// Append a constructed stylesheet to the back of shadow root stylesheet set.
-    #[cfg_attr(crown, expect(crown::unrooted_must_root))]
     pub(crate) fn append_constructed_stylesheet(
         &self,
         cx: &mut JSContext,

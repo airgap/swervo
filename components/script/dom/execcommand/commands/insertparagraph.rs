@@ -658,7 +658,7 @@ fn insert_paragraph_in_editing_host(
 
 fn shallow_clone_without_id(cx: &mut JSContext, document: &Document, node: &Node) -> DomRoot<Node> {
     let element = node.downcast::<Element>().expect("Must always be an element");
-    let clone = document.create_element(cx, &element.local_name());
+    let clone = document.create_element(cx, element.local_name());
     element.copy_all_attributes_to_other_element(cx, &clone);
     clone.remove_attribute_by_name(cx, &local_name!("id"));
     DomRoot::upcast(clone)
