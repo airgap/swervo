@@ -189,6 +189,23 @@ jobs:
         run: |
           ./mach build --use-crown --locked --profile ${{ inputs.profile }} ${{ inputs.build-args }}
           mv target/cargo-timings target/cargo-timings-linux
+      - name: Discarded-document caret regression
+        id: caret_regression
+        if: ${{ inputs.unit-tests }}
+        run: |
+          ./mach test-wpt --profile ${{ inputs.profile }} --processes 1 --timeout-multiplier 2 \
+            --log-raw target/selection-modify-wpt.log \
+            --log-wptreport target/selection-modify-wptreport.json \
+            /_mozilla/mozilla/selection-modify-discarded-document.html
+      - name: Archive caret regression result
+        if: ${{ always() && inputs.unit-tests && steps.caret_regression.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: caret-regression-${{ inputs.profile }}
+          path: |
+            target/selection-modify-wpt.log
+            target/selection-modify-wptreport.json
+          if-no-files-found: warn
       - name: Smoketest
         run: xvfb-run ./mach smoketest --profile ${{ inputs.profile  }}
       - name: Script tests

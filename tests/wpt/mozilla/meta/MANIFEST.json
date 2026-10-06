@@ -14921,6 +14921,13 @@
       {}
      ]
     ],
+    "selection-modify-discarded-document.html": [
+     "1f10674c1c19b88cafaa9776882e3fe1314c0938",
+     [
+      null,
+      {}
+     ]
+    ],
     "selectionchange": {
      "selectionchange-noop.html": [
       "9154a9196a6fd76f48c8a91acf45ba1e26a83442",
