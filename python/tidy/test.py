@@ -11,6 +11,7 @@ import logging
 import os
 from collections.abc import Iterable
 import unittest
+from unittest.mock import patch
 
 from . import tidy
 
@@ -225,6 +226,38 @@ class CheckTidiness(unittest.TestCase):
 
         errors = tidy.check_for_raw_urls_in_rustdoc("file.rs", 3, b"/// [hi](https://google.com)")
         self.assertNoMoreErrors(errors)
+
+    def test_run_coauthors_check_repository_scope(self):
+        attributed_log = "commit 1234\nCo-authored-by: LLM <llm@example.com>\n"
+        for repository, github_actions, expected in (
+            ("airgap/swervo", "true", 0),
+            ("Airgap/Swervo", "true", 0),
+            ("servo/servo", "true", 1),
+            ("other/swervo", "true", 1),
+            ("airgap/swervo-other", "true", 1),
+            ("", "true", 1),
+            ("airgap/swervo", "", 1),
+            ("", "", 1),
+        ):
+            environment = {
+                "GITHUB_ACTIONS": github_actions,
+                "GITHUB_REPOSITORY": repository,
+                "GITHUB_EVENT_NAME": "pull_request",
+                # A PR body cannot select the fork policy for an upstream PR.
+                "CI_PULL_REQUEST_BODY": "GITHUB_REPOSITORY=airgap/swervo\nCo-authored-by: LLM <llm@example.com>",
+            }
+            with (
+                self.subTest(repository=repository, github_actions=github_actions),
+                patch.dict(os.environ, environment, clear=True),
+                patch.dict(tidy.config, {"disallowed-coauthors": ["llm@example.com"]}),
+                patch.object(tidy.subprocess, "check_output", return_value=attributed_log) as git_log,
+                patch("builtins.print"),
+            ):
+                self.assertEqual(tidy.run_coauthors_check(), expected)
+                if expected == 0:
+                    git_log.assert_not_called()
+                else:
+                    git_log.assert_called_once()
 
     def test_check_coauthors(self):
         for _ in tidy.check_config_file(os.path.join(BASE_PATH, "servo-tidy.toml"), print_text=False):

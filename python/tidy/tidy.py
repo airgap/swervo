@@ -1128,6 +1128,16 @@ def run_coauthors_check() -> int:
     """
     print("\r ➤  Checking co-authors ...")
 
+    # This fork permits AI-assisted contributions and preserves their attribution.
+    # GitHub supplies the workflow's base repository, so PRs targeting servo/servo
+    # still use its upstream policy, even when their head comes from this fork.
+    if (
+        os.environ.get("GITHUB_ACTIONS") == "true"
+        and os.environ.get("GITHUB_REPOSITORY", "").lower() == "airgap/swervo"
+    ):
+        print("\r  | airgap/swervo uses its fork policy; upstream co-author restrictions do not apply.")
+        return 0
+
     is_pr_ci = os.environ.get("GITHUB_EVENT_NAME") == "pull_request"
     if is_pr_ci:
         # Set by `.github/workflows/lint.yml`
