@@ -838,6 +838,7 @@ impl ComputedValuesExt for ComputedValues {
     /// > of contents or none), or its principal box is an internal table box other than
     /// > table-cell, or an internal ruby box, or a non-atomic inline-level box, layout
     /// > containment has no effect.
+    ///
     /// Paint containment has the same exceptions.
     fn has_layout_or_paint_containment(&self, fragment_flags: FragmentFlags) -> bool {
         if !self

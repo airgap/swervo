@@ -222,12 +222,12 @@ pub(crate) fn compute_damage_and_rebuild_box_tree_below_dirty_root<'dom>(
     }
     // Descendants' computed paint is baked into the enclosing `<svg>`'s serialization as well,
     // but only the root's is fingerprinted: re-serialize when a descendant restyles.
-    if !element_damage.is_empty() {
-        if let Some(svg) = enclosing_serialized_svg(node) {
-            layout_context
-                .image_resolver
-                .queue_svg_element_for_serialization(svg);
-        }
+    if !element_damage.is_empty() &&
+        let Some(svg) = enclosing_serialized_svg(node)
+    {
+        layout_context
+            .image_resolver
+            .queue_svg_element_for_serialization(svg);
     }
 
     let has_dirty_descendants;
