@@ -27,9 +27,7 @@ use crate::lists::{
 };
 use crate::quotes::quotes_for_lang;
 use crate::replaced::ReplacedContents;
-use crate::style_ext::{
-    ComputedValuesExt, Display, DisplayGeneratingBox, DisplayInside, DisplayOutside,
-};
+use crate::style_ext::{Display, DisplayGeneratingBox, DisplayInside, DisplayOutside};
 
 /// A data structure used to pass and store related layout information together to
 /// avoid having to repeat the same arguments in argument lists.
@@ -149,7 +147,7 @@ fn traverse_children_of<'dom>(
 }
 
 pub(crate) fn is_foreign_object<'dom>(element: &impl LayoutElement<'dom>) -> bool {
-    element.is_svg_element() && *element.local_name() == LocalName::from("foreignObject")
+    element.is_svg_element() && element.local_name() == "foreignObject"
 }
 
 /// Traverse the `<foreignObject>` descendants of an svg element, looking through svg containers
@@ -491,12 +489,11 @@ pub(crate) fn generate_pseudo_element_content(
     match &pseudo_element_info.style.get_counters().content {
         Content::Items(items) => {
             let mut vec = vec![];
-            let mut current_quote_depth = items
-                .items
-                .iter()
-                .any(is_quote_item)
-                .then(|| quote_depth(context, pseudo_element_info.node))
-                .unwrap_or_default();
+            let mut current_quote_depth = if items.items.iter().any(is_quote_item) {
+                quote_depth(context, pseudo_element_info.node)
+            } else {
+                0
+            };
             for item in items.items.iter() {
                 match item {
                     ContentItem::String(s) => {

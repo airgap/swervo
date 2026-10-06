@@ -2358,7 +2358,6 @@ impl FlexItemBox {
             content_min_main_size,
             content_max_main_size,
             pbm_auto_is_zero,
-            preferred_aspect_ratio,
             automatic_cross_size_for_intrinsic_sizing,
             ..
         } = self.to_flex_item(

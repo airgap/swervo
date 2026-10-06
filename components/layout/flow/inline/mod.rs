@@ -1776,7 +1776,6 @@ impl InlineFormattingContextLayout<'_> {
         &mut self,
         potential_line_size: &LogicalVec2<Au>,
     ) -> bool {
-        let containing_block = self.containing_block();
         let available_line_space = if self.sequential_layout_state.is_some() {
             self.current_line
                 .placement_among_floats

@@ -607,17 +607,16 @@ impl IndependentFormattingContext {
         let lazy_block_size_kind = lazy_block_size.kind();
         let content_is_aligned =
             self.is_block_container() && block_container_content_alignment(self.style()).is_some();
-        if !content_is_aligned {
-            if let Some(cached_layout_result) = self
+        if !content_is_aligned &&
+            let Some(cached_layout_result) = self
                 .base
                 .cached_independent_formatting_context_layout_if_applicable(
                     positioning_context,
                     containing_block_for_children,
                     lazy_block_size_kind,
                 )
-            {
-                return (cached_layout_result, true);
-            }
+        {
+            return (cached_layout_result, true);
         }
 
         #[cfg(feature = "tracing")]

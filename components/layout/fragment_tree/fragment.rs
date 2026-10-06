@@ -349,17 +349,8 @@ impl Fragment {
         }
     }
 
-    pub(crate) fn find<T>(
-        &self,
-        manager: &ContainingBlockManager<PhysicalRect<Au>>,
-        level: usize,
-        process_func: &mut impl FnMut(&Fragment, usize, &PhysicalRect<Au>) -> Option<T>,
-    ) -> Option<T> {
-        self.find_descending_into(manager, level, &|_| true, process_func)
-    }
-
-    /// Like [`Self::find`], but only visits the children of fragments for which `descend`
-    /// returns true.
+    /// Search this fragment and its descendants, only visiting the children of fragments
+    /// for which `descend` returns true.
     pub(crate) fn find_descending_into<T>(
         &self,
         manager: &ContainingBlockManager<PhysicalRect<Au>>,

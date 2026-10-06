@@ -7,9 +7,7 @@ use layout_api::AxesOverflow;
 use malloc_size_of_derive::MallocSizeOf;
 use style::Zero;
 use style::color::AbsoluteColor;
-use style::computed_values::_servo_top_layer::T as ServoTopLayer;
 use style::computed_value_flags::ComputedValueFlags;
-use style::computed_values::overlay::T as Overlay;
 use style::computed_values::direction::T as Direction;
 use style::computed_values::isolation::T as ComputedIsolation;
 use style::computed_values::mix_blend_mode::T as ComputedMixBlendMode;
@@ -341,7 +339,6 @@ pub(crate) trait ComputedValuesExt {
     fn establishes_block_formatting_context(&self, fragment_flags: FragmentFlags) -> bool;
     fn has_layout_or_paint_containment(&self, fragment_flags: FragmentFlags) -> bool;
     fn establishes_stacking_context(&self, fragment_flags: FragmentFlags) -> bool;
-    fn in_top_layer(&self) -> bool;
     fn establishes_scroll_container(&self, fragment_flags: FragmentFlags) -> bool;
     fn establishes_containing_block_for_absolute_descendants(
         &self,
@@ -866,15 +863,6 @@ impl ComputedValuesExt for ComputedValues {
     fn establishes_scroll_container(&self, fragment_flags: FragmentFlags) -> bool {
         self.effective_overflow(fragment_flags)
             .establishes_scroll_container()
-    }
-
-    /// Whether the element is in the top layer, which the user agent stylesheet marks with
-    /// `overlay: auto` (or the internal `-servo-top-layer` property for the fullscreen element).
-    /// A transition of `overlay` keeps an element in the top layer while it animates out.
-    /// <https://drafts.csswg.org/css-position-4/#overlay>
-    fn in_top_layer(&self) -> bool {
-        self.get_box().clone__servo_top_layer() == ServoTopLayer::Top ||
-            self.get_box().clone_overlay() == Overlay::Auto
     }
 
     /// Returns true if this fragment establishes a new stacking context and false otherwise.
