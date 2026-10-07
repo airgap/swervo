@@ -87,23 +87,6 @@ pub fn content_process_sandbox_profile() -> Profile {
 
 #[cfg(any(
     target_os = "windows",
-    target_os = "ios",
-    target_os = "android",
-    target_env = "ohos",
-    target_arch = "arm",
-    target_arch = "riscv32",
-    target_arch = "riscv64",
-
-    // exclude apple arm devices
-    all(target_arch = "aarch64", not(target_os = "macos"))
-))]
-pub fn content_process_sandbox_profile() {
-    log::error!("Sandboxed multiprocess is not supported on this platform.");
-    process::exit(1);
-}
-
-#[cfg(any(
-    target_os = "windows",
     target_os = "android",
     target_env = "ohos",
     target_arch = "arm",

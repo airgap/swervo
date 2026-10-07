@@ -32,15 +32,20 @@ use crate::platform::font_list::{
 };
 
 /// Resolve a *named* font family that isn't installed under that name, via the platform's font
-/// configuration. On Linux/freetype this is fontconfig's substitution, filtered the way Chrome
-/// filters it (Arial -> Liberation Sans is accepted, Verdana -> Noto Sans is not); on
-/// macOS/Windows the requested families are installed and native matching already handles them,
-/// so this is a no-op.
-#[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))]
+/// configuration. On desktop FreeType platforms this is fontconfig's substitution, filtered
+/// the way Chrome filters it (Arial -> Liberation Sans is accepted, Verdana -> Noto Sans is not).
+/// Other platforms keep their native font matching and the existing CSS fallback.
+#[cfg(any(
+    all(target_os = "linux", not(target_env = "ohos"), not(ohos_mock)),
+    target_os = "freebsd"
+))]
 fn platform_family_substitute(name: &str) -> Option<String> {
     crate::platform::font_list::font_family_substitute(name)
 }
-#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "freebsd")))]
+#[cfg(not(any(
+    all(target_os = "linux", not(target_env = "ohos"), not(ohos_mock)),
+    target_os = "freebsd"
+)))]
 fn platform_family_substitute(_name: &str) -> Option<String> {
     None
 }
