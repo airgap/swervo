@@ -1,0 +1,38 @@
+name: AVIF cross-builds
+
+on:
+  pull_request:
+    paths:
+      - '.github/actions/setup-dav1d/**'
+      - '.github/workflows/dav1d-cross.yml'
+      - '.github/workflows/android.yml'
+      - '.github/workflows/ohos.yml'
+      - 'etc/ci/setup_dav1d*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Exercise the real mach launcher and Cargo build, beyond the dependency smoke tests.
+jobs:
+  android:
+    name: Android (${{ matrix.profile }})
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [checked-release, production]
+    uses: ./.github/workflows/android.yml
+    with:
+      profile: ${{ matrix.profile }}
+      bencher: false
+
+  ohos:
+    name: OpenHarmony (${{ matrix.profile }})
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [checked-release, production]
+    uses: ./.github/workflows/ohos.yml
+    with:
+      profile: ${{ matrix.profile }}
+      bencher: false

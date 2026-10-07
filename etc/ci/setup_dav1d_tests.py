@@ -38,7 +38,7 @@ class SetupDav1dTests(unittest.TestCase):
         self.assertEqual(env["PKG_CONFIG_PATH"], (self.root / "lib/pkgconfig").as_posix())
 
     @unittest.skipIf(sys.platform == "win32", "Cross builds run on Linux or macOS")
-    def test_cross_wrapper_only_overrides_dav1d(self):
+    def test_cross_wrapper_survives_shell_and_only_overrides_dav1d(self):
         executable = self.root / "fake-pkg-config"
         executable.write_text(
             f"#!{sys.executable}\nimport json, os, sys\n"
@@ -47,33 +47,52 @@ class SetupDav1dTests(unittest.TestCase):
         )
         executable.chmod(0o755)
         prefix = self.root / "install"
-        with patch.dict(os.environ, {"PKG_CONFIG": str(executable)}, clear=True):
-            env = setup.cargo_environment(prefix, "aarch64-unknown-linux-ohos")
-        self.assertEqual(
-            set(env),
-            {
-                "SYSTEM_DEPS_DAV1D_LINK",
-                "SYSTEM_DEPS_DAV1D_BUILD_INTERNAL",
-                "PKG_CONFIG_aarch64-unknown-linux-ohos",
-            },
-        )
-        wrapper = env["PKG_CONFIG_aarch64-unknown-linux-ohos"]
-        sdk_env = dict(
-            os.environ, PKG_CONFIG_PATH="/sdk/pc", PKG_CONFIG_LIBDIR="/sdk/lib", PKG_CONFIG_SYSROOT_DIR="/sdk"
-        )
-        for dependency in ["dav1d", "dav1d >= 1.3.0", "gstreamer-1.0", "--version"]:
-            with self.subTest(dependency=dependency):
-                output = subprocess.check_output([sys.executable, wrapper, dependency], env=sdk_env, text=True)
-                result = json.loads(output)
-                if dependency.startswith("dav1d"):
-                    self.assertEqual(result["path"], (prefix / "lib/pkgconfig").as_posix())
-                    self.assertEqual(result["libdir"], (prefix / "lib/pkgconfig").as_posix())
-                    self.assertEqual(result["sysroot"], "/")
-                else:
-                    self.assertEqual(result["path"], "/sdk/pc")
-                    self.assertEqual(result["libdir"], "/sdk/lib")
-                    self.assertEqual(result["sysroot"], "/sdk")
-                self.assertEqual(result["args"], [dependency])
+        for target in (*setup.ANDROID_TARGETS, *setup.OHOS_TARGETS):
+            with self.subTest(target=target):
+                with patch.dict(os.environ, {"PKG_CONFIG": str(executable)}, clear=True):
+                    env = setup.cargo_environment(prefix, target)
+                exact_key = f"PKG_CONFIG_{target}"
+                shell_safe_key = f"PKG_CONFIG_{target.replace('-', '_')}"
+                sdk_env = dict(
+                    os.environ, PKG_CONFIG_PATH="/sdk/pc", PKG_CONFIG_LIBDIR="/sdk/lib", PKG_CONFIG_SYSROOT_DIR="/sdk"
+                )
+                sdk_env.update(env)
+                # mach starts with /bin/sh, which may discard inherited variables
+                # whose names contain hyphens before Python or Cargo can see them.
+                output = subprocess.check_output(
+                    [
+                        "/bin/sh",
+                        "-c",
+                        'exec "$@"',
+                        "sh",
+                        sys.executable,
+                        "-c",
+                        "import json, os; print(json.dumps(dict(os.environ)))",
+                    ],
+                    env=sdk_env,
+                    text=True,
+                )
+                shell_env = json.loads(output)
+                self.assertEqual(shell_env.get(shell_safe_key), env[exact_key])
+                self.assertEqual(
+                    set(env),
+                    {"SYSTEM_DEPS_DAV1D_LINK", "SYSTEM_DEPS_DAV1D_BUILD_INTERNAL", exact_key, shell_safe_key},
+                )
+                # Match pkg-config-rs's exact-triple then underscore-triple lookup.
+                wrapper = shell_env.get(exact_key, shell_env[shell_safe_key])
+                for dependency in ["dav1d", "dav1d >= 1.3.0", "gstreamer-1.0", "--version"]:
+                    with self.subTest(dependency=dependency):
+                        output = subprocess.check_output([wrapper, dependency], env=shell_env, text=True)
+                        result = json.loads(output)
+                        if dependency.startswith("dav1d"):
+                            self.assertEqual(result["path"], (prefix / "lib/pkgconfig").as_posix())
+                            self.assertEqual(result["libdir"], (prefix / "lib/pkgconfig").as_posix())
+                            self.assertEqual(result["sysroot"], "/")
+                        else:
+                            self.assertEqual(result["path"], "/sdk/pc")
+                            self.assertEqual(result["libdir"], "/sdk/lib")
+                            self.assertEqual(result["sysroot"], "/sdk")
+                        self.assertEqual(result["args"], [dependency])
 
     def make_toolchain(self, base):
         (base / "bin").mkdir(parents=True)
