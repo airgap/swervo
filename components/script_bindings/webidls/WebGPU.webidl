@@ -151,6 +151,8 @@ interface GPUDevice : EventTarget {
     [Throws]
     GPUTexture createTexture(GPUTextureDescriptor descriptor);
     GPUSampler createSampler(optional GPUSamplerDescriptor descriptor = {});
+    [Throws]
+    GPUExternalTexture importExternalTexture(GPUExternalTextureDescriptor descriptor);
 
     [Throws]
     GPUBindGroupLayout createBindGroupLayout(GPUBindGroupLayoutDescriptor descriptor);
@@ -552,6 +554,19 @@ dictionary GPUStorageTextureBindingLayout {
 dictionary GPUExternalTextureBindingLayout {
 };
 
+// https://gpuweb.github.io/gpuweb/#gpuexternaltexture
+[Exposed=(Window, Worker), SecureContext, Pref="dom_webgpu_enabled"]
+interface GPUExternalTexture {
+};
+GPUExternalTexture includes GPUObjectBase;
+
+dictionary GPUExternalTextureDescriptor : GPUObjectDescriptorBase {
+    // Spec source is (HTMLVideoElement or VideoFrame); VideoFrame (WebCodecs) is not yet
+    // implemented, so only HTMLVideoElement is accepted for now.
+    required HTMLVideoElement source;
+    PredefinedColorSpace colorSpace = "srgb";
+};
+
 [Exposed=(Window, Worker), SecureContext, Pref="dom_webgpu_enabled"]
 interface GPUBindGroup {
 };
@@ -566,6 +581,7 @@ dictionary GPUBindGroupDescriptor : GPUObjectDescriptorBase {
 typedef (GPUSampler or
          GPUTexture or
          GPUTextureView or
+         GPUExternalTexture or
          GPUBuffer or
          GPUBufferBinding) GPUBindingResource;
 
