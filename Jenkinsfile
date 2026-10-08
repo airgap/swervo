@@ -87,14 +87,17 @@ pipeline {
                         unix "./mach package --profile ${params.PROFILE}"
                         script {
                             if (params.WPT) {
+                                // WPT_ARGS reaches the shell as an environment variable (Jenkins exports
+                                // parameters) and is split into words, never evaluated as shell code.
                                 unix """
                                     mkdir -p wpt-logs/linux
+                                    read -r -a wpt_args <<< "\${WPT_ARGS:-}"
                                     ./mach test-wpt --bin servo/servoshell --profile ${params.PROFILE} \\
                                       --processes \$(nproc) --timeout-multiplier 2 \\
                                       --log-raw wpt-logs/linux/raw.log \\
                                       --log-wptreport wpt-logs/linux/wptreport.json \\
                                       --log-raw-stable-unexpected wpt-logs/linux/unexpected.log \\
-                                      ${params.WPT_ARGS}
+                                      \${wpt_args[@]+"\${wpt_args[@]}"}
                                 """
                             }
                         }
@@ -123,10 +126,13 @@ pipeline {
                 }
 
                 stage('macOS') {
-                    when { expression { fullRun() } }
+                    when {
+                        beforeAgent true
+                        expression { fullRun() }
+                    }
                     agent { label 'macos' }
                     steps {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             // XProtect can flag the freshly built DMG as malware (mac-arm64.yml).
                             sh 'sudo -n pkill -9 XProtect >/dev/null 2>&1 || true'
                             prepareUnix(nextest: true)
@@ -155,7 +161,10 @@ pipeline {
                 }
 
                 stage('Windows') {
-                    when { expression { fullRun() } }
+                    when {
+                        beforeAgent true
+                        expression { fullRun() }
+                    }
                     agent { label 'windows' }
                     environment {
                         // clang-sys searches msys before Program Files\LLVM (windows.yml).
@@ -163,7 +172,7 @@ pipeline {
                         RUSTUP_WINDOWS_PATH_ADD_BIN = '1'
                     }
                     steps {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             script {
                                 if (params.BOOTSTRAP) {
                                     bat '.\\mach fetch && .\\mach bootstrap-gstreamer'
@@ -192,10 +201,13 @@ pipeline {
                 // Needs the Android SDK/NDK on the agent (ANDROID_SDK_ROOT, ANDROID_NDK_ROOT).
                 // Release signing is not wired up; mach produces a debug-signed APK.
                 stage('Android') {
-                    when { expression { fullRun() } }
+                    when {
+                        beforeAgent true
+                        expression { fullRun() }
+                    }
                     agent { label 'linux' }
                     steps {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
                             prepareUnix(target: 'aarch64-linux-android')
                             unix """
                                 : "\${ANDROID_NDK_ROOT:?set ANDROID_NDK_ROOT on the agent}"

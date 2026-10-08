@@ -1,8 +1,9 @@
 <?xml version='1.1' encoding='UTF-8'?>
 <!-- swervo CI multibranch job. Created via jenkins/setup-jenkins.sh, which fills in @REPO_URL@.
      Stages live in the root Jenkinsfile; this only points Jenkins at the repo. Branches are discovered by re-indexing
-     every 5 minutes (a localhost Jenkins can't receive GitHub webhooks), so every pushed
-     branch, including PR heads, gets built. Uses the plain git source, so no GitHub
+     every 5 minutes (a localhost Jenkins can't receive GitHub webhooks), so every branch
+     pushed to this repository, including PR branches, gets built. Pull requests from forks
+     are deliberately not built: they would run untrusted code on the self-hosted agents. Uses the plain git source, so no GitHub
      credential is needed to clone the public repo. -->
 <org.jenkinsci.plugins.workflow.multibranch.WorkflowMultiBranchProject plugin="workflow-multibranch">
   <actions/>

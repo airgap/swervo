@@ -36,8 +36,11 @@ fi
 
 if [[ -f .ci-env ]]; then
     while IFS='=' read -r key value; do
-        if [[ -n "${key}" ]]; then
-            export "${key}=${value}"
-        fi
+        # Skip names that aren't valid shell variables, such as the hyphenated
+        # PKG_CONFIG_<target-triple> key; its underscore alias is exported instead.
+        case "${key}" in
+            "" | [0-9]* | *[!A-Za-z0-9_]*) continue ;;
+        esac
+        export "${key}=${value}"
     done < .ci-env
 fi

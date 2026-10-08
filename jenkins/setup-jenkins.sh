@@ -20,13 +20,15 @@ JENKINS_URL="${JENKINS_URL:-http://localhost:8080}"
 : "${JENKINS_USER:?set JENKINS_USER (your Jenkins user name)}"
 : "${JENKINS_TOKEN:?set JENKINS_TOKEN (a Jenkins API token)}"
 
-CLI="/tmp/jenkins-cli.jar"
-if [[ ! -f "${CLI}" ]]; then
-    curl -fsSL "${JENKINS_URL}/jnlpJars/jenkins-cli.jar" -o "${CLI}"
-fi
+CLI_DIR="$(mktemp -d)"
+trap 'rm -rf "${CLI_DIR}"' EXIT
+CLI="${CLI_DIR}/jenkins-cli.jar"
+curl -fsSL "${JENKINS_URL}/jnlpJars/jenkins-cli.jar" -o "${CLI}"
 DIR="$(cd "$(dirname "${0}")" && pwd)"
 REPO_URL="${REPO_URL:-$(git -C "${DIR}" remote get-url origin)}"
-auth=(-s "${JENKINS_URL}" -auth "${JENKINS_USER}:${JENKINS_TOKEN}")
+# The CLI reads these instead of -auth, which would put the token on the command line.
+export JENKINS_USER_ID="${JENKINS_USER}" JENKINS_API_TOKEN="${JENKINS_TOKEN}"
+auth=(-s "${JENKINS_URL}")
 
 java -jar "${CLI}" "${auth[@]}" who-am-i >/dev/null
 
@@ -36,5 +38,4 @@ config="$(sed "s|@REPO_URL@|${REPO_URL}|" "${DIR}/job-configs/${job}.xml")"
 java -jar "${CLI}" "${auth[@]}" create-job "${job}" <<< "${config}" 2>/dev/null \
     || java -jar "${CLI}" "${auth[@]}" update-job "${job}" <<< "${config}"
 
-echo "Done. Jenkins indexes the branches every 5 minutes; to start now:"
-echo "  java -jar ${CLI} -s ${JENKINS_URL} -auth ${JENKINS_USER}:\${JENKINS_TOKEN} build ${job}/main"
+echo "Done. Jenkins indexes the branches every 5 minutes, or start main from the Jenkins UI."
