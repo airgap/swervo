@@ -77,3 +77,5 @@ support/macos/Brewfile.lock.json
 
 # Justfiles
 justfile
+/.ci
+/.ci-env

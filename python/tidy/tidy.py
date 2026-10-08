@@ -1116,6 +1116,23 @@ class CargoDenyKrate:
         return f"{self.name}@{self.version}"
 
 
+def ci_repository() -> str:
+    """The `owner/name` of the repository CI is building, lowercased, or "" outside CI.
+
+    GitHub Actions sets GITHUB_REPOSITORY. On Jenkins, the git plugin sets GIT_URL from the
+    job's own SCM configuration (jenkins/job-configs/swervo-ci.xml), not from the commit.
+    """
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        return os.environ.get("GITHUB_REPOSITORY", "").lower()
+    if os.environ.get("JENKINS_URL"):
+        match = re.fullmatch(
+            r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([^/]+/[^/]+?)(?:\.git)?/?",
+            os.environ.get("GIT_URL", ""),
+        )
+        return match.group(1).lower() if match else ""
+    return ""
+
+
 def run_coauthors_check() -> int:
     """
     Check the git history and pull request body for disallowed co-authors.
@@ -1129,12 +1146,9 @@ def run_coauthors_check() -> int:
     print("\r ➤  Checking co-authors ...")
 
     # This fork permits AI-assisted contributions and preserves their attribution.
-    # GitHub supplies the workflow's base repository, so PRs targeting servo/servo
+    # The CI system supplies the repository being built, so PRs targeting servo/servo
     # still use its upstream policy, even when their head comes from this fork.
-    if (
-        os.environ.get("GITHUB_ACTIONS") == "true"
-        and os.environ.get("GITHUB_REPOSITORY", "").lower() == "airgap/swervo"
-    ):
+    if ci_repository() == "airgap/swervo":
         print("\r  | airgap/swervo uses its fork policy; upstream co-author restrictions do not apply.")
         return 0
 
