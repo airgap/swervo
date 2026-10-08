@@ -259,6 +259,29 @@ class CheckTidiness(unittest.TestCase):
                 else:
                     git_log.assert_called_once()
 
+    def test_run_coauthors_check_jenkins_repository_scope(self):
+        attributed_log = "commit 1234\nCo-authored-by: LLM <llm@example.com>\n"
+        for git_url, jenkins_url, expected in (
+            ("https://github.com/airgap/swervo.git", "http://localhost:8080/", 0),
+            ("https://github.com/Airgap/Swervo", "http://localhost:8080/", 0),
+            ("git@github.com:airgap/swervo.git", "http://localhost:8080/", 0),
+            ("ssh://git@github.com/airgap/swervo.git", "http://localhost:8080/", 0),
+            ("https://github.com/servo/servo.git", "http://localhost:8080/", 1),
+            ("https://github.com/airgap/swervo-other.git", "http://localhost:8080/", 1),
+            ("https://example.com/airgap/swervo.git", "http://localhost:8080/", 1),
+            ("", "http://localhost:8080/", 1),
+            ("https://github.com/airgap/swervo.git", "", 1),
+        ):
+            environment = {"JENKINS_URL": jenkins_url, "GIT_URL": git_url}
+            with (
+                self.subTest(git_url=git_url, jenkins_url=jenkins_url),
+                patch.dict(os.environ, environment, clear=True),
+                patch.dict(tidy.config, {"disallowed-coauthors": ["llm@example.com"]}),
+                patch.object(tidy.subprocess, "check_output", return_value=attributed_log),
+                patch("builtins.print"),
+            ):
+                self.assertEqual(tidy.run_coauthors_check(), expected)
+
     def test_check_coauthors(self):
         for _ in tidy.check_config_file(os.path.join(BASE_PATH, "servo-tidy.toml"), print_text=False):
             ...
