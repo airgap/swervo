@@ -4568,9 +4568,10 @@ impl ScriptThread {
 
         let global_scope = window.as_global_scope();
         // The constellation can route an evaluation to a pipeline whose document is no longer
-        // fully active (a navigation is replacing it) or is sandboxed without allow-scripts;
-        // evaluation asserts that script may run, so report it as not ready instead.
-        if !global_scope.can_run_script() {
+        // fully active (a navigation is replacing it), so report it as not ready instead.
+        // Sandboxing (e.g. a CSP `sandbox` without allow-scripts) does not apply to scripts
+        // from the embedder, which may still evaluate there.
+        if !window.Document().is_fully_active() {
             let _ = self.senders.pipeline_to_constellation_sender.send((
                 webview_id,
                 pipeline_id,
