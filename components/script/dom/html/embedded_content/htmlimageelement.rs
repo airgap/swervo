@@ -216,8 +216,8 @@ impl FetchResponseListener for ImageContext {
         let metadata: Option<Metadata> = metadata.ok().map(Into::into);
 
         // Step 14.5 of https://html.spec.whatwg.org/multipage/#img-environment-changes
-        if let Some(metadata) = metadata.as_ref() &&
-            let Some(ref content_type) = metadata.content_type
+        if let Some(metadata) = metadata.as_ref()
+            && let Some(ref content_type) = metadata.content_type
         {
             let mime: Mime = content_type.clone().into_inner().into();
             if mime.type_() == mime::MULTIPART && mime.subtype().as_str() == "x-mixed-replace" {
@@ -432,7 +432,7 @@ impl HTMLImageElement {
             .filter_map(DomRoot::downcast::<SVGSVGElement>)
             .next()
         {
-            svg_root.invalidate_cached_serialized_subtree_and_rasterization_result();
+            svg_root.invalidate_cached_serialized_subtree_and_rasterization_result(cx.no_gc());
         }
         self.resolve_image_decode_promises(cx);
     }
@@ -769,11 +769,16 @@ impl HTMLImageElement {
         // > state, or if scripting is disabled for the img, and false otherwise.
         // > If the will lazy load element steps given the img return true, then:
         if self.will_lazy_load_element_steps() {
-            let request = match self.image_request.get() {
-                ImageRequestPhase::Current => &self.current_request,
-                ImageRequestPhase::Pending => &self.pending_request,
-            };
-            LoadBlocker::terminate(cx, &request.borrow().blocker);
+            match self.image_request.get() {
+                ImageRequestPhase::Current => {
+                    LoadBlocker::terminate(cx, &self.current_request.borrow().blocker)
+                },
+                ImageRequestPhase::Pending => {
+                    if let Some(pending_request) = self.pending_request.borrow().as_ref() {
+                        LoadBlocker::terminate(cx, &pending_request.blocker);
+                    }
+                },
+            }
             // > 1. Set the img's lazy load resumption steps to the rest of this algorithm
             // >    starting with the step labeled fetch the image.
             *self.lazy_load_resumption_steps.borrow_mut() =
@@ -1091,8 +1096,9 @@ impl HTMLImageElement {
         // There are missing steps for the element's last selected source in specification so let's
         // check the current request's current URL as well.
         // <https://github.com/whatwg/html/issues/5060>
-        same_selected_source = same_selected_source ||
-            self.current_request
+        same_selected_source = same_selected_source
+            || self
+                .current_request
                 .borrow()
                 .source_url
                 .as_ref()
@@ -1175,8 +1181,8 @@ impl HTMLImageElement {
         // Step 2.2. If any of the following are true: this's node document is not fully active; or
         // this's current request's state is broken, then reject promise with an "EncodingError"
         // DOMException.
-        if !self.owner_document().is_fully_active() ||
-            matches!(self.current_request.borrow().state, State::Broken)
+        if !self.owner_document().is_fully_active()
+            || matches!(self.current_request.borrow().state, State::Broken)
         {
             promise.reject_error(cx, Error::Encoding(Some("Image element's owner document is not fully active or image element's request is broken".into())));
         } else if matches!(
@@ -1185,8 +1191,8 @@ impl HTMLImageElement {
         ) {
             // this doesn't follow the spec, but it's been discussed in <https://github.com/whatwg/html/issues/4217>
             promise.resolve_native(cx, &());
-        } else if matches!(self.current_request.borrow().state, State::Unavailable) &&
-            self.current_request.borrow().source_url.is_none()
+        } else if matches!(self.current_request.borrow().state, State::Unavailable)
+            && self.current_request.borrow().source_url.is_none()
         {
             // Note: Despite being not explicitly stated in the specification but if current
             // request's state is unavailable and current URL is empty string (<img> without "src"
@@ -1471,9 +1477,9 @@ pub(crate) enum ImageElementMicrotask {
 impl MicrotaskRunnable for ImageElementMicrotask {
     fn handler(&self, cx: &mut JSContext) {
         let mut realm = match self {
-            &ImageElementMicrotask::UpdateImageData { ref elem, .. } |
-            &ImageElementMicrotask::EnvironmentChanges { ref elem, .. } |
-            &ImageElementMicrotask::Decode { ref elem, .. } => enter_auto_realm(cx, &**elem),
+            &ImageElementMicrotask::UpdateImageData { ref elem, .. }
+            | &ImageElementMicrotask::EnvironmentChanges { ref elem, .. }
+            | &ImageElementMicrotask::Decode { ref elem, .. } => enter_auto_realm(cx, &**elem),
         };
         let cx = &mut realm;
         match *self {
@@ -1716,8 +1722,8 @@ impl HTMLImageElementMethods<crate::DomTypeHolder> for HTMLImageElement {
         // the img element's current request's state is completely available and its pending request
         // is null; or the img element's current request's state is broken and its pending request
         // is null, then return true.
-        if matches!(self.image_request.get(), ImageRequestPhase::Current) &&
-            matches!(
+        if matches!(self.image_request.get(), ImageRequestPhase::Current)
+            && matches!(
                 self.current_request.borrow().state,
                 State::CompletelyAvailable | State::Broken
             )
@@ -1765,7 +1771,7 @@ impl HTMLImageElementMethods<crate::DomTypeHolder> for HTMLImageElement {
     );
 
     // https://html.spec.whatwg.org/multipage/#dom-img-loading
-    make_setter!(cx, SetLoading, "loading");
+    make_setter!(SetLoading, "loading");
 
     /// <https://html.spec.whatwg.org/multipage/#dom-img-decode>
     fn Decode(&self, cx: &mut JSContext) -> RootedPromise {
@@ -1831,7 +1837,7 @@ impl VirtualMethods for HTMLImageElement {
         // The old document's lazy load observer would keep tracking this element against the
         // wrong viewport; update the image data defers the fetch again in the new document.
         if self.lazy_load_resumption_steps.take().is_some() {
-            old_doc.stop_intersection_observing_a_lazy_loading_element(self.upcast());
+            old_doc.stop_intersection_observing_a_lazy_loading_element(cx.no_gc(), self.upcast());
         }
         self.update_the_image_data(cx);
     }
@@ -1912,10 +1918,10 @@ impl VirtualMethods for HTMLImageElement {
 
     fn attribute_affects_presentational_hints(&self, attr: AttrRef<'_>) -> bool {
         match attr.local_name() {
-            &local_name!("width") |
-            &local_name!("height") |
-            &local_name!("hspace") |
-            &local_name!("vspace") => true,
+            &local_name!("width")
+            | &local_name!("height")
+            | &local_name!("hspace")
+            | &local_name!("vspace") => true,
             _ => self
                 .super_type()
                 .unwrap()
@@ -1925,10 +1931,10 @@ impl VirtualMethods for HTMLImageElement {
 
     fn parse_plain_attribute(&self, name: &LocalName, value: DOMString) -> AttrValue {
         match name {
-            &local_name!("width") |
-            &local_name!("height") |
-            &local_name!("hspace") |
-            &local_name!("vspace") => AttrValue::from_dimension(value.into()),
+            &local_name!("width")
+            | &local_name!("height")
+            | &local_name!("hspace")
+            | &local_name!("vspace") => AttrValue::from_dimension(value.into()),
             _ => self
                 .super_type()
                 .unwrap()
@@ -2013,8 +2019,8 @@ impl VirtualMethods for HTMLImageElement {
         }
 
         // Step 1. If oldParent is a picture element, then, count this as a relevant mutation for movedNode.
-        if let Some(old_parent) = context.old_parent &&
-            old_parent.is::<HTMLPictureElement>()
+        if let Some(old_parent) = context.old_parent
+            && old_parent.is::<HTMLPictureElement>()
         {
             self.update_the_image_data(cx);
         }

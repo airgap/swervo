@@ -144,6 +144,10 @@ impl KeyboardEvent {
         self.typed_key.borrow().clone()
     }
 
+    pub(crate) fn modifiers(&self) -> Modifiers {
+        self.modifiers.get()
+    }
+
     pub(crate) fn original_code(&self) -> Option<Code> {
         *self.original_code.borrow()
     }

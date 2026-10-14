@@ -5,6 +5,7 @@
 //! Encrypted Media Extensions `MediaKeys` — brick 1 (framework skeleton).
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
 use script_bindings::reflector::{Reflector, reflect_dom_object};
 
 use crate::dom::bindings::codegen::Bindings::MediaKeySystemAccessBinding::MediaKeySessionType;
@@ -14,7 +15,6 @@ use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::media::mediakeysession::MediaKeySession;
-use crate::script_runtime::CanGc;
 
 #[dom_struct]
 pub(crate) struct MediaKeys {
@@ -28,8 +28,8 @@ impl MediaKeys {
         }
     }
 
-    pub(crate) fn new(global: &GlobalScope, can_gc: CanGc) -> DomRoot<MediaKeys> {
-        reflect_dom_object(Box::new(MediaKeys::new_inherited()), global, can_gc)
+    pub(crate) fn new(cx: &mut JSContext, global: &GlobalScope) -> DomRoot<MediaKeys> {
+        reflect_dom_object(cx, Box::new(MediaKeys::new_inherited()), global)
     }
 }
 
@@ -37,12 +37,10 @@ impl MediaKeysMethods<crate::DomTypeHolder> for MediaKeys {
     /// <https://w3c.github.io/encrypted-media/#dom-mediakeys-createsession>
     fn CreateSession(
         &self,
+        cx: &mut JSContext,
         _session_type: MediaKeySessionType,
     ) -> Fallible<DomRoot<MediaKeySession>> {
         // brick 2 records the session type + tracks the session on the MediaKeys.
-        Ok(MediaKeySession::new(
-            &self.global(),
-            CanGc::deprecated_note(),
-        ))
+        Ok(MediaKeySession::new(cx, &self.global()))
     }
 }

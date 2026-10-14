@@ -12,7 +12,6 @@
 
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::rc::Rc;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -35,8 +34,7 @@ use crate::dom::event::Event;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::media::mediakeymessageevent::MediaKeyMessageEvent;
-use crate::dom::promise::Promise;
-use crate::script_runtime::CanGc;
+use crate::dom::promise::{Promise, RootedPromise};
 
 #[dom_struct]
 pub(crate) struct MediaKeySession {
@@ -58,8 +56,8 @@ impl MediaKeySession {
         }
     }
 
-    pub(crate) fn new(global: &GlobalScope, can_gc: CanGc) -> DomRoot<MediaKeySession> {
-        reflect_dom_object(Box::new(MediaKeySession::new_inherited()), global, can_gc)
+    pub(crate) fn new(cx: &mut JSContext, global: &GlobalScope) -> DomRoot<MediaKeySession> {
+        reflect_dom_object(cx, Box::new(MediaKeySession::new_inherited()), global)
     }
 
     /// The key material for a given key id, if this session holds it (used by the CENC decrypt
@@ -83,13 +81,13 @@ impl MediaKeySessionMethods<crate::DomTypeHolder> for MediaKeySession {
         cx: &mut JSContext,
         init_data_type: DOMString,
         init_data: ArrayBufferViewOrArrayBuffer,
-    ) -> Rc<Promise> {
+    ) -> RootedPromise {
         let mut realm = CurrentRealm::assert(cx);
         let promise = Promise::new_in_realm(&mut realm);
 
         let data = match init_data {
-            ArrayBufferViewOrArrayBuffer::ArrayBufferView(v) => v.to_vec(),
-            ArrayBufferViewOrArrayBuffer::ArrayBuffer(b) => b.to_vec(),
+            ArrayBufferViewOrArrayBuffer::ArrayBufferView(v) => v.to_vec().unwrap_or_default(),
+            ArrayBufferViewOrArrayBuffer::ArrayBuffer(b) => b.to_vec().unwrap_or_default(),
         };
         let key_ids: Vec<Vec<u8>> = match init_data_type.to_string().as_str() {
             // "keyids": init data is JSON `{"kids":["base64url", ...]}`.
@@ -117,7 +115,6 @@ impl MediaKeySessionMethods<crate::DomTypeHolder> for MediaKeySession {
         if !key_ids.is_empty() {
             let kids: Vec<String> = key_ids.iter().map(|k| URL_SAFE_NO_PAD.encode(k)).collect();
             let request = serde_json::json!({ "kids": kids, "type": "temporary" }).to_string();
-            let can_gc = CanGc::from_cx(cx);
             let global = self.global();
             let event = MediaKeyMessageEvent::new(
                 cx,
@@ -125,7 +122,6 @@ impl MediaKeySessionMethods<crate::DomTypeHolder> for MediaKeySession {
                 Atom::from("message"),
                 MediaKeyMessageType::License_request,
                 request.as_bytes(),
-                can_gc,
             );
             event
                 .upcast::<Event>()
@@ -139,13 +135,13 @@ impl MediaKeySessionMethods<crate::DomTypeHolder> for MediaKeySession {
     /// <https://w3c.github.io/encrypted-media/#dom-mediakeysession-update>
     /// Parses a Clear Key JWK license (`{"keys":[{"kty":"oct","kid":..,"k":..}]}`), stores the
     /// keys, and fires `keystatuseschange`.
-    fn Update(&self, cx: &mut JSContext, response: ArrayBufferViewOrArrayBuffer) -> Rc<Promise> {
+    fn Update(&self, cx: &mut JSContext, response: ArrayBufferViewOrArrayBuffer) -> RootedPromise {
         let mut realm = CurrentRealm::assert(cx);
         let promise = Promise::new_in_realm(&mut realm);
 
         let data = match response {
-            ArrayBufferViewOrArrayBuffer::ArrayBufferView(v) => v.to_vec(),
-            ArrayBufferViewOrArrayBuffer::ArrayBuffer(b) => b.to_vec(),
+            ArrayBufferViewOrArrayBuffer::ArrayBufferView(v) => v.to_vec().unwrap_or_default(),
+            ArrayBufferViewOrArrayBuffer::ArrayBuffer(b) => b.to_vec().unwrap_or_default(),
         };
         let Ok(json) = serde_json::from_slice::<serde_json::Value>(&data) else {
             promise.reject_error(
@@ -160,8 +156,8 @@ impl MediaKeySessionMethods<crate::DomTypeHolder> for MediaKeySession {
             for key in keys {
                 let kid = key.get("kid").and_then(|v| v.as_str());
                 let k = key.get("k").and_then(|v| v.as_str());
-                if let (Some(kid), Some(k)) = (kid, k) &&
-                    let (Ok(kid_bytes), Ok(k_bytes)) =
+                if let (Some(kid), Some(k)) = (kid, k)
+                    && let (Ok(kid_bytes), Ok(k_bytes)) =
                         (URL_SAFE_NO_PAD.decode(kid), URL_SAFE_NO_PAD.decode(k))
                 {
                     // Publish to the process-global Clear Key store the CENC decrypt element reads.
@@ -186,7 +182,7 @@ impl MediaKeySessionMethods<crate::DomTypeHolder> for MediaKeySession {
     }
 
     /// <https://w3c.github.io/encrypted-media/#dom-mediakeysession-close>
-    fn Close(&self, cx: &mut JSContext) -> Rc<Promise> {
+    fn Close(&self, cx: &mut JSContext) -> RootedPromise {
         let mut realm = CurrentRealm::assert(cx);
         let promise = Promise::new_in_realm(&mut realm);
         // Drop this session's keys from the global Clear Key store, then the local copy.

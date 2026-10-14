@@ -421,8 +421,8 @@ impl DocumentFocusHandler {
             // because of the popping we do at the start of these steps.
             let related_blur_target = match new_focus_chain.last() {
                 Some(FocusableArea::Node { node, .. })
-                    if index == last_old_focus_chain_entry &&
-                        matches!(entry, FocusableArea::Node { .. }) =>
+                    if index == last_old_focus_chain_entry
+                        && matches!(entry, FocusableArea::Node { .. }) =>
                 {
                     Some(node.upcast())
                 },
@@ -434,8 +434,7 @@ impl DocumentFocusHandler {
             // user has changed the element's value or its list of selected files while the
             // control was focused without committing that change, then fire an event named
             // change at the element, with the bubbles attribute initialized to true.
-            if let Some(element) = blur_event_target.and_then(|target| target.downcast::<Element>())
-            {
+            if let Some(element) = blur_event_target.downcast::<Element>() {
                 self.fire_change_if_edited_since_focus(cx, element);
             }
 
@@ -463,8 +462,8 @@ impl DocumentFocusHandler {
             // Step 3: Apply any relevant platform-specific conventions for focusing new focus
             // target. (For example, some platforms select the contents of a text control when that
             // control is focused.)
-            if &*self.focused_area() != new_focus_target &&
-                let Some(html_element) = new_focus_target
+            if &*self.focused_area() != new_focus_target
+                && let Some(html_element) = new_focus_target
                     .element()
                     .and_then(|element| element.downcast::<HTMLElement>())
             {
@@ -514,8 +513,8 @@ impl DocumentFocusHandler {
             // because of the popping we do at the start of these steps.
             let related_focus_target = match old_focus_chain.last() {
                 Some(FocusableArea::Node { node, .. })
-                    if index == last_new_focus_chain_entry &&
-                        matches!(entry, FocusableArea::Node { .. }) =>
+                    if index == last_new_focus_chain_entry
+                        && matches!(entry, FocusableArea::Node { .. }) =>
                 {
                     Some(node.upcast())
                 },
@@ -591,9 +590,7 @@ impl DocumentFocusHandler {
         }
     }
 
-    /// <https://html.spec.whatwg.org/multipage/#fire-a-focus-event>, followed for elements by
-    /// the bubbling `focusin`/`focusout` of <https://w3c.github.io/uievents/#event-type-focusin>,
-    /// which React's `onFocus`/`onBlur` listen for.
+    /// <https://html.spec.whatwg.org/multipage/#fire-a-focus-event>
     pub(crate) fn fire_focus_event(
         &self,
         cx: &mut JSContext,
@@ -640,25 +637,8 @@ impl DocumentFocusHandler {
                 self.focused_text_control.set(None);
                 *self.focused_text_control_value.borrow_mut() = None;
             },
+            FocusEventType::FocusIn | FocusEventType::FocusOut => {},
         }
-        let bubbling_name = match focus_event_type {
-            FocusEventType::Focus => "focusin".into(),
-            FocusEventType::Blur => "focusout".into(),
-        };
-        let bubbling_event = FocusEvent::new(
-            cx,
-            &self.window,
-            bubbling_name,
-            EventBubbles::Bubbles,
-            EventCancelable::NotCancelable,
-            Some(&self.window),
-            0i32,
-            related_target,
-        );
-        let bubbling_event = bubbling_event.upcast::<Event>();
-        bubbling_event.set_trusted(true);
-        bubbling_event.set_composed(true);
-        bubbling_event.fire(cx, event_target);
     }
 
     /// <https://html.spec.whatwg.org/multipage/#focus-fixup-rule>
@@ -727,8 +707,8 @@ impl DocumentFocusHandler {
         // > starting point, then let starting point be the sequential focus navigation starting point
         // > instead.
         if let Some(sequential_focus_navigation_starting_point) =
-            self.sequential_focus_navigation_starting_point() &&
-            starting_point.as_ref().is_none_or(|starting_point| {
+            self.sequential_focus_navigation_starting_point()
+            && starting_point.as_ref().is_none_or(|starting_point| {
                 starting_point.is_ancestor_of(&sequential_focus_navigation_starting_point)
             })
         {
@@ -1088,9 +1068,9 @@ impl SequentialFocusNavigationSearch {
             mechanism => *mechanism,
         };
 
-        if self.direction == SequentialFocusDirection::Backward &&
-            let Some(containing_element) = containing_node.downcast::<Element>() &&
-            containing_element.is_sequentially_focusable(no_gc)
+        if self.direction == SequentialFocusDirection::Backward
+            && let Some(containing_element) = containing_node.downcast::<Element>()
+            && containing_element.is_sequentially_focusable(no_gc)
         {
             return Some(DomRoot::from_ref(containing_element));
         }
@@ -1152,8 +1132,8 @@ impl SequentialFocusNavigationSearch {
         // If the search has ascended into a containing scope, never try to search back down
         // into the scope that originated this part of the search. Otherwise the search would
         // cycle endlessly.
-        if Some(node) == self.starting_point.as_deref() &&
-            self.search_context == SequentialFocusNavigationSearchContext::Containing
+        if Some(node) == self.starting_point.as_deref()
+            && self.search_context == SequentialFocusNavigationSearchContext::Containing
         {
             return Continue::Yes;
         }
@@ -1329,8 +1309,8 @@ impl SequentialFocusNavigationSearch {
                 // If the candidate element has a lesser tab index than the current winner,
                 // then it becomes the winner.
                 let should_select =
-                    compare_tab_indices(candidate_element_tab_index, winning_tab_index) ==
-                        Ordering::Less;
+                    compare_tab_indices(candidate_element_tab_index, winning_tab_index)
+                        == Ordering::Less;
 
                 (should_select, Continue::Yes)
             },
@@ -1352,8 +1332,8 @@ impl SequentialFocusNavigationSearch {
                 // then it becomes the new winner. This means that when the tab indices are
                 // equal, we give preference to the last one in DOM order.
                 let should_select =
-                    compare_tab_indices(candidate_element_tab_index, winning_tab_index) !=
-                        Ordering::Less;
+                    compare_tab_indices(candidate_element_tab_index, winning_tab_index)
+                        != Ordering::Less;
                 (should_select, Continue::Yes)
             },
         }

@@ -235,8 +235,8 @@ impl DragAndDrop {
         // > If the list of dragged nodes contains an img element, or an a element with an href
         // > attribute, add to the drag data store item list an item whose kind is text, type
         // > string is "text/uri-list", and data is the absolute URL of that element.
-        if let Some(anchor) = source_node.downcast::<HTMLAnchorElement>() &&
-            let Some(url) = anchor.full_href_url_for_user_interface()
+        if let Some(anchor) = source_node.downcast::<HTMLAnchorElement>()
+            && let Some(url) = anchor.full_href_url_for_user_interface(cx.no_gc())
         {
             let url = DOMString::from(url.as_str());
             drag_data_store.set_data(DOMString::from("text/uri-list"), url.clone());
@@ -327,8 +327,8 @@ impl DragAndDrop {
             return;
         }
 
-        if !self.target_just_changed.replace(false) &&
-            !self.fire_drag_or_cancel(cx, window, &source_node, state)
+        if !self.target_just_changed.replace(false)
+            && !self.fire_drag_or_cancel(cx, window, &source_node, state)
         {
             return;
         }

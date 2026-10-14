@@ -150,7 +150,7 @@ fn ship_response_to_network(
     response: &Response,
     chan: GenericCallback<Option<CustomResponse>>,
 ) {
-    use crate::body::BodyMixin;
+    use crate::fetch::body::BodyMixin;
 
     if response.is_disturbed() || response.is_locked() {
         let _ = chan.send(None);

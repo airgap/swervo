@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 
 use embedder_traits::UntrustedNodeAddress;
 use js::context::JSContext;
-use js::conversions::FromJSValConvertible;
+use js::conversions::{FromJSValConvertible, ToJSValConvertible};
 use js::glue::{
     CreateWrapperProxyHandler, GetProxyPrivate, GetProxyReservedSlot, ProxyTraps,
     SetProxyReservedSlot, WrapperNew,
@@ -27,7 +27,7 @@ use layout_api::HitTestFlags;
 use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericBindings::DocumentBinding::DocumentMethods;
 use script_bindings::codegen::GenericBindings::ShadowRootBinding::ShadowRootMethods;
-use script_bindings::conversions::{ToJSValConvertible, jsid_to_string, root_from_handlevalue};
+use script_bindings::conversions::{jsid_to_string, root_from_handlevalue};
 use script_bindings::error::{Error, ErrorResult};
 use script_bindings::reflector::DomObject;
 use script_bindings::utils::get_array_index_from_id;
@@ -205,7 +205,8 @@ impl DocumentOrShadowRoot {
             return None;
         }
 
-        let result = window.elements_from_point_query(HitTestFlags::empty(), LayoutPoint::new(x, y));
+        let result =
+            window.elements_from_point_query(HitTestFlags::empty(), LayoutPoint::new(x, y));
         let Some(result) = result.items.first() else {
             return document_element;
         };
@@ -247,7 +248,8 @@ impl DocumentOrShadowRoot {
         // box, that would be a target for hit testing at coordinates x,y even if nothing
         // would be overlapping it, when applying the transforms that apply to the
         // descendants of the viewport, append the associated element to sequence.
-        let result = window.elements_from_point_query(HitTestFlags::empty(), LayoutPoint::new(x, y));
+        let result =
+            window.elements_from_point_query(HitTestFlags::empty(), LayoutPoint::new(x, y));
 
         let mut elements: Vec<_> = result
             .items
@@ -274,8 +276,8 @@ impl DocumentOrShadowRoot {
 
         // Step 4: If the document has a root element, and the last item in sequence is
         // not the root element, append the root element to sequence.
-        if let Some(root_element) = document_element &&
-            elements.last() != Some(&root_element)
+        if let Some(root_element) = document_element
+            && elements.last() != Some(&root_element)
         {
             elements.push(root_element);
         }
@@ -536,7 +538,9 @@ impl AdoptedStyleSheets {
         owner: &StyleSheetListOwner,
         value: HandleValue,
     ) -> ErrorResult {
-        match Vec::<DomRoot<CSSStyleSheet>>::from_jsval(cx, value, ()).map_err(|_| Error::JSFailed)? {
+        match Vec::<DomRoot<CSSStyleSheet>>::from_jsval(cx, value, ())
+            .map_err(|_| Error::JSFailed)?
+        {
             ConversionResult::Success(sheets) => self.replace(cx, owner, sheets),
             ConversionResult::Failure(msg) => Err(Error::Type(msg.into_owned())),
         }
@@ -665,7 +669,7 @@ impl AdoptedStyleSheets {
         result: *mut ObjectOpResult,
         rejection: JSErrNum,
     ) -> bool {
-        let Ok(number) = (unsafe { ToNumber(cx.raw_cx(), value) }) else {
+        let Ok(number) = (unsafe { ToNumber(cx, value) }) else {
             return false;
         };
         if number.fract() != 0.0 || !(0.0..=u32::MAX as f64).contains(&number) {
@@ -771,12 +775,12 @@ unsafe extern "C" fn adopted_stylesheets_define_property(
         // <https://webidl.spec.whatwg.org/#es-observable-array-defineProperty>
         // Indices and length only take writable, enumerable (for indices), configurable data
         // properties; anything else is rejected without a change.
-        if descriptor.hasGetter_() ||
-            descriptor.hasSetter_() ||
-            !descriptor.hasValue_() ||
-            (descriptor.hasConfigurable_() && !descriptor.configurable_()) ||
-            (descriptor.hasWritable_() && !descriptor.writable_()) ||
-            (index.is_some() && descriptor.hasEnumerable_() && !descriptor.enumerable_())
+        if descriptor.hasGetter_()
+            || descriptor.hasSetter_()
+            || !descriptor.hasValue_()
+            || (descriptor.hasConfigurable_() && !descriptor.configurable_())
+            || (descriptor.hasWritable_() && !descriptor.writable_())
+            || (index.is_some() && descriptor.hasEnumerable_() && !descriptor.enumerable_())
         {
             unsafe { (*res).code_ = rejection as ::libc::uintptr_t };
             return true;

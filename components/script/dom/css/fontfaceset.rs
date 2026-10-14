@@ -106,7 +106,7 @@ fn parse_font_for_matching(
             },
             PropertyDeclaration::FontFamily(family) => match family {
                 SpecifiedFontFamily::Values(list) => families = list.iter().cloned().collect(),
-                SpecifiedFontFamily::System(system) => match *system {},
+                SpecifiedFontFamily::System(_) => {},
             },
             PropertyDeclaration::FontWeight(weight) => {
                 descriptor.weight = match weight {
@@ -115,7 +115,7 @@ fn parse_font_for_matching(
                     },
                     SpecifiedFontWeight::Bolder => FontWeight::NORMAL.bolder(),
                     SpecifiedFontWeight::Lighter => FontWeight::NORMAL.lighter(),
-                    SpecifiedFontWeight::System(system) => match *system {},
+                    SpecifiedFontWeight::System(_) => FontWeight::NORMAL,
                 }
             },
             PropertyDeclaration::FontStyle(font_style) => {
@@ -124,17 +124,12 @@ fn parse_font_for_matching(
                         FontStyle::ITALIC
                     },
                     SpecifiedFontStyleProperty::Specified(GenericFontStyle::Oblique(angle)) => {
-                        FontStyle::oblique(
-                            angle
-                                .degrees()
-                                .ok_or(Error::Syntax(None))?
-                                .clamp(
-                                    FONT_STYLE_OBLIQUE_MIN_ANGLE_DEGREES,
-                                    FONT_STYLE_OBLIQUE_MAX_ANGLE_DEGREES,
-                                ),
-                        )
+                        FontStyle::oblique(angle.degrees().ok_or(Error::Syntax(None))?.clamp(
+                            FONT_STYLE_OBLIQUE_MIN_ANGLE_DEGREES,
+                            FONT_STYLE_OBLIQUE_MAX_ANGLE_DEGREES,
+                        ))
                     },
-                    SpecifiedFontStyleProperty::System(system) => match *system {},
+                    SpecifiedFontStyleProperty::System(_) => FontStyle::NORMAL,
                 }
             },
             PropertyDeclaration::FontWidth(width) => {
@@ -143,7 +138,7 @@ fn parse_font_for_matching(
                     SpecifiedFontWidth::Width(percentage) => FontWidth::from_percentage(
                         percentage.compute().ok_or(Error::Syntax(None))?.0,
                     ),
-                    SpecifiedFontWidth::System(system) => match *system {},
+                    SpecifiedFontWidth::System(_) => FontWidth::NORMAL,
                 }
             },
             _ => {},
@@ -324,7 +319,7 @@ impl FontFaceSet {
             .set_entries
             .borrow()
             .iter()
-            .filter(|face| face.take_font_matching_load_request(font_context))
+            .filter(|face| face.take_font_matching_load_request(&font_context))
             .map(|face| face.as_rooted())
             .collect();
         for face in requested {
@@ -519,12 +514,7 @@ impl FontFaceSetMethods<crate::DomTypeHolder> for FontFaceSet {
                     .iter()
                     .map(|promise| promise.root(cx))
                     .collect();
-                resolve_with_all_status_promises(
-                    cx,
-                    &global,
-                    &self.load_promise,
-                    status_promises,
-                );
+                resolve_with_all_status_promises(cx, &global, &self.load_promise, status_promises);
             }
         }
 
@@ -638,8 +628,8 @@ impl FontFaceSetMethods<crate::DomTypeHolder> for FontFaceSet {
         Ok(matching
             .font_faces
             .iter()
-            .all(|face| face.is_css_connected() || face.Status() == FontFaceLoadStatus::Loaded) &&
-            !matching
+            .all(|face| face.is_css_connected() || face.Status() == FontFaceLoadStatus::Loaded)
+            && !matching
                 .family_names
                 .iter()
                 .any(|family_name| font_context.is_loading_stylesheet_web_font(family_name)))

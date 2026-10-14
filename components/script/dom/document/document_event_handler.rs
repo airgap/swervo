@@ -119,9 +119,9 @@ impl ClickCountingInfo {
         // Calculate distance between this click and the previous click.
         let line = point_in_frame - previous_point;
         let distance = (line.dot(line) as f64).sqrt();
-        if previous_button != button ||
-            Instant::now().duration_since(previous_time) > double_click_timeout ||
-            distance > double_click_distance_threshold as f64
+        if previous_button != button
+            || Instant::now().duration_since(previous_time) > double_click_timeout
+            || distance > double_click_distance_threshold as f64
         {
             self.reset_click_count();
         }
@@ -216,12 +216,6 @@ pub(crate) struct DocumentEventHandler {
     /// Map from pointer ID to the actual/current pointer capture target.
     /// Updated during process_pending_pointer_capture when events are dispatched.
     pointer_capture_target: DomRefCell<FxHashMap<i32, Dom<Element>>>,
-    /// A native widget being dragged with the primary button (the thumb of an
-    /// `<input type=range>`). Like Chrome's mouse-capturing node, it receives the mouse
-    /// and pointer move and up events until the button is released, so the drag keeps
-    /// tracking when the cursor leaves the widget. Unlike `setPointerCapture`, this does
-    /// not fire `gotpointercapture`/`lostpointercapture`.
-    widget_mouse_capture_target: MutNullableDom<Element>,
     /// <https://html.spec.whatwg.org/multipage/#drag-and-drop-processing-model>
     drag_and_drop: DragAndDrop,
     /// The current drag gesture, if one exists. Events that affect this drag
@@ -254,15 +248,9 @@ impl DocumentEventHandler {
             access_key_handlers: Default::default(),
             pending_pointer_capture: Default::default(),
             pointer_capture_target: Default::default(),
-            widget_mouse_capture_target: Default::default(),
             drag_and_drop: DragAndDrop::new(),
             drag_gesture: Default::default(),
         }
-    }
-
-    /// Route mouse moves and the next mouseup to `element` until the button is released.
-    pub(crate) fn set_widget_mouse_capture(&self, element: &Element) {
-        self.widget_mouse_capture_target.set(Some(element));
     }
 
     /// Note a pending input event, to be processed at the next `update_the_rendering` task.
@@ -290,10 +278,10 @@ impl DocumentEventHandler {
             if let Some(existing_constellation_wheel_event) = self
                 .wheel_event_index
                 .borrow()
-                .and_then(|index| pending_input_events.get_mut(index)) &&
-                let InputEvent::Wheel(ref mut existing_wheel_event) =
-                    existing_constellation_wheel_event.event.event &&
-                existing_wheel_event.delta.mode == new_wheel_event.delta.mode
+                .and_then(|index| pending_input_events.get_mut(index))
+                && let InputEvent::Wheel(ref mut existing_wheel_event) =
+                    existing_constellation_wheel_event.event.event
+                && existing_wheel_event.delta.mode == new_wheel_event.delta.mode
             {
                 self.coalesced_wheel_event_ids
                     .borrow_mut()
@@ -355,9 +343,9 @@ impl DocumentEventHandler {
             mem::take(&mut *self.coalesced_wheel_event_ids.safe_borrow_mut(cx.no_gc()));
 
         let mut input_event_outcomes = Vec::with_capacity(
-            pending_input_events.len() +
-                coalesced_mouse_move_event_ids.len() +
-                coalesced_wheel_event_ids.len(),
+            pending_input_events.len()
+                + coalesced_mouse_move_event_ids.len()
+                + coalesced_wheel_event_ids.len(),
         );
         // TODO: For some of these we still aren't properly calculating whether or not
         // the event was handled or if `preventDefault()` was called on it. Each of
@@ -675,8 +663,8 @@ impl DocumentEventHandler {
         // First check if the capture target is disconnected and release it if so.
         // This must happen before any pointer event fires.
         let pointer_id = PointerId::Mouse as i32;
-        let released_disconnected = !is_compatibility_event_for_touch &&
-            self.release_disconnected_pointer_capture(cx, pointer_id, "mouse", true);
+        let released_disconnected = !is_compatibility_event_for_touch
+            && self.release_disconnected_pointer_capture(cx, pointer_id, "mouse", true);
 
         let hit_test_flags = if self
             .drag_gesture
@@ -714,8 +702,8 @@ impl DocumentEventHandler {
             .replace(Some(hit_test_result.point_in_frame));
         // Always dispatch compatibility `mousemove` events, even at the same
         // point as the previous one.
-        if !is_compatibility_event_for_touch &&
-            old_mouse_move_point == Some(hit_test_result.point_in_frame)
+        if !is_compatibility_event_for_touch
+            && old_mouse_move_point == Some(hit_test_result.point_in_frame)
         {
             return;
         }
@@ -756,8 +744,8 @@ impl DocumentEventHandler {
             return;
         };
 
-        let capture_is_active = !is_compatibility_event_for_touch &&
-            self.get_pointer_capture_target(pointer_id).is_some();
+        let capture_is_active = !is_compatibility_event_for_touch
+            && self.get_pointer_capture_target(pointer_id).is_some();
         let old_hover_target = self.current_hover_target.get();
         let target_has_changed = old_hover_target
             .as_ref()
@@ -824,7 +812,6 @@ impl DocumentEventHandler {
             None
         } else {
             self.get_pointer_capture_target(pointer_id)
-                .or_else(|| self.widget_mouse_capture_target.get())
         }
         .map(DomRoot::upcast::<EventTarget>)
         .unwrap_or_else(|| DomRoot::from_ref(new_target.upcast::<EventTarget>()));
@@ -895,8 +882,8 @@ impl DocumentEventHandler {
 
         // If the new hover target is an anchor with a status value, inform the embedder
         // of the new value.
-        if let Some(target) = self.current_hover_target.get() &&
-            let Some(anchor) = target
+        if let Some(target) = self.current_hover_target.get()
+            && let Some(anchor) = target
                 .upcast::<Node>()
                 .inclusive_ancestors(ShadowIncluding::Yes)
                 .find_map(DomRoot::downcast::<HTMLAnchorElement>)
@@ -942,15 +929,15 @@ impl DocumentEventHandler {
     fn set_active_element(&self, no_gc: &NoGC, original_target: &Element) {
         let find_element_for_activation = |element: &Element| {
             let node: &Node = element.upcast();
-            if node.is_in_ua_widget() &&
-                let Some(containing_shadow_root) = node.containing_shadow_root()
+            if node.is_in_ua_widget()
+                && let Some(containing_shadow_root) = node.containing_shadow_root()
             {
                 return containing_shadow_root.Host();
             }
 
             // If the element is a label, the activable element is the control element.
-            if node.type_id() ==
-                NodeTypeId::Element(ElementTypeId::HTMLElement(
+            if node.type_id()
+                == NodeTypeId::Element(ElementTypeId::HTMLElement(
                     HTMLElementTypeId::HTMLLabelElement,
                 ))
             {
@@ -997,8 +984,8 @@ impl DocumentEventHandler {
         // A drag swallows the button events that happen during it, including the release that
         // drops, so neither mouseup nor click fire for the press that started the drag.
         if self.drag_and_drop.is_dragging() {
-            if mouse_button_event.button == MouseButton::Primary &&
-                mouse_button_event.action == MouseButtonAction::Up
+            if mouse_button_event.button == MouseButton::Primary
+                && mouse_button_event.action == MouseButtonAction::Up
             {
                 self.end_drag_for_primary_button_release(cx);
             }
@@ -1015,8 +1002,8 @@ impl DocumentEventHandler {
             }
         }
 
-        let flags = if input_event.primary_button_is_pressed() ||
-            input_event.auxiliary_button_is_pressed()
+        let flags = if input_event.primary_button_is_pressed()
+            || input_event.auxiliary_button_is_pressed()
         {
             HitTestFlags::IncludeDomPosition
         } else {
@@ -1150,8 +1137,8 @@ impl DocumentEventHandler {
                         pointer_event.upcast::<Event>().fire(cx, &pointer_target);
                     // <https://html.spec.whatwg.org/multipage/#run-light-dismiss-activities> for
                     // pointerdown and pointerup closes popovers and dialogs clicked outside of.
-                    if entering_active_buttons_state &&
-                        let Some(target) = pointer_target.downcast::<Node>()
+                    if entering_active_buttons_state
+                        && let Some(target) = pointer_target.downcast::<Node>()
                     {
                         document.top_layer().run_light_dismiss_activities(
                             cx,
@@ -1187,9 +1174,9 @@ impl DocumentEventHandler {
                 // If neither the `mousedown` nor the `pointerdown` event had `preventDefault()`
                 // called on them, call the default mousdown handler on retargeted node
                 // (`mouse_event.target` is mutated by `dispatch` above).
-                if result &&
-                    pointer_event_result &&
-                    let Some(node) = mouse_event
+                if result
+                    && pointer_event_result
+                    && let Some(node) = mouse_event
                         .upcast::<Event>()
                         .GetTarget()
                         .and_then(DomRoot::downcast::<Node>)
@@ -1221,15 +1208,6 @@ impl DocumentEventHandler {
                     self.drag_and_drop.clear_drag_candidate();
                 }
 
-                // A native widget dragged with the primary button (the thumb of an
-                // `<input type=range>`) receives the mouseup that ends the drag.
-                let widget_capture_target =
-                    if self.mouse_button_state.get().exactly_one_button_pressed() {
-                        self.widget_mouse_capture_target.take()
-                    } else {
-                        self.widget_mouse_capture_target.get()
-                    };
-
                 if !is_compatibility_event_for_touch {
                     // Step 6. Dispatch pointerup event.
                     let mouse_button_state = self.mouse_button_state.get();
@@ -1260,7 +1238,6 @@ impl DocumentEventHandler {
                     // Get the current capture target (before any state changes)
                     let pointer_target = self
                         .get_pointer_capture_target(pointer_id)
-                        .or_else(|| widget_capture_target.clone())
                         .map(DomRoot::upcast::<EventTarget>)
                         .unwrap_or_else(|| DomRoot::from_ref(node.upcast::<EventTarget>()));
 
@@ -1295,12 +1272,9 @@ impl DocumentEventHandler {
                 }
 
                 // Step 7. dispatch event at target.
-                let mouse_up_target = widget_capture_target
-                    .as_deref()
-                    .map_or(node, |element| element.upcast::<Node>());
                 mouse_event
                     .upcast::<Event>()
-                    .dispatch(cx, mouse_up_target.upcast(), false);
+                    .dispatch(cx, node.upcast(), false);
 
                 // Click counts should still work for other buttons even though they
                 // do not trigger "click" and "dblclick" events, so we increment
@@ -1738,19 +1712,19 @@ impl DocumentEventHandler {
         let flags = dom_event.flags();
 
         // `preventDefault()` on `touchstart` or `touchend` suppresses compat mouse events.
-        if flags.contains(EventFlags::Canceled) &&
-            matches!(event.event_type, TouchEventType::Down | TouchEventType::Up)
+        if flags.contains(EventFlags::Canceled)
+            && matches!(event.event_type, TouchEventType::Down | TouchEventType::Up)
         {
             self.touch_sequence_click_allowed.set(false);
         }
 
         // Generate the compatibility mouse events synchronously as part of
         // `touchend`, before the embedder is told the touch event was handled.
-        let synthesizes_mouse_events = matches!(event.event_type, TouchEventType::Up) &&
-            event.can_synthesize_mouse_events &&
-            self.touch_sequence_click_allowed.get() &&
-            !flags.contains(EventFlags::Canceled) &&
-            self.active_touch_points.borrow().is_empty();
+        let synthesizes_mouse_events = matches!(event.event_type, TouchEventType::Up)
+            && event.can_synthesize_mouse_events
+            && self.touch_sequence_click_allowed.get()
+            && !flags.contains(EventFlags::Canceled)
+            && self.active_touch_points.borrow().is_empty();
 
         if synthesizes_mouse_events {
             self.synthesize_compatibility_mouse_events(cx, &event, input_event);
@@ -1848,8 +1822,8 @@ impl DocumentEventHandler {
         // Like the platform drag sessions other browsers run, a drag takes the keyboard:
         // Escape cancels it and no key reaches the page.
         if self.drag_and_drop.is_dragging() {
-            if keyboard_event.event.state == KeyState::Down &&
-                keyboard_event.event.key == Key::Named(NamedKey::Escape)
+            if keyboard_event.event.state == KeyState::Down
+                && keyboard_event.event.key == Key::Named(NamedKey::Escape)
             {
                 self.drag_and_drop.cancel(cx, &self.window);
             }
@@ -1998,13 +1972,14 @@ impl DocumentEventHandler {
         // `invoke` in event.rs), so they can cancel them as well.
         let legacy_event_type: Atom = "mousewheel".into();
         let has_non_passive_listener = |target: &EventTarget| {
-            target.has_non_passive_listener(&event_type) ||
-                target.has_non_passive_listener(&legacy_event_type)
+            target.has_non_passive_listener(&event_type)
+                || target.has_non_passive_listener(&legacy_event_type)
         };
 
         let cancelable = EventCancelable::from(
-            has_non_passive_listener(self.window.upcast::<EventTarget>()) ||
-                node.inclusive_ancestors(ShadowIncluding::Yes)
+            has_non_passive_listener(self.window.upcast::<EventTarget>())
+                || node
+                    .inclusive_ancestors(ShadowIncluding::Yes)
                     .any(|target| has_non_passive_listener(target.upcast::<EventTarget>())),
         );
         // https://w3c.github.io/uievents/#event-wheelevents
@@ -2336,8 +2311,9 @@ impl DocumentEventHandler {
         if node
             .downcast::<Element>()
             .and_then(Element::as_maybe_activatable)
-            .is_none() ||
-            node.downcast::<HTMLInputElement>()
+            .is_none()
+            || node
+                .downcast::<HTMLInputElement>()
                 .is_some_and(|input| input.is_textual_or_password())
         {
             return;
@@ -2372,8 +2348,8 @@ impl DocumentEventHandler {
         }
 
         // A space typed into an editing host is text, not a request to scroll.
-        if node.editing_host_of().is_some() &&
-            matches!(&event.key, Key::Character(string) if string == " ")
+        if node.editing_host_of().is_some()
+            && matches!(&event.key, Key::Character(string) if string == " ")
         {
             return input_event_result;
         }
@@ -2516,8 +2492,7 @@ impl DocumentEventHandler {
             return;
         }
 
-        let (current_scroll_offset, delta) =
-            calculate_current_scroll_offset_and_delta(cx.no_gc());
+        let (current_scroll_offset, delta) = calculate_current_scroll_offset_and_delta(cx.no_gc());
         scrolling_box.scroll_to(cx, delta + current_scroll_offset, ScrollBehavior::Auto);
     }
 
@@ -2763,8 +2738,8 @@ impl DocumentEventHandler {
             .borrow()
             .get(&pointer_id)
             .map(|el| DomRoot::from_ref(&**el));
-        if let Some(capture_element) = capture_target &&
-            !capture_element.upcast::<Node>().is_connected()
+        if let Some(capture_element) = capture_target
+            && !capture_element.upcast::<Node>().is_connected()
         {
             // Fire lostpointercapture at the document, not the disconnected element.
             let document = self.window.Document();
@@ -3176,9 +3151,9 @@ fn keyboard_event_fires_keypress_event(keyboard_event: &EmbedderKeyboardEvent) -
         keyboard_event.event.key,
         Key::Character(_) | Key::Named(NamedKey::Enter)
     );
-    keyboard_event.event.state == KeyState::Down &&
-        is_character_value_key &&
-        !keyboard_event.event.is_composing
+    keyboard_event.event.state == KeyState::Down
+        && is_character_value_key
+        && !keyboard_event.event.is_composing
 }
 
 pub(crate) fn character_to_code(character: char) -> Option<Code> {

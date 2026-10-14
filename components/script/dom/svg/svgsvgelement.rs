@@ -60,6 +60,7 @@ pub(crate) struct SVGSVGElement {
     cached_serialized_data_url: AtomicRefCell<Option<Result<ServoUrl, ()>>>,
     /// The `svg_paint_signature` of this element's style that the cached serialization was
     /// built with; layout re-requests serialization when the current style no longer matches.
+    #[no_trace]
     cached_paint_signature: AtomicRefCell<Option<String>>,
     /// The IDs the cached serialization looked up in the document to inline targets defined
     /// outside this subtree, found or not; registered with the document so that the
@@ -181,9 +182,9 @@ impl SVGSVGElement {
         let root_node = self.upcast::<Node>();
 
         for node in root_node.traverse_preorder(ShadowIncluding::No) {
-            if let Some(element) = node.downcast::<Element>() &&
-                element.local_name() == &local_name!("use") &&
-                let Some(cloned) =
+            if let Some(element) = node.downcast::<Element>()
+                && element.local_name() == &local_name!("use")
+                && let Some(cloned) =
                     self.process_single_use_element(cx, element, referenced_ids, href_rewrites)
             {
                 cloned_nodes.push(cloned);
@@ -359,9 +360,12 @@ impl SVGSVGElement {
                 if let Some(style) = element.style_from_last_restyle() {
                     let inherited_svg = style.get_inherited_svg();
                     referenced_ids.extend(
-                        [inherited_svg.clone_fill(), inherited_svg.clone_stroke()]
-                            .iter()
-                            .filter_map(paint_server_id),
+                        [
+                            inherited_svg.slow_clone_fill(),
+                            inherited_svg.slow_clone_stroke(),
+                        ]
+                        .iter()
+                        .filter_map(paint_server_id),
                     );
                 }
                 // A gradient or pattern takes its unspecified attributes and its stops or
@@ -369,9 +373,9 @@ impl SVGSVGElement {
                 // <https://svgwg.org/svg2-draft/pservers.html#LinearGradientElementHrefAttribute>
                 if matches!(
                     *element.local_name(),
-                    local_name!("linearGradient") |
-                        local_name!("radialGradient") |
-                        local_name!("pattern")
+                    local_name!("linearGradient")
+                        | local_name!("radialGradient")
+                        | local_name!("pattern")
                 ) {
                     let href = element.get_string_attribute(&local_name!("href"));
                     let effective_href = if href.str().is_empty() {
@@ -631,8 +635,9 @@ impl SVGSVGElement {
                     return None;
                 }
                 image_element = Some(DomRoot::from_ref(image));
-            } else if node.is::<Text>() &&
-                node.GetTextContent()
+            } else if node.is::<Text>()
+                && node
+                    .GetTextContent()
                     .is_some_and(|text| !text.str().trim().is_empty())
             {
                 return None;
@@ -747,8 +752,8 @@ impl SVGSVGElement {
             attributes
                 .retain(|(name, _)| name.ns != ns!(xlink) || name.local != local_name!("href"));
         }
-        if let Some(image) = element.downcast::<SVGImageElement>() &&
-            let Some((href, preserve_aspect_ratio)) = self.embedded_image_attributes(image)
+        if let Some(image) = element.downcast::<SVGImageElement>()
+            && let Some((href, preserve_aspect_ratio)) = self.embedded_image_attributes(image)
         {
             attributes.retain(|(name, _)| {
                 let is_href =
@@ -774,17 +779,17 @@ impl SVGSVGElement {
         // `width`/`height` made that size wrong whenever CSS overrode one of them: `width="50"`
         // without `height` reads as 50x100 to the rasterizer (the missing height defaults to
         // 100%), so the icon was fitted into its box at half size.
-        if std::ptr::eq(element, self.upcast::<Element>()) &&
-            element
+        if std::ptr::eq(element, self.upcast::<Element>())
+            && element
                 .get_attribute_string_value_with_namespace(&ns!(), &local_name!("viewBox"))
                 .is_some_and(|view_box| parse_view_box(&view_box).is_some())
         {
             attributes.retain(|(name, _)| {
-                name.ns != ns!() ||
-                    (name.local != local_name!("width") && name.local != local_name!("height"))
+                name.ns != ns!()
+                    || (name.local != local_name!("width") && name.local != local_name!("height"))
             });
-        } else if std::ptr::eq(element, self.upcast::<Element>()) &&
-            let Some(style) = element.style_from_last_restyle()
+        } else if std::ptr::eq(element, self.upcast::<Element>())
+            && let Some(style) = element.style_from_last_restyle()
         {
             // Without a viewBox the rasterizer resolves percentages in the content (a `<use>`'s
             // default `100%` size, GitLab's CSS-sized sprite icons) against its 100x100
@@ -827,9 +832,9 @@ impl SVGSVGElement {
                     .split(';')
                     .map(str::trim)
                     .filter(|declaration| {
-                        !declaration.is_empty() &&
-                            !declaration.starts_with("--") &&
-                            !declaration.contains("var(")
+                        !declaration.is_empty()
+                            && !declaration.starts_with("--")
+                            && !declaration.contains("var(")
                     })
                     .chain(std::iter::once(declarations.as_str()))
                     .collect();
@@ -934,7 +939,7 @@ impl SVGSVGElement {
             .and_then(|color| color.to_computed_color(None).ok())
         {
             Some(color) => {
-                rasterizer_paint_color(&color, &style.get_inherited_text().clone_color())
+                rasterizer_paint_color(&color, &style.get_inherited_text().slow_clone_color())
             },
             None => text.to_owned(),
         }
@@ -1031,8 +1036,8 @@ fn serialize_reference_closure(cx: &mut JSContext, subtree: &Node) -> String {
             } else {
                 href.to_string()
             };
-            if let Some(id) = effective_href.strip_prefix('#') &&
-                !id.is_empty()
+            if let Some(id) = effective_href.strip_prefix('#')
+                && !id.is_empty()
             {
                 referenced_ids.push(id.to_owned());
             }
@@ -1069,21 +1074,22 @@ fn serialize_reference_closure(cx: &mut JSContext, subtree: &Node) -> String {
 /// `currentcolor` keeps the `currentColor` spelling resvg requires, so it keeps tracking `color`,
 /// and paint-server urls become in-document `url(#id)` references.
 fn rasterizer_value(style: &ComputedValues, property: LonghandId) -> String {
-    let current_color = style.get_inherited_text().clone_color();
+    let current_color = style.get_inherited_text().slow_clone_color();
     match property {
         LonghandId::Color => rasterizer_color(&current_color),
         LonghandId::StopColor => rasterizer_color(
             &style
                 .get_svg()
-                .clone_stop_color()
+                .slow_clone_stop_color()
                 .resolve_to_absolute(&current_color),
         ),
         LonghandId::Fill => {
-            rasterizer_paint(&style.get_inherited_svg().clone_fill(), &current_color)
+            rasterizer_paint(&style.get_inherited_svg().slow_clone_fill(), &current_color)
         },
-        LonghandId::Stroke => {
-            rasterizer_paint(&style.get_inherited_svg().clone_stroke(), &current_color)
-        },
+        LonghandId::Stroke => rasterizer_paint(
+            &style.get_inherited_svg().slow_clone_stroke(),
+            &current_color,
+        ),
         _ => {
             let mut value = String::new();
             style

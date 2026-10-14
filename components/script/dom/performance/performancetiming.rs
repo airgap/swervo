@@ -48,7 +48,7 @@ impl PerformanceTiming {
                 .navigation_timing()
                 .navigation_start
                 .get()
-                .or_else(|| Some(window.Performance().time_origin()))
+                .or_else(|| Some(window.navigation_start()))
         } else {
             document
                 .performance_timing_attribute(name)

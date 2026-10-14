@@ -8,7 +8,7 @@ use std::iter;
 use dom_struct::dom_struct;
 use embedder_traits::{EmbedderControlRequest, SelectElementRequest};
 use embedder_traits::{SelectElementOption, SelectElementOptionOrOptgroup};
-use html5ever::{local_name, LocalName, Prefix};
+use html5ever::{LocalName, Prefix, local_name};
 use js::context::{JSContext, NoGC};
 use js::rust::HandleObject;
 use keyboard_types::{Key, Modifiers, NamedKey};
@@ -282,8 +282,8 @@ impl HTMLSelectElement {
 
         if let Some(last_selected) = last_selected {
             last_selected.set_selectedness(no_gc, true);
-        } else if self.display_size() == 1 &&
-            let Some(first_enabled) = first_enabled
+        } else if self.display_size() == 1
+            && let Some(first_enabled) = first_enabled
         {
             first_enabled.set_selectedness(no_gc, true);
         }
@@ -466,9 +466,9 @@ impl HTMLSelectElement {
         option: &HTMLOptionElement,
         mouse_event: &MouseEvent,
     ) {
-        if mouse_event.Button() != 0 ||
-            !self.is_list_box() ||
-            self.upcast::<Element>().disabled_state()
+        if mouse_event.Button() != 0
+            || !self.is_list_box()
+            || self.upcast::<Element>().disabled_state()
         {
             return;
         }
@@ -483,8 +483,8 @@ impl HTMLSelectElement {
     /// The arrow keys, Home and End move the selection of a focused list box; with `multiple`,
     /// Shift extends it from the anchor. Returns whether the key was consumed.
     fn handle_list_box_keydown(&self, cx: &mut JSContext, event: &KeyboardEvent) -> bool {
-        if !self.is_list_box() ||
-            event
+        if !self.is_list_box()
+            || event
                 .modifiers()
                 .intersects(Modifiers::CONTROL | Modifiers::ALT | Modifiers::META)
         {
@@ -510,10 +510,10 @@ impl HTMLSelectElement {
         let target = match (event.key(), current) {
             (Key::Named(NamedKey::ArrowDown), Some(current)) => (current + 1).min(last),
             (Key::Named(NamedKey::ArrowUp), Some(current)) => current.saturating_sub(1),
-            (Key::Named(NamedKey::ArrowDown | NamedKey::Home), None) |
-            (Key::Named(NamedKey::Home), Some(_)) => 0,
-            (Key::Named(NamedKey::ArrowUp | NamedKey::End), None) |
-            (Key::Named(NamedKey::End), Some(_)) => last,
+            (Key::Named(NamedKey::ArrowDown | NamedKey::Home), None)
+            | (Key::Named(NamedKey::Home), Some(_)) => 0,
+            (Key::Named(NamedKey::ArrowUp | NamedKey::End), None)
+            | (Key::Named(NamedKey::End), Some(_)) => last,
             _ => return false,
         };
         let Some(target) = options.get(target) else {
@@ -565,7 +565,7 @@ impl HTMLSelectElement {
                 _ => in_range,
             };
             if candidate.Selected() != should_be_selected {
-                candidate.set_selectedness(should_be_selected);
+                candidate.set_selectedness(cx.no_gc(), should_be_selected);
                 candidate.set_dirtiness(true);
                 selection_did_change = true;
             }
@@ -723,8 +723,8 @@ impl HTMLSelectElement {
 
             if let Some(first_selected) = first_selected {
                 first_selected.set_selectedness(cx.no_gc(), true);
-            } else if self.display_size() == 1 &&
-                let Some(first_enabled) = first_enabled
+            } else if self.display_size() == 1
+                && let Some(first_enabled) = first_enabled
             {
                 first_enabled.set_selectedness(cx.no_gc(), true);
             }
@@ -1119,16 +1119,16 @@ impl VirtualMethods for HTMLSelectElement {
     }
 
     fn handle_event(&self, cx: &mut js::context::JSContext, event: &Event) {
-        if event.type_() == atom!("keydown") &&
-            !event.DefaultPrevented() &&
-            let Some(keyboard_event) = event.downcast::<KeyboardEvent>() &&
-            self.handle_list_box_keydown(cx, keyboard_event)
+        if event.type_() == atom!("keydown")
+            && !event.DefaultPrevented()
+            && let Some(keyboard_event) = event.downcast::<KeyboardEvent>()
+            && self.handle_list_box_keydown(cx, keyboard_event)
         {
             event.mark_as_handled();
         }
         self.super_type().unwrap().handle_event(cx, event);
-        if let Some(event) = event.downcast::<FocusEvent>() &&
-            *event.upcast::<Event>().type_() != *"blur"
+        if let Some(event) = event.downcast::<FocusEvent>()
+            && *event.upcast::<Event>().type_() != *"blur"
         {
             self.owner_document()
                 .embedder_controls()
@@ -1164,8 +1164,8 @@ impl Validatable for HTMLSelectElement {
     fn is_instance_validatable(&self, no_gc: &NoGC) -> bool {
         // https://html.spec.whatwg.org/multipage/#enabling-and-disabling-form-controls%3A-the-disabled-attribute%3Abarred-from-constraint-validation
         // https://html.spec.whatwg.org/multipage/#the-datalist-element%3Abarred-from-constraint-validation
-        !self.upcast::<Element>().disabled_state() &&
-            !is_barred_by_datalist_ancestor(no_gc, self.upcast())
+        !self.upcast::<Element>().disabled_state()
+            && !is_barred_by_datalist_ancestor(no_gc, self.upcast())
     }
 
     fn perform_validation(
@@ -1180,8 +1180,8 @@ impl Validatable for HTMLSelectElement {
         if validate_flags.contains(ValidationFlags::VALUE_MISSING) && self.Required() {
             let placeholder = self.get_placeholder_label_option(cx.no_gc());
             let is_value_missing = !self.list_of_options(cx.no_gc()).any(|e| {
-                e.Selected() &&
-                    placeholder
+                e.Selected()
+                    && placeholder
                         .as_ref()
                         .map(|placeholder| **placeholder != **e)
                         .unwrap_or(true)

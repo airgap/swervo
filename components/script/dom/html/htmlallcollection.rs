@@ -5,7 +5,7 @@
 use dom_struct::dom_struct;
 use html5ever::{LocalName, local_name, ns};
 use js::context::{JSContext, NoGC};
-use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
+use script_bindings::reflector::{Reflector, reflect_dom_object};
 use stylo_atoms::Atom;
 
 use crate::dom::bindings::codegen::Bindings::HTMLAllCollectionBinding::HTMLAllCollectionMethods;
@@ -34,23 +34,23 @@ pub(crate) struct HTMLAllCollection {
 
 /// <https://html.spec.whatwg.org/multipage/#all-named-elements>
 fn is_all_named_element(element: &Element) -> bool {
-    *element.namespace() == ns!(html) &&
-        matches!(
+    *element.namespace() == ns!(html)
+        && matches!(
             *element.local_name(),
-            local_name!("a") |
-                local_name!("button") |
-                local_name!("embed") |
-                local_name!("form") |
-                local_name!("frame") |
-                local_name!("frameset") |
-                local_name!("iframe") |
-                local_name!("img") |
-                local_name!("input") |
-                local_name!("map") |
-                local_name!("meta") |
-                local_name!("object") |
-                local_name!("select") |
-                local_name!("textarea")
+            local_name!("a")
+                | local_name!("button")
+                | local_name!("embed")
+                | local_name!("form")
+                | local_name!("frame")
+                | local_name!("frameset")
+                | local_name!("iframe")
+                | local_name!("img")
+                | local_name!("input")
+                | local_name!("map")
+                | local_name!("meta")
+                | local_name!("object")
+                | local_name!("select")
+                | local_name!("textarea")
         )
 }
 
@@ -64,9 +64,9 @@ struct AllNamedFilter {
 
 impl CollectionFilter for AllNamedFilter {
     fn filter(&self, element: &Element, _root: &Node) -> bool {
-        element.get_id().is_some_and(|id| id == self.name) ||
-            (is_all_named_element(element) &&
-                element.get_name().is_some_and(|name| name == self.name))
+        element.get_id().is_some_and(|id| id == self.name)
+            || (is_all_named_element(element)
+                && element.get_name().is_some_and(|name| name == self.name))
     }
 }
 
@@ -92,10 +92,10 @@ impl HTMLAllCollection {
     ) -> DomRoot<HTMLAllCollection> {
         let elements =
             HTMLCollection::by_qualified_name(cx, window, document.upcast(), LocalName::from("*"));
-        reflect_dom_object_with_cx(
+        reflect_dom_object(
+            cx,
             Box::new(HTMLAllCollection::new_inherited(&elements)),
             window,
-            cx,
         )
     }
 

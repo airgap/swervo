@@ -32,7 +32,6 @@ use crate::dom::html::htmlmediaelement::HTMLMediaElement;
 use crate::dom::media::sourcebuffer::SourceBuffer;
 use crate::dom::media::sourcebufferlist::SourceBufferList;
 use crate::dom::window::Window;
-use crate::script_runtime::CanGc;
 
 #[dom_struct]
 pub(crate) struct MediaSource {
@@ -62,20 +61,20 @@ impl MediaSource {
     }
 
     fn new_with_proto(
+        cx: &mut JSContext,
         global: &GlobalScope,
         proto: Option<HandleObject>,
-        can_gc: CanGc,
     ) -> DomRoot<MediaSource> {
-        let source_buffers = SourceBufferList::new(global, can_gc);
-        let active_source_buffers = SourceBufferList::new(global, can_gc);
+        let source_buffers = SourceBufferList::new(cx, global);
+        let active_source_buffers = SourceBufferList::new(cx, global);
         reflect_dom_object_with_proto(
+            cx,
             Box::new(MediaSource::new_inherited(
                 &source_buffers,
                 &active_source_buffers,
             )),
             global,
             proto,
-            can_gc,
         )
     }
 
@@ -128,11 +127,7 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         window: &Window,
         proto: Option<HandleObject>,
     ) -> Fallible<DomRoot<MediaSource>> {
-        Ok(MediaSource::new_with_proto(
-            &window.global(),
-            proto,
-            CanGc::from_cx(cx),
-        ))
+        Ok(MediaSource::new_with_proto(cx, &window.global(), proto))
     }
 
     fn SourceBuffers(&self) -> DomRoot<SourceBufferList> {
@@ -153,7 +148,11 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
     }
 
     /// <https://w3c.github.io/media-source/#dom-mediasource-addsourcebuffer>
-    fn AddSourceBuffer(&self, type_: DOMString) -> Fallible<DomRoot<SourceBuffer>> {
+    fn AddSourceBuffer(
+        &self,
+        cx: &mut JSContext,
+        type_: DOMString,
+    ) -> Fallible<DomRoot<SourceBuffer>> {
         // Step 1. If type is an empty string, throw a TypeError.
         if type_.is_empty() {
             return Err(Error::Type(
@@ -183,8 +182,7 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
                 warn!("MSE addSourceBuffer: {error:?}");
                 Error::NotSupported(None)
             })?;
-        let source_buffer =
-            SourceBuffer::new(&self.global(), self, stream, CanGc::deprecated_note());
+        let source_buffer = SourceBuffer::new(cx, &self.global(), self, stream);
         self.source_buffers.add(&source_buffer);
         Ok(source_buffer)
     }
@@ -199,8 +197,8 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         }
         // Steps 2-4. Transition to "ended" and signal end-of-stream to the player.
         self.ready_state.set(ReadyState::Ended);
-        if let Some(element) = self.media_element.get() &&
-            let Some(player) = element.get_player()
+        if let Some(element) = self.media_element.get()
+            && let Some(player) = element.get_player()
         {
             let _ = player.lock().unwrap().end_of_stream();
         }

@@ -14,7 +14,6 @@
 #![expect(unsafe_code)]
 
 use std::cell::RefCell;
-use std::marker::PhantomData;
 
 use html5ever::{LocalName, Namespace, local_name, ns};
 use js::context::NoGC;
@@ -35,7 +34,7 @@ use stylo_dom::ElementState;
 
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::root::{DomRoot, LayoutDom, LayoutFromRaw};
+use crate::dom::bindings::root::{Dom, DomRoot, ToLayout};
 use crate::dom::element::Element;
 use crate::dom::node::{ChildrenMutation, Node, NodeTraits};
 use crate::layout_dom::ServoDangerousStyleElement;
@@ -52,9 +51,9 @@ thread_local! {
 }
 
 fn note_invalidated_anchor(anchor: ServoDangerousStyleElement<'_>, result: &InvalidationResult) {
-    if !result.has_invalidated_self() &&
-        !result.has_invalidated_descendants() &&
-        !result.has_invalidated_siblings()
+    if !result.has_invalidated_self()
+        && !result.has_invalidated_descendants()
+        && !result.has_invalidated_siblings()
     {
         return;
     }
@@ -74,10 +73,9 @@ fn invalidator<'a, 'b, 'dom: 'a>(
     RelativeSelectorInvalidator {
         element,
         quirks_mode,
-        snapshot_table: None,
+        snapshots: None,
         invalidated: note_invalidated_anchor,
         sibling_traversal_map,
-        _marker: PhantomData,
     }
 }
 
@@ -131,7 +129,7 @@ impl Element {
             let layout = window.layout();
             with_layout_state(|| {
                 // Borrow the live element for the layout-only traversal; no script runs here.
-                let element = LayoutDom::from_raw(self);
+                let element = unsafe { Dom::from_ref(self).to_layout() };
                 invalidate(layout.stylist(), ServoDangerousStyleElement::from(element))
             });
         }
@@ -317,8 +315,8 @@ impl Element {
             // Inserting between two siblings can break a chain through them, as in
             // `.a:has(+ .b)` or `:has(.a + .b)`.
             if let (Some(prev_sibling), Some(next_sibling)) =
-                (element.prev_sibling_element(), next_sibling) &&
-                prev_sibling
+                (element.prev_sibling_element(), next_sibling)
+                && prev_sibling
                     .relative_selector_search_direction()
                     .intersects(ElementSelectorFlags::RELATIVE_SELECTOR_SEARCH_DIRECTION_SIBLING)
             {
@@ -384,8 +382,8 @@ impl Element {
             self.invalidate_relative_selectors_for_tree_structure(TSStateForInvalidation::EMPTY);
         }
         if flags.intersects(
-            ElementSelectorFlags::HAS_SLOW_SELECTOR_NTH |
-                ElementSelectorFlags::HAS_SLOW_SELECTOR_NTH_OF,
+            ElementSelectorFlags::HAS_SLOW_SELECTOR_NTH
+                | ElementSelectorFlags::HAS_SLOW_SELECTOR_NTH_OF,
         ) {
             let first_changed = if flags.intersects(ElementSelectorFlags::HAS_SLOW_SELECTOR) {
                 self.upcast::<Node>().GetFirstChild()
@@ -403,8 +401,8 @@ impl Element {
                     .invalidate_relative_selectors_for_tree_structure(TSStateForInvalidation::NTH);
             }
         }
-        if flags.intersects(ElementSelectorFlags::HAS_EDGE_CHILD_SELECTOR) &&
-            let Some(edge) = mutation
+        if flags.intersects(ElementSelectorFlags::HAS_EDGE_CHILD_SELECTOR)
+            && let Some(edge) = mutation
                 .modified_edge_element(no_gc)
                 .and_then(DomRoot::downcast::<Element>)
         {

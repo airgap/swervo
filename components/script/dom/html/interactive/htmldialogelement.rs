@@ -101,8 +101,8 @@ impl HTMLDialogElement {
     ) -> ErrorResult {
         let subject = self.upcast::<Element>();
         // Step 1. If subject has an open attribute and is modal of subject is true, then return.
-        if subject.has_attribute(&local_name!("open")) &&
-            subject.state().contains(ElementState::MODAL)
+        if subject.has_attribute(&local_name!("open"))
+            && subject.state().contains(ElementState::MODAL)
         {
             return Ok(());
         }
@@ -291,8 +291,8 @@ impl HTMLDialogElement {
                 .focused_area()
                 .dom_anchor(&document)
                 .traverse_preorder(ShadowIncluding::Yes)
-                .any(|node| &*node == subject_node) ||
-                was_modal
+                .any(|node| &*node == subject_node)
+                || was_modal
             {
                 element
                     .upcast::<Node>()
@@ -369,8 +369,8 @@ impl HTMLDialogElement {
         // > 1. If dialog's enable close watcher for request close is true, then return true.
         // > 2. If dialog's computed closed-by state is not None, then return true.
         // > 3. Return false.
-        self.enable_close_watcher_for_request_close.get() ||
-            self.computed_closed_by_state() != ClosedByState::None
+        self.enable_close_watcher_for_request_close.get()
+            || self.computed_closed_by_state() != ClosedByState::None
     }
 
     pub(crate) fn is_running_cancel_action(&self) -> bool {
@@ -573,8 +573,8 @@ impl HTMLDialogElementMethods<crate::DomTypeHolder> for HTMLDialogElement {
     fn Show(&self, cx: &mut js::context::JSContext) -> ErrorResult {
         let element = self.upcast::<Element>();
         // Step 1. If this has an open attribute and is modal of this is false, then return.
-        if element.has_attribute(&local_name!("open")) &&
-            !element.state().contains(ElementState::MODAL)
+        if element.has_attribute(&local_name!("open"))
+            && !element.state().contains(ElementState::MODAL)
         {
             return Ok(());
         }
@@ -703,8 +703,8 @@ impl VirtualMethods for HTMLDialogElement {
             AttributeMutation::Removed => self.run_dialog_cleanup_steps(),
             // > 5. If value is not null and oldValue is null, then run the dialog setup steps
             // >    given element.
-            AttributeMutation::Set(None, _) => self.run_dialog_setup_steps(),
-            AttributeMutation::Set(Some(_), _) => {},
+            AttributeMutation::Set(None) => self.run_dialog_setup_steps(),
+            AttributeMutation::Set(Some(_)) => {},
         }
     }
 
@@ -716,9 +716,9 @@ impl VirtualMethods for HTMLDialogElement {
         // > 1. If insertedNode's node document is not fully active, then return.
         // > 2. If insertedNode has an open attribute and is connected, then run the dialog setup
         // >    steps given insertedNode.
-        if context.tree_connected &&
-            self.owner_document().is_fully_active() &&
-            self.upcast::<Element>().has_attribute(&local_name!("open"))
+        if context.tree_connected
+            && self.owner_document().is_fully_active()
+            && self.upcast::<Element>().has_attribute(&local_name!("open"))
         {
             self.run_dialog_setup_steps();
         }

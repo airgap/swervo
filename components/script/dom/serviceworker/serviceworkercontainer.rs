@@ -46,7 +46,6 @@ pub(crate) struct ServiceWorkerContainer {
 
     /// The cached `ready` promise (one per container; resolved once a registration for this
     /// client has an active worker).
-    #[conditional_malloc_size_of]
     ready_promise: DomRefCell<Option<TracedPromise>>,
     /// The registration `ready` resolves with, once known (this engine activates immediately
     /// on install, so this is set when a register job resolves with an active worker).
@@ -465,8 +464,8 @@ impl ServiceWorkerContainerMethods<crate::DomTypeHolder> for ServiceWorkerContai
             },
         }
         // B: Step 4
-        if script_url.path().to_ascii_lowercase().contains("%2f") ||
-            script_url.path().to_ascii_lowercase().contains("%5c")
+        if script_url.path().to_ascii_lowercase().contains("%2f")
+            || script_url.path().to_ascii_lowercase().contains("%5c")
         {
             promise.reject_error(
                 realm,
@@ -487,8 +486,8 @@ impl ServiceWorkerContainerMethods<crate::DomTypeHolder> for ServiceWorkerContai
             },
         }
         // B: Step 7
-        if scope.path().to_ascii_lowercase().contains("%2f") ||
-            scope.path().to_ascii_lowercase().contains("%5c")
+        if scope.path().to_ascii_lowercase().contains("%2f")
+            || scope.path().to_ascii_lowercase().contains("%5c")
         {
             promise.reject_error(
                 realm,
@@ -613,10 +612,4 @@ impl ServiceWorkerContainerMethods<crate::DomTypeHolder> for ServiceWorkerContai
         // Step 9: Return promise.
         promise
     }
-
-    // <https://w3c.github.io/ServiceWorker/#dom-serviceworkercontainer-onmessage>
-    event_handler!(message, GetOnmessage, SetOnmessage);
-
-    // <https://w3c.github.io/ServiceWorker/#dom-serviceworkercontainer-onmessageerror>
-    event_handler!(messageerror, GetOnmessageerror, SetOnmessageerror);
 }

@@ -28,7 +28,6 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::media::mediasegmentparser::MediaSegmentParser;
 use crate::dom::media::mediasource::MediaSource;
 use crate::dom::timeranges::{TimeRanges, TimeRangesContainer};
-use crate::script_runtime::CanGc;
 
 #[dom_struct]
 pub(crate) struct SourceBuffer {
@@ -62,15 +61,15 @@ impl SourceBuffer {
     }
 
     pub(crate) fn new(
+        cx: &mut JSContext,
         global: &GlobalScope,
         media_source: &MediaSource,
         stream: usize,
-        can_gc: CanGc,
     ) -> DomRoot<SourceBuffer> {
         reflect_dom_object(
+            cx,
             Box::new(SourceBuffer::new_inherited(media_source, stream)),
             global,
-            can_gc,
         )
     }
 
@@ -101,9 +100,9 @@ impl SourceBuffer {
         self.segments
             .borrow_mut()
             .append(&bytes, self.timestamp_offset.get());
-        if let Some(element) = self.media_source.media_element() &&
-            let Some(player) = element.get_player() &&
-            let Err(error) = player
+        if let Some(element) = self.media_source.media_element()
+            && let Some(player) = element.get_player()
+            && let Err(error) = player
                 .lock()
                 .unwrap()
                 .push_source_buffer_data(self.stream, bytes)
@@ -128,8 +127,12 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
         }
         // Copy out the bytes to append.
         let bytes = match data {
-            ArrayBufferViewOrArrayBuffer::ArrayBufferView(view) => view.to_vec(),
-            ArrayBufferViewOrArrayBuffer::ArrayBuffer(buffer) => buffer.to_vec(),
+            ArrayBufferViewOrArrayBuffer::ArrayBufferView(view) => {
+                view.to_vec().unwrap_or_default()
+            },
+            ArrayBufferViewOrArrayBuffer::ArrayBuffer(buffer) => {
+                buffer.to_vec().unwrap_or_default()
+            },
         };
         // Step 5. Set updating to true and run the append asynchronously.
         self.updating.set(true);

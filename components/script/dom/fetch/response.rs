@@ -136,58 +136,6 @@ impl Response {
             .is_some_and(|stream| stream.is_locked())
     }
 
-    /// Build a `Response` from a stored Cache API entry
-    /// (<https://w3c.github.io/ServiceWorker/#cache-interface>): status/headers/url from the
-    /// entry, body as a fresh stream over the buffered bytes. The stored entry doesn't
-    /// round-trip `Response.type`; reconstructed responses read as `default`.
-    pub(crate) fn new_from_cache_api(
-        cx: &mut js::context::JSContext,
-        global: &GlobalScope,
-        stored: &storage_traits::cache_storage::CacheApiResponse,
-    ) -> DomRoot<Response> {
-        let response = Response::new(cx, global);
-        *response.status.borrow_mut() =
-            HttpStatus::new_raw(stored.status, stored.status_message.clone());
-
-        let mut headers = http::HeaderMap::new();
-        for (name, value) in &stored.headers {
-            if let (Ok(name), Ok(value)) = (
-                http::header::HeaderName::from_bytes(name.as_bytes()),
-                http::header::HeaderValue::from_bytes(value),
-            ) {
-                headers.append(name, value);
-            }
-        }
-        response.Headers(cx).set_headers(headers);
-        response.Headers(cx).set_guard(Guard::Response);
-
-        if let Some(url) = stored
-            .url
-            .as_ref()
-            .and_then(|url| ServoUrl::parse(url).ok())
-        {
-            *response.url.borrow_mut() = Some(url.clone());
-            response.url_list.borrow_mut().push(url);
-        }
-
-        match ReadableStream::new_from_bytes_with_byte_reading_support(
-            cx,
-            global,
-            stored.body.clone(),
-        ) {
-            Ok(stream) => {
-                response.body_stream.set(Some(&*stream));
-                response.fetch_body_stream.set(Some(&*stream));
-            },
-            Err(_) => {
-                response.body_stream.set(None);
-                response.fetch_body_stream.set(None);
-            },
-        }
-
-        response
-    }
-
     /// Snapshot the parts of this response the Cache API persists, minus the body (which
     /// `Cache.put` reads separately): (status, status message, headers, response url).
     pub(crate) fn cache_api_parts(&self, cx: &mut js::context::JSContext) -> CacheApiResponseParts {
@@ -530,8 +478,8 @@ fn initialize_response(
 
         // 6.3 If body’s type is non-null and response’s header list does not contain `Content-Type`,
         // then append (`Content-Type`, body’s type) to response’s header list.
-        if let Some(content_type_contents) = &body.content_type &&
-            !response
+        if let Some(content_type_contents) = &body.content_type
+            && !response
                 .Headers(cx)
                 .Has(ByteString::new(b"Content-Type".to_vec()))
                 .unwrap()
