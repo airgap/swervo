@@ -1061,7 +1061,8 @@ fn popover_target_element(cx: &JSContext, node: &Node) -> Option<DomRoot<HTMLEle
     let element = node.downcast::<Element>()?;
     let is_submit_button = if let Some(button) = node.downcast::<HTMLButtonElement>() {
         button.is_submit_button()
-    } else if let Some(input) = node.downcast::<HTMLInputElement>() {
+    } else {
+        let input = node.downcast::<HTMLInputElement>()?;
         if !matches!(
             *input.input_type(),
             InputType::Submit(_) | InputType::Reset(_) | InputType::Button(_) | InputType::Image(_)
@@ -1069,8 +1070,6 @@ fn popover_target_element(cx: &JSContext, node: &Node) -> Option<DomRoot<HTMLEle
             return None;
         }
         input.is_submit_button()
-    } else {
-        return None;
     };
 
     // > 2. If node is disabled, then return null.

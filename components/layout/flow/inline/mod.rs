@@ -2617,6 +2617,7 @@ impl InlineFormattingContext {
 
     /// Lays out the lines, breaking them to fit `line_break_inline_size`, and also returns
     /// how many non-phantom lines that produced.
+    #[expect(clippy::too_many_arguments)]
     fn layout_with_line_break_inline_size(
         &self,
         layout_context: &LayoutContext,

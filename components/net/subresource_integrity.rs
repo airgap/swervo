@@ -197,7 +197,7 @@ pub fn is_response_integrity_valid(integrity_metadata: &str, response: &Response
             Algorithm::Sha512 => apply_algorithm_to_response(body, &digest::SHA512),
         };
 
-        if hashed.as_deref() == Some(&*digest) {
+        if hashed.as_deref() == Some(digest) {
             return true;
         }
     }

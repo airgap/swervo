@@ -5850,7 +5850,7 @@ impl Document {
                 .text_index_query_on_node_for_event(node, point)
                 .map(|(_, offset)| offset.0)
                 .unwrap_or(0);
-            return Some((DomRoot::from_ref(node), offset as u32, None));
+            return Some((DomRoot::from_ref(node), offset, None));
         }
 
         // Step 5. Otherwise, return a caret position where the caret range is collapsed at the
