@@ -72,7 +72,11 @@ allow = [
 confidence-threshold = 0.8
 # Allow 1 or more licenses on a per-crate basis, so that particular licenses
 # aren't accepted for every possible crate as with the normal allow list
-exceptions = []
+exceptions = [
+    # rav1e depends on libfuzzer-sys when cfg(fuzzing) is true, which it isn't for servo builds.
+    # cargo-deny is being run with --all-features, so we need to explicitly make an exception here.
+    { allow = ["NCSA"], crate = "libfuzzer-sys" },
+]
 
 
 # This section is considered when running `cargo deny check bans`.
@@ -131,6 +135,7 @@ skip = [
     # duplicated by tungstenite
     "getrandom",
     "rand",
+    "rand_chacha",
     "rand_core",
     "sha1",
 
@@ -177,6 +182,7 @@ skip = [
     "font-types",
 
     # Duplicated by resvg/image
+    "pastey",
     "roxmltree",
     "tiny-skia",
     "tiny-skia-path",
@@ -216,15 +222,16 @@ skip = [
     "darling",
     "darling_core",
     "darling_macro",
+
+    # dav1d-sys (AVIF decoding) still uses system-deps 7, while GStreamer uses 9.
+    "system-deps",
 ]
 
 [sources]
+# On our releases we switch to crates.io dependencies,
+# so explicitly allow unused allow-org entries to avoid errors.
+unused-allowed-org = "allow"
 allow-git = [
     "https://github.com/airgap/stylo",
     "https://github.com/airgap/webrender",
 ]
-
-# On our releases we switch to crates.io dependencies,
-# so explicitly allow unused allow-org entries to avoid errors.
-[sources]
-unused-allowed-org = "allow"
