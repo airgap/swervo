@@ -130,7 +130,9 @@ impl FetchEventMethods<crate::DomTypeHolder> for FetchEvent {
     fn RespondWith(&self, cx: &mut JSContext, r: &Promise) -> ErrorResult {
         // Step 2: respondWith may only be called once.
         if self.responded.get() {
-            return Err(Error::InvalidState(None));
+            return Err(Error::InvalidState(Some(
+                "respondWith() has already been called".to_owned(),
+            )));
         }
         self.responded.set(true);
         *self.respond_with.borrow_mut() = Some(r.duplicate(cx).to_traced());

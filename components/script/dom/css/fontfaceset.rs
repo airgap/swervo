@@ -62,6 +62,14 @@ struct MatchingFontFaces {
     family_names: Vec<LowercaseFontFamilyName>,
 }
 
+/// The error for a `font` value that only resolves at computed-value time (e.g. calc() with
+/// relative units), which cannot be absolutized against the initial values.
+fn unresolvable_font_value_error() -> Error {
+    Error::Syntax(Some(
+        "Font values that depend on computed-value time cannot be matched".to_owned(),
+    ))
+}
+
 /// Parse a `font` shorthand value into its font families and the style that font matching uses,
 /// with relative values absolutized against the initial values, as in step 1 of
 /// <https://drafts.csswg.org/css-font-loading/#find-the-matching-font-faces>.
@@ -83,7 +91,7 @@ fn parse_font_for_matching(
         document.quirks_mode(),
         CssRuleType::Style,
     )
-    .map_err(|()| Error::Syntax(None))?;
+    .map_err(|()| Error::Syntax(Some("Invalid font shorthand".to_owned())))?;
 
     let mut families = Vec::new();
     let mut descriptor = FontDescriptor {
@@ -102,7 +110,9 @@ fn parse_font_for_matching(
         match declaration {
             // A CSS-wide keyword (or a var() reference) is a syntax error for this algorithm.
             PropertyDeclaration::CSSWideKeyword(..) | PropertyDeclaration::WithVariables(..) => {
-                return Err(Error::Syntax(None));
+                return Err(Error::Syntax(Some(
+                    "CSS-wide keywords and var() are not allowed in a font shorthand".to_owned(),
+                )));
             },
             PropertyDeclaration::FontFamily(family) => match family {
                 SpecifiedFontFamily::Values(list) => families = list.iter().cloned().collect(),
@@ -110,9 +120,9 @@ fn parse_font_for_matching(
             },
             PropertyDeclaration::FontWeight(weight) => {
                 descriptor.weight = match weight {
-                    SpecifiedFontWeight::Absolute(absolute) => {
-                        absolute.compute().ok_or(Error::Syntax(None))?
-                    },
+                    SpecifiedFontWeight::Absolute(absolute) => absolute
+                        .compute()
+                        .ok_or_else(unresolvable_font_value_error)?,
                     SpecifiedFontWeight::Bolder => FontWeight::NORMAL.bolder(),
                     SpecifiedFontWeight::Lighter => FontWeight::NORMAL.lighter(),
                     SpecifiedFontWeight::System(_) => FontWeight::NORMAL,
@@ -124,10 +134,15 @@ fn parse_font_for_matching(
                         FontStyle::ITALIC
                     },
                     SpecifiedFontStyleProperty::Specified(GenericFontStyle::Oblique(angle)) => {
-                        FontStyle::oblique(angle.degrees().ok_or(Error::Syntax(None))?.clamp(
-                            FONT_STYLE_OBLIQUE_MIN_ANGLE_DEGREES,
-                            FONT_STYLE_OBLIQUE_MAX_ANGLE_DEGREES,
-                        ))
+                        FontStyle::oblique(
+                            angle
+                                .degrees()
+                                .ok_or_else(unresolvable_font_value_error)?
+                                .clamp(
+                                    FONT_STYLE_OBLIQUE_MIN_ANGLE_DEGREES,
+                                    FONT_STYLE_OBLIQUE_MAX_ANGLE_DEGREES,
+                                ),
+                        )
                     },
                     SpecifiedFontStyleProperty::System(_) => FontStyle::NORMAL,
                 }
@@ -136,7 +151,10 @@ fn parse_font_for_matching(
                 descriptor.width = match width {
                     SpecifiedFontWidth::Keyword(keyword) => keyword.compute(),
                     SpecifiedFontWidth::Width(percentage) => FontWidth::from_percentage(
-                        percentage.compute().ok_or(Error::Syntax(None))?.0,
+                        percentage
+                            .compute()
+                            .ok_or_else(unresolvable_font_value_error)?
+                            .0,
                     ),
                     SpecifiedFontWidth::System(_) => FontWidth::NORMAL,
                 }

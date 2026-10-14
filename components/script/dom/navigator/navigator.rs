@@ -322,7 +322,12 @@ impl NavigatorMethods<crate::DomTypeHolder> for Navigator {
             // A recognized DRM whose CDM host is not bundled (LYK-1364), or an unknown key system:
             // no usable access — reject as unsupported, per the EME algorithm.
             keysystem::KeySystemSupport::NeedsCdm | keysystem::KeySystemSupport::Unsupported => {
-                promise.reject_error(&mut realm, Error::NotSupported(None));
+                promise.reject_error(
+                    &mut realm,
+                    Error::NotSupported(Some(
+                        "The requested key system is not supported".to_owned(),
+                    )),
+                );
             },
         }
         promise

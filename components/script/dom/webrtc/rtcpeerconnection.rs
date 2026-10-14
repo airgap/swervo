@@ -193,7 +193,11 @@ impl RTCPeerConnection {
         // panicking the media/main thread (LYK-1363).
         match ServoMedia::get().create_webrtc(signaller) {
             Ok(controller) => *this.controller.borrow_mut() = Some(controller),
-            Err(_) => return Err(Error::NotSupported(None)),
+            Err(_) => {
+                return Err(Error::NotSupported(Some(
+                    "The media backend could not create a peer connection".to_owned(),
+                )));
+            },
         }
         if let Some(ref servers) = config.iceServers &&
             let Some(server) = servers.first()

@@ -39,7 +39,7 @@
 ./components/script/dom/credentialmanagement/credentialscontainer.rs 8
 ./components/script/dom/credentialmanagement/passwordcredential.rs 1
 ./components/script/dom/datatransfer/datatransferitemlist.rs 1
-./components/script/dom/element/element.rs 11
+./components/script/dom/element/element.rs 10
 ./components/script/dom/element/namednodemap.rs 2
 ./components/script/dom/event/eventtarget.rs 1
 ./components/script/dom/eventsource.rs 1
