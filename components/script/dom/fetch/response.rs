@@ -16,6 +16,7 @@ use script_bindings::cformat;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_proto};
 use script_bindings::str::DOMString;
 use servo_url::ServoUrl;
+use storage_traits::cache_storage::{CacheApiResponse, CacheApiResponseType};
 use url::Position;
 
 use crate::dom::RootedPromise;
@@ -134,6 +135,81 @@ impl Response {
         body_stream
             .as_ref()
             .is_some_and(|stream| stream.is_locked())
+    }
+
+    /// Build a `Response` from a stored Cache API entry, as step 2.4.2.1 of
+    /// <https://w3c.github.io/ServiceWorker/#cache-matchall> does: "a new Response object
+    /// associated with response and a new associated Headers object whose guard is
+    /// "immutable"". The body is a fresh stream over the buffered bytes.
+    pub(crate) fn new_from_cache_api(
+        cx: &mut js::context::JSContext,
+        global: &GlobalScope,
+        stored: &CacheApiResponse,
+    ) -> DomRoot<Response> {
+        let response = Response::new(cx, global);
+        *response.status.borrow_mut() =
+            HttpStatus::new_raw(stored.status, stored.status_message.clone());
+
+        let mut headers = HyperHeaders::new();
+        for (name, value) in &stored.headers {
+            if let (Ok(name), Ok(value)) = (
+                http::header::HeaderName::from_bytes(name.as_bytes()),
+                http::header::HeaderValue::from_bytes(value),
+            ) {
+                headers.append(name, value);
+            }
+        }
+        response.Headers(cx).set_headers(headers);
+
+        if let Some(url) = stored
+            .url
+            .as_ref()
+            .and_then(|url| ServoUrl::parse(url).ok())
+        {
+            *response.url.borrow_mut() = Some(url.clone());
+            response.url_list.borrow_mut().push(url);
+        }
+
+        if !is_null_body_status(stored.status) &&
+            let Ok(stream) = ReadableStream::new_from_bytes_with_byte_reading_support(
+                cx,
+                global,
+                stored.body.clone(),
+            )
+        {
+            response.body_stream.set(Some(&*stream));
+            response.fetch_body_stream.set(Some(&*stream));
+        }
+
+        let response_type = match stored.response_type {
+            CacheApiResponseType::Basic => DOMResponseType::Basic,
+            CacheApiResponseType::Cors => DOMResponseType::Cors,
+            CacheApiResponseType::Default => DOMResponseType::Default,
+            CacheApiResponseType::Error => DOMResponseType::Error,
+            CacheApiResponseType::Opaque => DOMResponseType::Opaque,
+            CacheApiResponseType::OpaqueRedirect => DOMResponseType::Opaqueredirect,
+        };
+        response.set_type(cx, response_type);
+        response.Headers(cx).set_guard(Guard::Immutable);
+
+        response
+    }
+
+    /// The response's type, in the form the Cache API stores.
+    pub(crate) fn cache_api_response_type(&self) -> CacheApiResponseType {
+        match *self.response_type.borrow() {
+            DOMResponseType::Basic => CacheApiResponseType::Basic,
+            DOMResponseType::Cors => CacheApiResponseType::Cors,
+            DOMResponseType::Default => CacheApiResponseType::Default,
+            DOMResponseType::Error => CacheApiResponseType::Error,
+            DOMResponseType::Opaque => CacheApiResponseType::Opaque,
+            DOMResponseType::Opaqueredirect => CacheApiResponseType::OpaqueRedirect,
+        }
+    }
+
+    /// The response's status code.
+    pub(crate) fn status_code(&self) -> u16 {
+        self.status.borrow().raw_code()
     }
 
     /// Snapshot the parts of this response the Cache API persists, minus the body (which
@@ -478,8 +554,8 @@ fn initialize_response(
 
         // 6.3 If body’s type is non-null and response’s header list does not contain `Content-Type`,
         // then append (`Content-Type`, body’s type) to response’s header list.
-        if let Some(content_type_contents) = &body.content_type
-            && !response
+        if let Some(content_type_contents) = &body.content_type &&
+            !response
                 .Headers(cx)
                 .Has(ByteString::new(b"Content-Type".to_vec()))
                 .unwrap()

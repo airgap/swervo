@@ -23,6 +23,7 @@ use script_bindings::cell::DomRefCell;
 use script_bindings::cformat;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_proto};
 use servo_url::ServoUrl;
+use storage_traits::cache_storage::CacheApiRequest;
 
 use crate::conversions::Convert;
 use crate::dom::RootedPromise;
@@ -570,6 +571,37 @@ impl Request {
 
     pub(crate) fn request(&self) -> Ref<'_, NetTraitsRequest> {
         self.request.borrow()
+    }
+
+    /// Build a `Request` from a stored Cache API entry, as step 5.4.2.1 of
+    /// <https://w3c.github.io/ServiceWorker/#cache-keys> does: "a new Request object associated
+    /// with request and a new associated Headers object whose guard is "immutable"".
+    pub(crate) fn new_from_cache_api(
+        cx: &mut JSContext,
+        global: &GlobalScope,
+        stored: &CacheApiRequest,
+    ) -> Option<DomRoot<Request>> {
+        let url = ServoUrl::parse(&stored.url).ok()?;
+        let method = HttpMethod::from_bytes(stored.method.as_bytes()).ok()?;
+        let mut headers = http::HeaderMap::new();
+        for (name, value) in &stored.headers {
+            if let (Ok(name), Ok(value)) = (
+                http::header::HeaderName::from_bytes(name.as_bytes()),
+                HeaderValue::from_bytes(value),
+            ) {
+                headers.append(name, value);
+            }
+        }
+        let request = Request::new(cx, global, None, url);
+        {
+            let mut net_request = request.request.borrow_mut();
+            net_request.method = method;
+            net_request.headers = headers.clone();
+        }
+        let request_headers = request.Headers(cx);
+        request_headers.set_headers(headers);
+        request_headers.set_guard(Guard::Immutable);
+        Some(request)
     }
 }
 
