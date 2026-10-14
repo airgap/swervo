@@ -19,8 +19,8 @@ impl LineBreaker {
     pub(crate) fn new(string: &str, options: LineBreakOptions<'_>) -> Self {
         // `word-break: break-all` and `line-break: anywhere` already break between almost every
         // pair of characters, so the table below would only take opportunities away.
-        let apply_ascii_pairs = options.word_option != Some(LineBreakWordOption::BreakAll)
-            && options.strictness != Some(LineBreakStrictness::Anywhere);
+        let apply_ascii_pairs = options.word_option != Some(LineBreakWordOption::BreakAll) &&
+            options.strictness != Some(LineBreakStrictness::Anywhere);
         let line_segmenter = LineSegmenter::new_auto(options);
         // From https://docs.rs/icu_segmenter/1.5.0/icu_segmenter/struct.LineSegmenter.html
         // > For consistency with the grapheme, word, and sentence segmenters, there is always a
@@ -59,15 +59,15 @@ impl LineBreaker {
 
         let mut linebreaks_range = self.current_linebreak_offset..self.linebreaks.len();
 
-        while self.linebreaks[linebreaks_range.start] < text_range.start
-            && linebreaks_range.len() > 1
+        while self.linebreaks[linebreaks_range.start] < text_range.start &&
+            linebreaks_range.len() > 1
         {
             linebreaks_range.start += 1;
         }
 
         let mut ending_linebreak_index = linebreaks_range.start;
-        while self.linebreaks[ending_linebreak_index] < text_range.end
-            && ending_linebreak_index < self.linebreaks.len() - 1
+        while self.linebreaks[ending_linebreak_index] < text_range.end &&
+            ending_linebreak_index < self.linebreaks.len() - 1
         {
             ending_linebreak_index += 1;
         }
@@ -134,8 +134,8 @@ fn ascii_pair_allows_break(before_previous: Option<char>, previous: char, next: 
             next,
             '!' | '"' | '\'' | ')' | ',' | '.' | '/' | ':' | ';' | '?' | ']' | '}'
         ),
-        '!' | '"' | '#' | '%' | '&' | ')' | '*' | '+' | ',' | '.' | ':' | ';' | '=' | '>'
-        | '\\' | ']' | '|' | '}' | '~' => matches!(next, '(' | '<' | '[' | '{'),
+        '!' | '"' | '#' | '%' | '&' | ')' | '*' | '+' | ',' | '.' | ':' | ';' | '=' | '>' |
+        '\\' | ']' | '|' | '}' | '~' => matches!(next, '(' | '<' | '[' | '{'),
         _ => false,
     }
 }
@@ -213,8 +213,8 @@ mod test {
             [Utf8CodeUnits(4), Utf8CodeUnits(6), Utf8CodeUnits(9)]
         );
         assert!(
-            advance_to_linebreaks_in_range(&mut linebreaker, 0..7)
-                == &[Utf8CodeUnits(4), Utf8CodeUnits(6)]
+            advance_to_linebreaks_in_range(&mut linebreaker, 0..7) ==
+                &[Utf8CodeUnits(4), Utf8CodeUnits(6)]
         );
         assert!(advance_to_linebreaks_in_range(&mut linebreaker, 8..9).is_empty());
 
@@ -225,8 +225,8 @@ mod test {
 
         // Sending a value out of range shouldn't break things.
         assert!(
-            advance_to_linebreaks_in_range(&mut linebreaker, 0..999)
-                == &[Utf8CodeUnits(4), Utf8CodeUnits(6)]
+            advance_to_linebreaks_in_range(&mut linebreaker, 0..999) ==
+                &[Utf8CodeUnits(4), Utf8CodeUnits(6)]
         );
 
         linebreaker.current_linebreak_offset = 0;

@@ -276,8 +276,8 @@ impl DocumentOrShadowRoot {
 
         // Step 4: If the document has a root element, and the last item in sequence is
         // not the root element, append the root element to sequence.
-        if let Some(root_element) = document_element
-            && elements.last() != Some(&root_element)
+        if let Some(root_element) = document_element &&
+            elements.last() != Some(&root_element)
         {
             elements.push(root_element);
         }
@@ -775,12 +775,12 @@ unsafe extern "C" fn adopted_stylesheets_define_property(
         // <https://webidl.spec.whatwg.org/#es-observable-array-defineProperty>
         // Indices and length only take writable, enumerable (for indices), configurable data
         // properties; anything else is rejected without a change.
-        if descriptor.hasGetter_()
-            || descriptor.hasSetter_()
-            || !descriptor.hasValue_()
-            || (descriptor.hasConfigurable_() && !descriptor.configurable_())
-            || (descriptor.hasWritable_() && !descriptor.writable_())
-            || (index.is_some() && descriptor.hasEnumerable_() && !descriptor.enumerable_())
+        if descriptor.hasGetter_() ||
+            descriptor.hasSetter_() ||
+            !descriptor.hasValue_() ||
+            (descriptor.hasConfigurable_() && !descriptor.configurable_()) ||
+            (descriptor.hasWritable_() && !descriptor.writable_()) ||
+            (index.is_some() && descriptor.hasEnumerable_() && !descriptor.enumerable_())
         {
             unsafe { (*res).code_ = rejection as ::libc::uintptr_t };
             return true;

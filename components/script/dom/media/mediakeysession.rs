@@ -156,8 +156,8 @@ impl MediaKeySessionMethods<crate::DomTypeHolder> for MediaKeySession {
             for key in keys {
                 let kid = key.get("kid").and_then(|v| v.as_str());
                 let k = key.get("k").and_then(|v| v.as_str());
-                if let (Some(kid), Some(k)) = (kid, k)
-                    && let (Ok(kid_bytes), Ok(k_bytes)) =
+                if let (Some(kid), Some(k)) = (kid, k) &&
+                    let (Ok(kid_bytes), Ok(k_bytes)) =
                         (URL_SAFE_NO_PAD.decode(kid), URL_SAFE_NO_PAD.decode(k))
                 {
                     // Publish to the process-global Clear Key store the CENC decrypt element reads.

@@ -251,16 +251,16 @@ fn decode_bytes_sync(
     });
 
     let image = if is_svg_document {
-        parse_svg_document_in_memory(bytes, usvg_options)
-            .ok()
-            .map(|(svg_tree, source, root_view_box)| {
+        parse_svg_document_in_memory(bytes, usvg_options).ok().map(
+            |(svg_tree, source, root_view_box)| {
                 DecodedImage::Vector(VectorImageData {
                     svg_tree: Arc::new(svg_tree),
                     source,
                     root_view_box,
                     cors_status: cors,
                 })
-            })
+            },
+        )
     } else {
         load_from_memory(bytes, cors).map(DecodedImage::Raster)
     };

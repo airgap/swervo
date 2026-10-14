@@ -307,14 +307,8 @@ impl ImageResolver {
         match image {
             CachedImage::Raster(raster_image) => raster_image.id,
             CachedImage::Vector(vector_image) => node.and_then(|node| {
-                self.rasterize_vector_image(
-                    vector_image.id,
-                    size,
-                    node,
-                    vector_image.svg_id,
-                    false,
-                )
-                .and_then(|rasterized_image| rasterized_image.id)
+                self.rasterize_vector_image(vector_image.id, size, node, vector_image.svg_id, false)
+                    .and_then(|rasterized_image| rasterized_image.id)
             }),
         }
     }

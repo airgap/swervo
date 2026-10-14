@@ -216,8 +216,8 @@ impl BlockContainer {
     ) -> BlockContainer {
         let mut builder = BlockContainerBuilder::new(context, info, propagated_data);
 
-        if is_list_item
-            && let Some((marker_info, marker_contents)) = crate::lists::make_marker(context, info)
+        if is_list_item &&
+            let Some((marker_info, marker_contents)) = crate::lists::make_marker(context, info)
         {
             match marker_info.style.get_list_style_position() {
                 ListStylePosition::Inside => {
@@ -540,8 +540,8 @@ impl<'dom> BlockContainerBuilder<'dom, '_> {
     ) {
         let context = self.context;
         let old_layout_box = box_slot.take_layout_box();
-        if info.style.get_box().display.inside() == StyloDisplayInside::Ruby
-            && matches!(
+        if info.style.get_box().display.inside() == StyloDisplayInside::Ruby &&
+            matches!(
                 contents,
                 Contents::NonReplaced(NonReplacedContents::OfElement)
             )
@@ -589,8 +589,8 @@ impl<'dom> BlockContainerBuilder<'dom, '_> {
             inline_builder.push_soft_wrap_opportunity();
         }
 
-        if is_list_item
-            && let Some((marker_info, marker_contents)) =
+        if is_list_item &&
+            let Some((marker_info, marker_contents)) =
                 crate::lists::make_marker(self.context, info)
         {
             // Ignore `list-style-position` here:
@@ -769,8 +769,8 @@ impl<'dom> BlockContainerBuilder<'dom, '_> {
         contents: Contents,
         box_slot: BoxSlot<'dom>,
     ) {
-        if let Some(builder) = self.inline_formatting_context_builder.as_mut()
-            && !builder.is_empty
+        if let Some(builder) = self.inline_formatting_context_builder.as_mut() &&
+            !builder.is_empty
         {
             let constructor = || {
                 ArcRefCell::new(FloatBox::construct(

@@ -113,8 +113,8 @@ impl BlockFormattingContext {
         containing_block: &ContainingBlock,
         style: &ComputedValues,
     ) -> Option<IndependentFormattingContextLayoutResult> {
-        if matches!(self.contents, BlockContainer::InlineFormattingContext(_))
-            || !style.writing_mode.is_horizontal()
+        if matches!(self.contents, BlockContainer::InlineFormattingContext(_)) ||
+            !style.writing_mode.is_horizontal()
         {
             return None;
         }

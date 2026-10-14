@@ -182,9 +182,9 @@ impl SVGSVGElement {
         let root_node = self.upcast::<Node>();
 
         for node in root_node.traverse_preorder(ShadowIncluding::No) {
-            if let Some(element) = node.downcast::<Element>()
-                && element.local_name() == &local_name!("use")
-                && let Some(cloned) =
+            if let Some(element) = node.downcast::<Element>() &&
+                element.local_name() == &local_name!("use") &&
+                let Some(cloned) =
                     self.process_single_use_element(cx, element, referenced_ids, href_rewrites)
             {
                 cloned_nodes.push(cloned);
@@ -373,9 +373,9 @@ impl SVGSVGElement {
                 // <https://svgwg.org/svg2-draft/pservers.html#LinearGradientElementHrefAttribute>
                 if matches!(
                     *element.local_name(),
-                    local_name!("linearGradient")
-                        | local_name!("radialGradient")
-                        | local_name!("pattern")
+                    local_name!("linearGradient") |
+                        local_name!("radialGradient") |
+                        local_name!("pattern")
                 ) {
                     let href = element.get_string_attribute(&local_name!("href"));
                     let effective_href = if href.str().is_empty() {
@@ -635,9 +635,8 @@ impl SVGSVGElement {
                     return None;
                 }
                 image_element = Some(DomRoot::from_ref(image));
-            } else if node.is::<Text>()
-                && node
-                    .GetTextContent()
+            } else if node.is::<Text>() &&
+                node.GetTextContent()
                     .is_some_and(|text| !text.str().trim().is_empty())
             {
                 return None;
@@ -752,8 +751,8 @@ impl SVGSVGElement {
             attributes
                 .retain(|(name, _)| name.ns != ns!(xlink) || name.local != local_name!("href"));
         }
-        if let Some(image) = element.downcast::<SVGImageElement>()
-            && let Some((href, preserve_aspect_ratio)) = self.embedded_image_attributes(image)
+        if let Some(image) = element.downcast::<SVGImageElement>() &&
+            let Some((href, preserve_aspect_ratio)) = self.embedded_image_attributes(image)
         {
             attributes.retain(|(name, _)| {
                 let is_href =
@@ -779,17 +778,17 @@ impl SVGSVGElement {
         // `width`/`height` made that size wrong whenever CSS overrode one of them: `width="50"`
         // without `height` reads as 50x100 to the rasterizer (the missing height defaults to
         // 100%), so the icon was fitted into its box at half size.
-        if std::ptr::eq(element, self.upcast::<Element>())
-            && element
+        if std::ptr::eq(element, self.upcast::<Element>()) &&
+            element
                 .get_attribute_string_value_with_namespace(&ns!(), &local_name!("viewBox"))
                 .is_some_and(|view_box| parse_view_box(&view_box).is_some())
         {
             attributes.retain(|(name, _)| {
-                name.ns != ns!()
-                    || (name.local != local_name!("width") && name.local != local_name!("height"))
+                name.ns != ns!() ||
+                    (name.local != local_name!("width") && name.local != local_name!("height"))
             });
-        } else if std::ptr::eq(element, self.upcast::<Element>())
-            && let Some(style) = element.style_from_last_restyle()
+        } else if std::ptr::eq(element, self.upcast::<Element>()) &&
+            let Some(style) = element.style_from_last_restyle()
         {
             // Without a viewBox the rasterizer resolves percentages in the content (a `<use>`'s
             // default `100%` size, GitLab's CSS-sized sprite icons) against its 100x100
@@ -832,9 +831,9 @@ impl SVGSVGElement {
                     .split(';')
                     .map(str::trim)
                     .filter(|declaration| {
-                        !declaration.is_empty()
-                            && !declaration.starts_with("--")
-                            && !declaration.contains("var(")
+                        !declaration.is_empty() &&
+                            !declaration.starts_with("--") &&
+                            !declaration.contains("var(")
                     })
                     .chain(std::iter::once(declarations.as_str()))
                     .collect();
@@ -1036,8 +1035,8 @@ fn serialize_reference_closure(cx: &mut JSContext, subtree: &Node) -> String {
             } else {
                 href.to_string()
             };
-            if let Some(id) = effective_href.strip_prefix('#')
-                && !id.is_empty()
+            if let Some(id) = effective_href.strip_prefix('#') &&
+                !id.is_empty()
             {
                 referenced_ids.push(id.to_owned());
             }

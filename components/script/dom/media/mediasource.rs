@@ -197,8 +197,8 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         }
         // Steps 2-4. Transition to "ended" and signal end-of-stream to the player.
         self.ready_state.set(ReadyState::Ended);
-        if let Some(element) = self.media_element.get()
-            && let Some(player) = element.get_player()
+        if let Some(element) = self.media_element.get() &&
+            let Some(player) = element.get_player()
         {
             let _ = player.lock().unwrap().end_of_stream();
         }

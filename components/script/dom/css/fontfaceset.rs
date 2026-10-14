@@ -628,8 +628,8 @@ impl FontFaceSetMethods<crate::DomTypeHolder> for FontFaceSet {
         Ok(matching
             .font_faces
             .iter()
-            .all(|face| face.is_css_connected() || face.Status() == FontFaceLoadStatus::Loaded)
-            && !matching
+            .all(|face| face.is_css_connected() || face.Status() == FontFaceLoadStatus::Loaded) &&
+            !matching
                 .family_names
                 .iter()
                 .any(|family_name| font_context.is_loading_stylesheet_web_font(family_name)))

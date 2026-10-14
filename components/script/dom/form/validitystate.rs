@@ -21,9 +21,9 @@ use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::element::Element;
+use crate::dom::html::form_controls::htmlinputelement::HTMLInputElement;
 use crate::dom::html::htmlfieldsetelement::HTMLFieldSetElement;
 use crate::dom::html::htmlformelement::FormControlElementHelpers;
-use crate::dom::html::form_controls::htmlinputelement::HTMLInputElement;
 use crate::dom::node::Node;
 use crate::dom::window::Window;
 

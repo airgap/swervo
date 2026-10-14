@@ -1318,15 +1318,12 @@ where
                 );
                 if let Some((_, crash_page_replace)) = pending_crash_page &&
                     let Some(new_pipeline_id) = new_pipeline_id &&
-                    let Some(change) = self
-                        .webviews
-                        .get_mut(&webview_id)
-                        .and_then(|webview| {
-                            webview
-                                .pending_changes
-                                .iter_mut()
-                                .find(|change| change.new_pipeline_id == new_pipeline_id)
-                        })
+                    let Some(change) = self.webviews.get_mut(&webview_id).and_then(|webview| {
+                        webview
+                            .pending_changes
+                            .iter_mut()
+                            .find(|change| change.new_pipeline_id == new_pipeline_id)
+                    })
                 {
                     change.replace = crash_page_replace;
                 }

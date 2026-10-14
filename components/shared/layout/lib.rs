@@ -265,9 +265,9 @@ pub fn parse_view_box(value: &str) -> Option<[f32; 4]> {
         numbers.next()?.ok()?,
         numbers.next()?.ok()?,
     ];
-    if numbers.next().is_some()
-        || view_box[2].partial_cmp(&0.0) != Some(Ordering::Greater)
-        || view_box[3].partial_cmp(&0.0) != Some(Ordering::Greater)
+    if numbers.next().is_some() ||
+        view_box[2].partial_cmp(&0.0) != Some(Ordering::Greater) ||
+        view_box[3].partial_cmp(&0.0) != Some(Ordering::Greater)
     {
         return None;
     }
@@ -1024,9 +1024,8 @@ impl ImageAnimationState {
             return false;
         }
         let time_interval_since_last_update = now - self.frame_start_time;
-        let mut remain_time_interval = time_interval_since_last_update
-            - self
-                .image
+        let mut remain_time_interval = time_interval_since_last_update -
+            self.image
                 .frames
                 .get(self.active_frame)
                 .unwrap()

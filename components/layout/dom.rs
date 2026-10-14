@@ -267,8 +267,8 @@ impl LayoutBox {
                     callback(&positioned.borrow().context)
                 },
                 BlockLevelBox::OutOfFlowFloatBox(float) => callback(&float.contents),
-                BlockLevelBox::OutsideMarker(..)
-                | BlockLevelBox::SameFormattingContextBlock(..) => None,
+                BlockLevelBox::OutsideMarker(..) |
+                BlockLevelBox::SameFormattingContextBlock(..) => None,
             },
             LayoutBox::InlineLevel(inline_item) => match inline_item {
                 InlineItem::Atomic(atomic_item, ..) => callback(&atomic_item.borrow()),
@@ -276,10 +276,10 @@ impl LayoutBox {
                 InlineItem::OutOfFlowAbsolutelyPositionedBox(absolute, ..) => {
                     callback(&absolute.borrow().context)
                 },
-                InlineItem::StartInlineBox(..)
-                | InlineItem::EndInlineBox(..)
-                | InlineItem::TextRun(..)
-                | InlineItem::BlockLevel(..) => None,
+                InlineItem::StartInlineBox(..) |
+                InlineItem::EndInlineBox(..) |
+                InlineItem::TextRun(..) |
+                InlineItem::BlockLevel(..) => None,
             },
             LayoutBox::FlexLevel(flex_level_box) => match &*flex_level_box.borrow() {
                 FlexLevelBox::FlexItem(flex_item) => {
@@ -312,10 +312,10 @@ impl LayoutBox {
         &self,
         callback: impl FnOnce(&InlineFormattingContext) -> Option<T>,
     ) -> Option<T> {
-        if let LayoutBox::BlockLevel(block_level_box) = self
-            && let BlockLevelBox::SameFormattingContextBlock(same_formatting_context_block) =
-                &*block_level_box.borrow()
-            && let Some(inline_formatting_context) = same_formatting_context_block
+        if let LayoutBox::BlockLevel(block_level_box) = self &&
+            let BlockLevelBox::SameFormattingContextBlock(same_formatting_context_block) =
+                &*block_level_box.borrow() &&
+            let Some(inline_formatting_context) = same_formatting_context_block
                 .contents
                 .inline_formatting_context()
         {
@@ -649,8 +649,8 @@ impl<'dom> NodeExt<'dom> for ServoLayoutNode<'dom> {
     }
 
     fn as_typeless_object_with_data_attribute(&self) -> Option<String> {
-        if self.type_id()
-            != Some(ScriptLayoutNodeType::Element(
+        if self.type_id() !=
+            Some(ScriptLayoutNodeType::Element(
                 LayoutElementType::HTMLObjectElement,
             ))
         {
@@ -833,9 +833,9 @@ impl<'dom> NodeExt<'dom> for ServoLayoutNode<'dom> {
             LayoutBox::DisplayContents(..) => false,
             LayoutBox::BlockLevel(block_level) => matches!(
                 &*block_level.borrow(),
-                BlockLevelBox::Independent(..)
-                    | BlockLevelBox::OutOfFlowFloatBox(..)
-                    | BlockLevelBox::OutOfFlowAbsolutelyPositionedBox(..)
+                BlockLevelBox::Independent(..) |
+                    BlockLevelBox::OutOfFlowFloatBox(..) |
+                    BlockLevelBox::OutOfFlowAbsolutelyPositionedBox(..)
             ),
             LayoutBox::InlineLevel(inline_level) => matches!(
                 inline_level,
@@ -908,8 +908,8 @@ impl<'dom> NodeExt<'dom> for ServoLayoutNode<'dom> {
                 let mut block_level = block_level.borrow_mut();
                 match &mut *block_level {
                     BlockLevelBox::Independent(independent_formatting_context) => {
-                        if box_style.position.is_absolutely_positioned()
-                            || box_style.float.is_floating()
+                        if box_style.position.is_absolutely_positioned() ||
+                            box_style.float.is_floating()
                         {
                             return false;
                         }
@@ -923,8 +923,8 @@ impl<'dom> NodeExt<'dom> for ServoLayoutNode<'dom> {
                         // A box that became absolutely positioned or floated needs a new
                         // out-of-flow box built by its parent; rebuilt in place as in-flow it
                         // was never laid out, so it vanished.
-                        if info.style.get_box().position.is_absolutely_positioned()
-                            || info.style.slow_clone_float().is_floating()
+                        if info.style.get_box().position.is_absolutely_positioned() ||
+                            info.style.slow_clone_float().is_floating()
                         {
                             return false;
                         }
@@ -954,8 +954,8 @@ impl<'dom> NodeExt<'dom> for ServoLayoutNode<'dom> {
                         // original display was inline-level, then the box needs to be handled as
                         // an inline-level in order to compute the static position correctly.
                         // See `BlockContainerBuilder::handle_absolutely_positioned_element()`.
-                        if !info.style.get_box().position.is_absolutely_positioned()
-                            || box_style.original_display.outside() != StyloDisplayOutside::Block
+                        if !info.style.get_box().position.is_absolutely_positioned() ||
+                            box_style.original_display.outside() != StyloDisplayOutside::Block
                         {
                             return false;
                         }
@@ -997,8 +997,8 @@ impl<'dom> NodeExt<'dom> for ServoLayoutNode<'dom> {
                 let mut flex_level_box = flex_level_box.borrow_mut();
                 match &mut *flex_level_box {
                     FlexLevelBox::FlexItem(flex_item_box) => {
-                        if info.style.get_box().position.is_absolutely_positioned()
-                            || !flex_item_box.style().order_equals(&info.style)
+                        if info.style.get_box().position.is_absolutely_positioned() ||
+                            !flex_item_box.style().order_equals(&info.style)
                         {
                             return false;
                         }
@@ -1020,8 +1020,8 @@ impl<'dom> NodeExt<'dom> for ServoLayoutNode<'dom> {
             },
             LayoutBox::TableLevelBox(table_level_box) => match table_level_box {
                 TableLevelBox::Caption(caption) => {
-                    if display
-                        != DisplayGeneratingBox::LayoutInternal(DisplayLayoutInternal::TableCaption)
+                    if display !=
+                        DisplayGeneratingBox::LayoutInternal(DisplayLayoutInternal::TableCaption)
                     {
                         return false;
                     }
@@ -1029,8 +1029,8 @@ impl<'dom> NodeExt<'dom> for ServoLayoutNode<'dom> {
                     true
                 },
                 TableLevelBox::Cell(table_cell) => {
-                    if display
-                        != DisplayGeneratingBox::LayoutInternal(DisplayLayoutInternal::TableCell)
+                    if display !=
+                        DisplayGeneratingBox::LayoutInternal(DisplayLayoutInternal::TableCell)
                     {
                         return false;
                     }

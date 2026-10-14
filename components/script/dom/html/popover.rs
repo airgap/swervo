@@ -128,12 +128,12 @@ impl HTMLElement {
         // >    "InvalidStateError" DOMException; return false.
         let element = self.upcast::<Element>();
         let document = self.owner_document();
-        if (!ignore_dom_state && !element.is_connected())
-            || !document.is_fully_active()
-            || (!ignore_dom_state
-                && expected_document.is_some_and(|expected| *expected != *document))
-            || (self.is::<HTMLDialogElement>() && element.state().contains(ElementState::MODAL))
-            || element.state().contains(ElementState::FULLSCREEN)
+        if (!ignore_dom_state && !element.is_connected()) ||
+            !document.is_fully_active() ||
+            (!ignore_dom_state &&
+                expected_document.is_some_and(|expected| *expected != *document)) ||
+            (self.is::<HTMLDialogElement>() && element.state().contains(ElementState::MODAL)) ||
+            element.state().contains(ElementState::FULLSCREEN)
         {
             if throw_exceptions {
                 return Err(Error::InvalidState(Some(
@@ -228,8 +228,8 @@ impl HTMLElement {
             // > 14.2. If all of the following are true: ancestor is not null; ancestor's opened
             // >       in popover mode is "hint"; and effectiveType is the Auto state, then set
             // >       effectiveType to the Hint state.
-            if effective_type == PopoverState::Auto
-                && ancestor.as_ref().is_some_and(|ancestor| {
+            if effective_type == PopoverState::Auto &&
+                ancestor.as_ref().is_some_and(|ancestor| {
                     ancestor.opened_in_popover_mode(cx.no_gc()) == Some(PopoverState::Hint)
                 })
             {
@@ -330,9 +330,9 @@ impl HTMLElement {
 
         // > If effectiveType is Hint and ancestor's opened in popover mode is "auto", then set
         // > document's hint stack parent to ancestor.
-        if effective_type == PopoverState::Hint
-            && let Some(ancestor) = ancestor
-            && ancestor.opened_in_popover_mode(cx.no_gc()) == Some(PopoverState::Auto)
+        if effective_type == PopoverState::Hint &&
+            let Some(ancestor) = ancestor &&
+            ancestor.opened_in_popover_mode(cx.no_gc()) == Some(PopoverState::Auto)
         {
             document.top_layer().set_hint_stack_parent(Some(&ancestor));
         }
@@ -518,8 +518,8 @@ impl HTMLElement {
 
         // > If element is document's hint stack parent, or document's showing hint popover list is
         // > empty, then set document's hint stack parent to null.
-        if document.top_layer().hint_stack_parent().as_deref() == Some(self)
-            || document
+        if document.top_layer().hint_stack_parent().as_deref() == Some(self) ||
+            document
                 .top_layer()
                 .showing_popover_list(PopoverStack::Hint)
                 .is_empty()
@@ -687,8 +687,8 @@ impl HTMLElement {
                 .find(|descendant| {
                     descendant
                         .downcast::<Element>()
-                        .is_some_and(|element| element.has_attribute(&local_name!("autofocus")))
-                        && descendant
+                        .is_some_and(|element| element.has_attribute(&local_name!("autofocus"))) &&
+                        descendant
                             .get_the_focusable_area(cx, FocusTrigger::Other)
                             .is_some()
                 })
@@ -857,8 +857,8 @@ impl HTMLElement {
         node.inclusive_ancestors_in_flat_tree()
             .filter_map(DomRoot::downcast::<HTMLElement>)
             .find(|element| {
-                element.is_popover_showing()
-                    && element
+                element.is_popover_showing() &&
+                    element
                         .popover_state()
                         .is_some_and(PopoverState::uses_auto_stack)
             })
@@ -878,8 +878,8 @@ impl HTMLElement {
         // > 3. Return null.
         node.inclusive_ancestors_in_flat_tree().find_map(|current| {
             let target_popover = popover_target_element(cx, &current)?;
-            (target_popover.is_popover_showing()
-                && target_popover
+            (target_popover.is_popover_showing() &&
+                target_popover
                     .popover_state()
                     .is_some_and(PopoverState::uses_auto_stack))
             .then_some(target_popover)
@@ -927,14 +927,13 @@ impl HTMLElement {
 
         // > 3. If eventTarget is a shadow-including inclusive descendant of popover and popover is
         // >    a shadow-including descendant of node, then return.
-        if let Some(event_target) = event_target.downcast::<Node>()
-            && popover
+        if let Some(event_target) = event_target.downcast::<Node>() &&
+            popover
                 .upcast::<Node>()
-                .is_shadow_including_inclusive_ancestor_of(event_target)
-            && self
-                .upcast::<Node>()
-                .is_shadow_including_inclusive_ancestor_of(popover.upcast())
-            && popover.upcast::<Node>() != self.upcast::<Node>()
+                .is_shadow_including_inclusive_ancestor_of(event_target) &&
+            self.upcast::<Node>()
+                .is_shadow_including_inclusive_ancestor_of(popover.upcast()) &&
+            popover.upcast::<Node>() != self.upcast::<Node>()
         {
             return;
         }
@@ -946,8 +945,8 @@ impl HTMLElement {
         // >    visibility state is showing, then return.
         // > 5. If node's popovertargetaction attribute is in the hide state and popover's popover
         // >    visibility state is hidden, then return.
-        if (action == PopoverTargetAction::Show && showing)
-            || (action == PopoverTargetAction::Hide && !showing)
+        if (action == PopoverTargetAction::Show && showing) ||
+            (action == PopoverTargetAction::Hide && !showing)
         {
             return;
         }
@@ -985,9 +984,8 @@ impl HTMLElement {
         // > running check popover validity given target, true, false, null, and false is true,
         // > then run the hide popover algorithm given target, true, true, false, false, and
         // > element.
-        if hide
-            && self
-                .check_popover_validity(true, false, None, false)
+        if hide &&
+            self.check_popover_validity(true, false, None, false)
                 .unwrap()
         {
             self.hide_popover(cx, true, true, false, false, Some(source))
@@ -997,9 +995,8 @@ impl HTMLElement {
         // > Otherwise, if command is in the Show Popover state or the Toggle Popover state, and
         // > the result of running check popover validity given target, false, false, null, and
         // > false is true, then run show popover given target, false, and element.
-        if show
-            && self
-                .check_popover_validity(false, false, None, false)
+        if show &&
+            self.check_popover_validity(false, false, None, false)
                 .unwrap()
         {
             self.show_popover(cx, false, Some(source)).unwrap();

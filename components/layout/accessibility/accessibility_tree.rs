@@ -229,8 +229,8 @@ impl AccessibilityTree {
         old: Option<&str>,
         new: Option<&str>,
     ) {
-        if let Some(old) = old
-            && self.element_id_to_node_id.get(old) == Some(&node_id)
+        if let Some(old) = old &&
+            self.element_id_to_node_id.get(old) == Some(&node_id)
         {
             self.element_id_to_node_id.remove(old);
         }
@@ -489,9 +489,9 @@ impl AccessibilityTree {
         update: &mut AccessibilityUpdate,
     ) {
         let mut focused_node_id = None;
-        if let Some(focused_element) = focused_element
-            && let Some(node_id) = self.existing_id_for_opaque(focused_element)
-            && let Some(focused_node) = self.node_for_id(node_id)
+        if let Some(focused_element) = focused_element &&
+            let Some(node_id) = self.existing_id_for_opaque(focused_element) &&
+            let Some(focused_node) = self.node_for_id(node_id)
         {
             let focused_node = focused_node.borrow();
             if focused_node.role() == Role::GenericContainer {
@@ -612,8 +612,8 @@ impl AccessibilityTree {
             let node = self.nodes.remove(&id).expect("Node {id:?} already removed");
             let node = node.borrow();
             self.labelledby_nodes.remove(&id);
-            if let Some(element_id) = node.element_id()
-                && self.element_id_to_node_id.get(element_id) == Some(&id)
+            if let Some(element_id) = node.element_id() &&
+                self.element_id_to_node_id.get(element_id) == Some(&id)
             {
                 self.element_id_to_node_id.remove(element_id);
             }
@@ -822,9 +822,9 @@ impl<'update> AccessibilityUpdate<'update> {
     ) -> (Option<accesskit::TreeUpdate>, UpdateCounters) {
         let mut tree_update = None;
         let mut counters = std::mem::take(&mut self.counters);
-        if !self.changed_nodes.is_empty()
-            || self.accesskit_tree.is_some()
-            || self.focused_node_changed
+        if !self.changed_nodes.is_empty() ||
+            self.accesskit_tree.is_some() ||
+            self.focused_node_changed
         {
             let changed_nodes = std::mem::take(&mut self.changed_nodes);
             let accesskit_tree = std::mem::take(&mut self.accesskit_tree);

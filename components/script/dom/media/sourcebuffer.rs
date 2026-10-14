@@ -100,9 +100,9 @@ impl SourceBuffer {
         self.segments
             .borrow_mut()
             .append(&bytes, self.timestamp_offset.get());
-        if let Some(element) = self.media_source.media_element()
-            && let Some(player) = element.get_player()
-            && let Err(error) = player
+        if let Some(element) = self.media_source.media_element() &&
+            let Some(player) = element.get_player() &&
+            let Err(error) = player
                 .lock()
                 .unwrap()
                 .push_source_buffer_data(self.stream, bytes)

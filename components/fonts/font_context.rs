@@ -47,7 +47,9 @@ use style::shared_lock::StylesheetGuards;
 use style::stylesheets::{FontFaceRule, LockedFontFaceRule, Origin};
 use style::stylist::Stylist;
 use style::values::computed::FontVariantAlternates;
-use style::values::computed::font::{FamilyName, FontFamilyNameSyntax, FontStyle, SingleFontFamily};
+use style::values::computed::font::{
+    FamilyName, FontFamilyNameSyntax, FontStyle, SingleFontFamily,
+};
 use style::values::specified::font::VariantAlternates;
 use url::Url;
 use uuid::Uuid;

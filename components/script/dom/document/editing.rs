@@ -399,9 +399,10 @@ impl Document {
             return self.move_caret_in_editing_host(cx, *direction, *motion, *modify_selection);
         }
         let typing_command = match editing_action {
-            EditingAction::InsertText(text) => {
-                Some((CommandName::InsertText, Some(DOMString::from(text.as_str()))))
-            },
+            EditingAction::InsertText(text) => Some((
+                CommandName::InsertText,
+                Some(DOMString::from(text.as_str())),
+            )),
             EditingAction::InsertNewline => Some((CommandName::InsertLineBreak, None)),
             EditingAction::InsertParagraph => Some((CommandName::InsertParagraph, None)),
             EditingAction::Backspace(..) => Some((CommandName::Delete, None)),
@@ -564,8 +565,7 @@ impl Document {
         let segment_data = match action {
             // Shift-click extends the selection to the clicked position.
             MouseButtonSelectionAction::MoveCursor
-                if mouse_event.button() == MouseButton::Primary &&
-                    mouse_event.ShiftKey() =>
+                if mouse_event.button() == MouseButton::Primary && mouse_event.ShiftKey() =>
             {
                 selection.collapse_or_extend_to_dom_position(cx, &boundary);
                 None

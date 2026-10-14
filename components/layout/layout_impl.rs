@@ -323,9 +323,9 @@ impl Layout for LayoutThread {
         let device = self.stylist.device_mut();
         let device_pixel_ratio = Scale::new(viewport_details.hidpi_scale_factor.get());
         let device_size = viewport_details.device_size.cast_unit();
-        if device.viewport_size() == viewport_details.size
-            && device.device_pixel_ratio() == device_pixel_ratio
-            && device.device_size() == device_size
+        if device.viewport_size() == viewport_details.size &&
+            device.device_pixel_ratio() == device_pixel_ratio &&
+            device.device_size() == device_size
         {
             return false;
         }
@@ -539,8 +539,8 @@ impl Layout for LayoutThread {
         with_layout_state(|| {
             let node = unsafe { ServoLayoutNode::new(&node) };
             // The stacking context tree only contributes sticky offsets here.
-            let stacking_context_tree_is_stale = self.need_new_stacking_context_tree.get()
-                || self.stacking_context_tree.borrow().is_none();
+            let stacking_context_tree_is_stale = self.need_new_stacking_context_tree.get() ||
+                self.stacking_context_tree.borrow().is_none();
             if stacking_context_tree_is_stale && has_sticky_inclusive_ancestor(node) {
                 self.build_stacking_context_tree(self.viewport_details.get());
             }
@@ -835,8 +835,8 @@ impl Layout for LayoutThread {
         let offset = scroll_offset();
         // A rebuilt tree clamps the offsets it carries over to the new scrollable sizes, which
         // leaves zero offsets alone, so only a nonzero one needs the tree rebuilt.
-        if !self.need_new_stacking_context_tree.get()
-            || offset.is_none_or(|offset| offset == LayoutVector2D::zero())
+        if !self.need_new_stacking_context_tree.get() ||
+            offset.is_none_or(|offset| offset == LayoutVector2D::zero())
         {
             return offset;
         }
@@ -1038,8 +1038,8 @@ impl LayoutThread {
         // If only the stacking context tree is required, and it's up-to-date,
         // layout is unnecessary, otherwise a layout is necessary.
         if necessary_phases == ReflowPhases::StackingContextTreeConstruction {
-            return self.stacking_context_tree.borrow().is_some()
-                && !self.need_new_stacking_context_tree.get();
+            return self.stacking_context_tree.borrow().is_some() &&
+                !self.need_new_stacking_context_tree.get();
         }
 
         // Otherwise, the only interesting thing is whether the current display
@@ -1246,9 +1246,9 @@ impl LayoutThread {
             reflow_phases_run.insert(ReflowPhasesRun::UpdatedAccessibilityTree);
         }
 
-        if self.debug.is_enabled(DiagnosticsLoggingOption::FlowTree)
-            && reflow_phases_run.contains(ReflowPhasesRun::RanLayout)
-            && let Some(fragment_tree) = &*self.fragment_tree.borrow()
+        if self.debug.is_enabled(DiagnosticsLoggingOption::FlowTree) &&
+            reflow_phases_run.contains(ReflowPhasesRun::RanLayout) &&
+            let Some(fragment_tree) = &*self.fragment_tree.borrow()
         {
             fragment_tree.print();
         }
@@ -1363,9 +1363,8 @@ impl LayoutThread {
     ) {
         // The flag is process-wide; a document that didn't query may take it, which only
         // costs it the container walk below.
-        if layout_api::CONTAINER_QUERIED.swap(false, Ordering::Relaxed)
-            || self
-                .stylist
+        if layout_api::CONTAINER_QUERIED.swap(false, Ordering::Relaxed) ||
+            self.stylist
                 .iter_origins()
                 .any(|(data, _)| data.has_container_queries())
         {
@@ -1384,8 +1383,8 @@ impl LayoutThread {
                 .collect()
         };
         *self.container_sizes.borrow_mut() = sizes;
-        if changed.is_empty()
-            || !mark_container_descendants_for_restyle(root_element, &changed, &mut changed.len())
+        if changed.is_empty() ||
+            !mark_container_descendants_for_restyle(root_element, &changed, &mut changed.len())
         {
             return;
         }
@@ -1609,9 +1608,9 @@ impl LayoutThread {
         // The restyle damage stays on the elements, and the dirty descendant bits leading to
         // them, until a reflow that needs layout processes it. Styles that query containers
         // depend on the sizes the containers get from that layout.
-        if !device_has_changed
-            && !self.uses_container_queries.get()
-            && !ReflowPhases::needs_layout(&reflow_request.reflow_goal)
+        if !device_has_changed &&
+            !self.uses_container_queries.get() &&
+            !ReflowPhases::needs_layout(&reflow_request.reflow_goal)
         {
             layout_context.style_context.stylist.rule_tree().maybe_gc();
             return (
@@ -1965,8 +1964,8 @@ impl LayoutThread {
                 external_scroll_id,
             );
 
-            if self.accessibility_active()
-                && let Some(accessibility_tree) = self.accessibility_tree.borrow_mut().as_mut()
+            if self.accessibility_active() &&
+                let Some(accessibility_tree) = self.accessibility_tree.borrow_mut().as_mut()
             {
                 accessibility_tree.add_pending_scroll_update(external_scroll_id, offset);
 
@@ -2051,8 +2050,8 @@ impl LayoutThread {
         fragments
             .first()
             .and_then(Fragment::retrieve_box_fragment)?;
-        if self.need_new_stacking_context_tree.get()
-            || self.stacking_context_tree.borrow().is_none()
+        if self.need_new_stacking_context_tree.get() ||
+            self.stacking_context_tree.borrow().is_none()
         {
             if let Some(transform) = self.root_transform_without_stacking_context_tree(node) {
                 return Some(transform);
@@ -2490,14 +2489,14 @@ impl ReflowPhases {
         let is_inset_longhand = |longhand: LonghandId| {
             matches!(
                 longhand,
-                LonghandId::Top
-                    | LonghandId::Right
-                    | LonghandId::Bottom
-                    | LonghandId::Left
-                    | LonghandId::InsetInlineStart
-                    | LonghandId::InsetInlineEnd
-                    | LonghandId::InsetBlockStart
-                    | LonghandId::InsetBlockEnd
+                LonghandId::Top |
+                    LonghandId::Right |
+                    LonghandId::Bottom |
+                    LonghandId::Left |
+                    LonghandId::InsetInlineStart |
+                    LonghandId::InsetInlineEnd |
+                    LonghandId::InsetBlockStart |
+                    LonghandId::InsetBlockEnd
             )
         };
 
@@ -2522,26 +2521,26 @@ impl ReflowPhases {
                 QueryMsg::NodesFromPointQuery => {
                     Self::StackingContextTreeConstruction | Self::DisplayListConstruction
                 },
-                QueryMsg::AccessKitNodeQuery
-                | QueryMsg::ElementsFromPoint
-                | QueryMsg::FlushForUpdateTheRenderingQuery
-                | QueryMsg::TextIndexOrSegmentQuery
-                | QueryMsg::CaretStopsQuery => Self::StackingContextTreeConstruction,
+                QueryMsg::AccessKitNodeQuery |
+                QueryMsg::ElementsFromPoint |
+                QueryMsg::FlushForUpdateTheRenderingQuery |
+                QueryMsg::TextIndexOrSegmentQuery |
+                QueryMsg::CaretStopsQuery => Self::StackingContextTreeConstruction,
                 // These build the stacking context tree themselves, only when the queried node
                 // needs it. See `LayoutThread::root_transform_for_query`.
-                QueryMsg::BoxArea
-                | QueryMsg::BoxAreas
-                | QueryMsg::OffsetParentQuery
-                | QueryMsg::ScrollingAreaOrOffsetQuery
-                | QueryMsg::ClientRectQuery
-                | QueryMsg::CurrentCSSZoomQuery
-                | QueryMsg::EffectiveOverflow
-                | QueryMsg::ElementInnerOuterTextQuery
-                | QueryMsg::InnerWindowDimensionsQuery
-                | QueryMsg::PaddingQuery
-                | QueryMsg::ResolvedFontStyleQuery
-                | QueryMsg::ScrollParentQuery
-                | QueryMsg::StyleQuery => Self::empty(),
+                QueryMsg::BoxArea |
+                QueryMsg::BoxAreas |
+                QueryMsg::OffsetParentQuery |
+                QueryMsg::ScrollingAreaOrOffsetQuery |
+                QueryMsg::ClientRectQuery |
+                QueryMsg::CurrentCSSZoomQuery |
+                QueryMsg::EffectiveOverflow |
+                QueryMsg::ElementInnerOuterTextQuery |
+                QueryMsg::InnerWindowDimensionsQuery |
+                QueryMsg::PaddingQuery |
+                QueryMsg::ResolvedFontStyleQuery |
+                QueryMsg::ScrollParentQuery |
+                QueryMsg::StyleQuery => Self::empty(),
             },
             ReflowGoal::UpdateScrollNode(..) | ReflowGoal::UpdateTheRendering => {
                 Self::StackingContextTreeConstruction | Self::DisplayListConstruction
@@ -2557,41 +2556,41 @@ fn resolved_value_depends_on_layout(property: &PropertyId) -> bool {
     let depends_on_layout = |longhand: LonghandId| {
         matches!(
             longhand,
-            LonghandId::Width
-                | LonghandId::Height
-                | LonghandId::InlineSize
-                | LonghandId::BlockSize
-                | LonghandId::MinWidth
-                | LonghandId::MinHeight
-                | LonghandId::MinInlineSize
-                | LonghandId::MinBlockSize
-                | LonghandId::Top
-                | LonghandId::Right
-                | LonghandId::Bottom
-                | LonghandId::Left
-                | LonghandId::InsetBlockStart
-                | LonghandId::InsetBlockEnd
-                | LonghandId::InsetInlineStart
-                | LonghandId::InsetInlineEnd
-                | LonghandId::MarginTop
-                | LonghandId::MarginRight
-                | LonghandId::MarginBottom
-                | LonghandId::MarginLeft
-                | LonghandId::MarginBlockStart
-                | LonghandId::MarginBlockEnd
-                | LonghandId::MarginInlineStart
-                | LonghandId::MarginInlineEnd
-                | LonghandId::PaddingTop
-                | LonghandId::PaddingRight
-                | LonghandId::PaddingBottom
-                | LonghandId::PaddingLeft
-                | LonghandId::PaddingBlockStart
-                | LonghandId::PaddingBlockEnd
-                | LonghandId::PaddingInlineStart
-                | LonghandId::PaddingInlineEnd
-                | LonghandId::Transform
-                | LonghandId::GridTemplateRows
-                | LonghandId::GridTemplateColumns
+            LonghandId::Width |
+                LonghandId::Height |
+                LonghandId::InlineSize |
+                LonghandId::BlockSize |
+                LonghandId::MinWidth |
+                LonghandId::MinHeight |
+                LonghandId::MinInlineSize |
+                LonghandId::MinBlockSize |
+                LonghandId::Top |
+                LonghandId::Right |
+                LonghandId::Bottom |
+                LonghandId::Left |
+                LonghandId::InsetBlockStart |
+                LonghandId::InsetBlockEnd |
+                LonghandId::InsetInlineStart |
+                LonghandId::InsetInlineEnd |
+                LonghandId::MarginTop |
+                LonghandId::MarginRight |
+                LonghandId::MarginBottom |
+                LonghandId::MarginLeft |
+                LonghandId::MarginBlockStart |
+                LonghandId::MarginBlockEnd |
+                LonghandId::MarginInlineStart |
+                LonghandId::MarginInlineEnd |
+                LonghandId::PaddingTop |
+                LonghandId::PaddingRight |
+                LonghandId::PaddingBottom |
+                LonghandId::PaddingLeft |
+                LonghandId::PaddingBlockStart |
+                LonghandId::PaddingBlockEnd |
+                LonghandId::PaddingInlineStart |
+                LonghandId::PaddingInlineEnd |
+                LonghandId::Transform |
+                LonghandId::GridTemplateRows |
+                LonghandId::GridTemplateColumns
         )
     };
     match property {
@@ -2615,8 +2614,8 @@ fn mark_container_descendants_for_restyle(
     unmarked: &mut usize,
 ) -> bool {
     let mut marked = false;
-    if containers.contains(&element.as_node().opaque())
-        && let Some(mut data) = element.mutate_data()
+    if containers.contains(&element.as_node().opaque()) &&
+        let Some(mut data) = element.mutate_data()
     {
         data.hint.insert(RestyleHint::RESTYLE_DESCENDANTS);
         marked = true;
@@ -2626,8 +2625,8 @@ fn mark_container_descendants_for_restyle(
         if *unmarked == 0 {
             break;
         }
-        if let Some(child) = child.as_element()
-            && mark_container_descendants_for_restyle(child, containers, unmarked)
+        if let Some(child) = child.as_element() &&
+            mark_container_descendants_for_restyle(child, containers, unmarked)
         {
             unsafe { element.set_dirty_descendants() };
             marked = true;

@@ -7,8 +7,8 @@ use std::cell::{Cell, Ref, RefCell};
 use cssparser::Parser;
 use dom_struct::dom_struct;
 use fonts::{
-    CSSFontFaceDescriptors, FontContext, FontContextWebFontMethods, FontFaceRuleInfo,
-    FontTemplate, LowercaseFontFamilyName, UnloadedFontFaceId,
+    CSSFontFaceDescriptors, FontContext, FontContextWebFontMethods, FontFaceRuleInfo, FontTemplate,
+    LowercaseFontFamilyName, UnloadedFontFaceId,
 };
 use js::context::JSContext;
 use js::rust::HandleObject;

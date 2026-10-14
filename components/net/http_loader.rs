@@ -53,8 +53,7 @@ use net_traits::{
     CookieSource, CustomResponse, CustomResponseMediator, DOCUMENT_ACCEPT_HEADER_VALUE,
     DiscardFetch, NetworkError, RedirectEndValue, RedirectStartValue, ReferrerPolicy,
     ResourceAttribute, ResourceFetchTiming, ResourceFetchTimingContainer, ResourceTimeValue,
-    ServoCipherSuite, ServoNamedGroup, ServoProtocolVersion, TlsSecurityInfo,
-    TlsSecurityState,
+    ServoCipherSuite, ServoNamedGroup, ServoProtocolVersion, TlsSecurityInfo, TlsSecurityState,
 };
 use parking_lot::{Mutex, RwLock};
 use profile_traits::mem::{Report, ReportKind};
@@ -945,15 +944,14 @@ async fn intercept_with_service_worker(
     // Bridge the worker's reply into this async context.
     let (reply_sender, reply_receiver) = tokio::sync::oneshot::channel();
     let reply_sender = std::sync::Mutex::new(Some(reply_sender));
-    let response_chan =
-        GenericCallback::new(move |message: Result<Option<CustomResponse>, _>| {
-            if let Ok(mut reply_sender) = reply_sender.lock() &&
-                let Some(reply_sender) = reply_sender.take()
-            {
-                let _ = reply_sender.send(message.ok().flatten());
-            }
-        })
-        .ok()?;
+    let response_chan = GenericCallback::new(move |message: Result<Option<CustomResponse>, _>| {
+        if let Ok(mut reply_sender) = reply_sender.lock() &&
+            let Some(reply_sender) = reply_sender.take()
+        {
+            let _ = reply_sender.send(message.ok().flatten());
+        }
+    })
+    .ok()?;
     sender
         .send(CustomResponseMediator {
             response_chan,

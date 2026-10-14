@@ -51,9 +51,9 @@ thread_local! {
 }
 
 fn note_invalidated_anchor(anchor: ServoDangerousStyleElement<'_>, result: &InvalidationResult) {
-    if !result.has_invalidated_self()
-        && !result.has_invalidated_descendants()
-        && !result.has_invalidated_siblings()
+    if !result.has_invalidated_self() &&
+        !result.has_invalidated_descendants() &&
+        !result.has_invalidated_siblings()
     {
         return;
     }
@@ -315,8 +315,8 @@ impl Element {
             // Inserting between two siblings can break a chain through them, as in
             // `.a:has(+ .b)` or `:has(.a + .b)`.
             if let (Some(prev_sibling), Some(next_sibling)) =
-                (element.prev_sibling_element(), next_sibling)
-                && prev_sibling
+                (element.prev_sibling_element(), next_sibling) &&
+                prev_sibling
                     .relative_selector_search_direction()
                     .intersects(ElementSelectorFlags::RELATIVE_SELECTOR_SEARCH_DIRECTION_SIBLING)
             {
@@ -382,8 +382,8 @@ impl Element {
             self.invalidate_relative_selectors_for_tree_structure(TSStateForInvalidation::EMPTY);
         }
         if flags.intersects(
-            ElementSelectorFlags::HAS_SLOW_SELECTOR_NTH
-                | ElementSelectorFlags::HAS_SLOW_SELECTOR_NTH_OF,
+            ElementSelectorFlags::HAS_SLOW_SELECTOR_NTH |
+                ElementSelectorFlags::HAS_SLOW_SELECTOR_NTH_OF,
         ) {
             let first_changed = if flags.intersects(ElementSelectorFlags::HAS_SLOW_SELECTOR) {
                 self.upcast::<Node>().GetFirstChild()
@@ -401,8 +401,8 @@ impl Element {
                     .invalidate_relative_selectors_for_tree_structure(TSStateForInvalidation::NTH);
             }
         }
-        if flags.intersects(ElementSelectorFlags::HAS_EDGE_CHILD_SELECTOR)
-            && let Some(edge) = mutation
+        if flags.intersects(ElementSelectorFlags::HAS_EDGE_CHILD_SELECTOR) &&
+            let Some(edge) = mutation
                 .modified_edge_element(no_gc)
                 .and_then(DomRoot::downcast::<Element>)
         {

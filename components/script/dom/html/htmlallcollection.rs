@@ -34,23 +34,23 @@ pub(crate) struct HTMLAllCollection {
 
 /// <https://html.spec.whatwg.org/multipage/#all-named-elements>
 fn is_all_named_element(element: &Element) -> bool {
-    *element.namespace() == ns!(html)
-        && matches!(
+    *element.namespace() == ns!(html) &&
+        matches!(
             *element.local_name(),
-            local_name!("a")
-                | local_name!("button")
-                | local_name!("embed")
-                | local_name!("form")
-                | local_name!("frame")
-                | local_name!("frameset")
-                | local_name!("iframe")
-                | local_name!("img")
-                | local_name!("input")
-                | local_name!("map")
-                | local_name!("meta")
-                | local_name!("object")
-                | local_name!("select")
-                | local_name!("textarea")
+            local_name!("a") |
+                local_name!("button") |
+                local_name!("embed") |
+                local_name!("form") |
+                local_name!("frame") |
+                local_name!("frameset") |
+                local_name!("iframe") |
+                local_name!("img") |
+                local_name!("input") |
+                local_name!("map") |
+                local_name!("meta") |
+                local_name!("object") |
+                local_name!("select") |
+                local_name!("textarea")
         )
 }
 
@@ -64,9 +64,9 @@ struct AllNamedFilter {
 
 impl CollectionFilter for AllNamedFilter {
     fn filter(&self, element: &Element, _root: &Node) -> bool {
-        element.get_id().is_some_and(|id| id == self.name)
-            || (is_all_named_element(element)
-                && element.get_name().is_some_and(|name| name == self.name))
+        element.get_id().is_some_and(|id| id == self.name) ||
+            (is_all_named_element(element) &&
+                element.get_name().is_some_and(|name| name == self.name))
     }
 }
 
