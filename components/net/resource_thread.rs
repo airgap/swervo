@@ -42,7 +42,7 @@ use rustls_pki_types::pem::PemObject;
 use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::{
     self, CallbackSetter, GenericCallback, GenericReceiver, GenericReceiverSet,
-    GenericSelectionResult, GenericSender,
+    GenericSelectionResult,
 };
 use servo_base::id::CookieStoreId;
 use servo_url::ServoUrl;
@@ -678,9 +678,9 @@ impl ResourceChannelManager {
                 return false;
             },
             // Ignore these messages as they are only sent on very specific channels.
-            CoreResourceMsg::CollectMemoryReport(_) |
-            CoreResourceMsg::RevokeTokenForFile(..) |
-            CoreResourceMsg::RefreshTokenForFile(..) => {},
+            CoreResourceMsg::CollectMemoryReport(_)
+            | CoreResourceMsg::RevokeTokenForFile(..)
+            | CoreResourceMsg::RefreshTokenForFile(..) => {},
         }
         true
     }
