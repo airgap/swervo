@@ -771,19 +771,19 @@ fn test_svg_not_rasterize_zero_size() {
     let size = webrender_api::units::DeviceIntSize::new(0, 100);
     assert!(
         cache
-            .rasterize_vector_image(vec_img.id, size, None)
+            .rasterize_vector_image(vec_img.id, size, None, false)
             .is_none()
     );
     let size = webrender_api::units::DeviceIntSize::new(100, 0);
     assert!(
         cache
-            .rasterize_vector_image(vec_img.id, size, None)
+            .rasterize_vector_image(vec_img.id, size, None, false)
             .is_none()
     );
     let size = webrender_api::units::DeviceIntSize::new(0, 0);
     assert!(
         cache
-            .rasterize_vector_image(vec_img.id, size, None)
+            .rasterize_vector_image(vec_img.id, size, None, false)
             .is_none()
     );
 }
