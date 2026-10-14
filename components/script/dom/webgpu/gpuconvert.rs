@@ -593,7 +593,8 @@ pub(crate) fn convert_bind_group_layout_entry(
     let number_of_provided_bindings = bgle.buffer.is_some() as u8 +
         bgle.sampler.is_some() as u8 +
         bgle.storageTexture.is_some() as u8 +
-        bgle.texture.is_some() as u8;
+        bgle.texture.is_some() as u8 +
+        bgle.externalTexture.is_some() as u8;
     let ty = if let Some(buffer) = &bgle.buffer {
         Some(wgpu_types::BindingType::Buffer {
             ty: match buffer.type_ {
@@ -640,6 +641,8 @@ pub(crate) fn convert_bind_group_layout_entry(
             view_dimension: texture.viewDimension.convert(),
             multisampled: texture.multisampled,
         })
+    } else if bgle.externalTexture.is_some() {
+        Some(wgpu_types::BindingType::ExternalTexture)
     } else {
         assert_eq!(number_of_provided_bindings, 0);
         None
@@ -749,6 +752,9 @@ pub(crate) fn convert_bind_group_entry<'a>(
         binding: bind_group.binding,
         resource: match bind_group.resource {
             GPUBindingResource::GPUSampler(ref s) => BindingResource::Sampler(s.id().0),
+            GPUBindingResource::GPUExternalTexture(ref t) => {
+                BindingResource::ExternalTexture(t.id().0)
+            },
             GPUBindingResource::GPUTextureView(ref t) => BindingResource::TextureView(t.id().0),
             GPUBindingResource::GPUTexture(ref t) => {
                 BindingResource::TextureView(t.get_default_view(cx).0)

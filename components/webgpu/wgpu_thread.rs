@@ -444,6 +444,110 @@ impl WGPU {
                             global.device_create_sampler(device_id, &descriptor, Some(sampler_id));
                         self.maybe_dispatch_wgpu_error(device_id, error);
                     },
+                    WebGPURequest::CreateExternalTexture {
+                        device_id,
+                        queue_id,
+                        external_texture_id,
+                        plane_texture_id,
+                        plane_view_id,
+                        width,
+                        height,
+                        data,
+                    } => {
+                        let size = wgt::Extent3d {
+                            width,
+                            height,
+                            depth_or_array_layers: 1,
+                        };
+                        // 1. The single RGBA plane backing the external texture.
+                        let tex_desc = wgt::TextureDescriptor {
+                            label: None,
+                            size,
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgt::TextureDimension::D2,
+                            // Matches the BGRA Snapshot from get_current_frame_data; ExternalTexture
+                            // format Rgba accepts a single Rgba8Unorm OR Bgra8Unorm plane.
+                            format: wgt::TextureFormat::Bgra8Unorm,
+                            usage: wgt::TextureUsages::TEXTURE_BINDING |
+                                wgt::TextureUsages::COPY_DST,
+                            view_formats: vec![],
+                        };
+                        let (_, e1) = self.global.device_create_texture(
+                            device_id,
+                            &tex_desc,
+                            Some(plane_texture_id),
+                        );
+                        self.maybe_dispatch_wgpu_error(device_id, e1);
+                        // 2. Upload the frame's pixels.
+                        {
+                            let _guard = self.poller.lock();
+                            let res = self.global.queue_write_texture(
+                                queue_id,
+                                &wgt::TexelCopyTextureInfo {
+                                    texture: plane_texture_id,
+                                    mip_level: 0,
+                                    origin: wgt::Origin3d::ZERO,
+                                    aspect: wgt::TextureAspect::All,
+                                },
+                                &data,
+                                &wgt::TexelCopyBufferLayout {
+                                    offset: 0,
+                                    bytes_per_row: Some(width * 4),
+                                    rows_per_image: Some(height),
+                                },
+                                &size,
+                            );
+                            drop(_guard);
+                            self.maybe_dispatch_wgpu_error(device_id, res.err());
+                        }
+                        // 3. A view of the plane.
+                        let (_, e2) = self.global.texture_create_view(
+                            plane_texture_id,
+                            &wgpu_core::resource::TextureViewDescriptor::default(),
+                            Some(plane_view_id),
+                        );
+                        self.maybe_dispatch_wgpu_error(device_id, e2);
+                        // 4. Wrap it as an external texture. A single RGBA plane already in the
+                        // destination colour space: identity colour conversion + transforms.
+                        #[rustfmt::skip]
+                        let desc = wgt::ExternalTextureDescriptor {
+                            label: None,
+                            width,
+                            height,
+                            format: wgt::ExternalTextureFormat::Rgba,
+                            yuv_conversion_matrix: [
+                                1.0, 0.0, 0.0, 0.0,
+                                0.0, 1.0, 0.0, 0.0,
+                                0.0, 0.0, 1.0, 0.0,
+                                0.0, 0.0, 0.0, 1.0,
+                            ],
+                            gamut_conversion_matrix: [
+                                1.0, 0.0, 0.0,
+                                0.0, 1.0, 0.0,
+                                0.0, 0.0, 1.0,
+                            ],
+                            src_transfer_function: wgt::ExternalTextureTransferFunction::default(),
+                            dst_transfer_function: wgt::ExternalTextureTransferFunction::default(),
+                            sample_transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                            load_transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                        };
+                        let (_, error) = self.global.device_create_external_texture(
+                            device_id,
+                            &desc,
+                            &[plane_view_id],
+                            Some(external_texture_id),
+                        );
+                        self.maybe_dispatch_wgpu_error(device_id, error);
+                        // Flush the pending queue writes (plane pixels + the external-texture params
+                        // buffer holding the colour-conversion matrices) so they are on the GPU
+                        // before the content process samples the texture. Without this the params
+                        // buffer reads as zero -> the gamut matrix zeroes the sample to black.
+                        {
+                            let _guard = self.poller.lock();
+                            let _ = self.global.queue_submit(queue_id, &[]);
+                        }
+                    },
                     WebGPURequest::CreateShaderModule {
                         device_id,
                         program_id,
@@ -656,15 +760,30 @@ impl WGPU {
                         queue_id,
                         pipeline_id,
                     } => {
+                        let global = &self.global;
+                        // External textures (importExternalTexture) are mandatory WebGPU behaviour,
+                        // but wgpu gates them behind the native EXTERNAL_TEXTURE feature. Enable it
+                        // whenever the adapter supports it, so pages don't have to request a
+                        // non-standard feature (LYK-1380).
+                        let mut required_features = descriptor.required_features;
+                        // NOTE: wgpu-hal only advertises EXTERNAL_TEXTURE on the metal and dx12
+                        // backends (not vulkan/gles) as of wgpu 29, so this is a no-op on Linux
+                        // until those backends gain support upstream. The DOM/IPC/binding path is
+                        // otherwise complete and works wherever the adapter exposes the feature.
+                        if global
+                            .adapter_features(adapter_id.0)
+                            .contains(wgt::Features::EXTERNAL_TEXTURE)
+                        {
+                            required_features |= wgt::Features::EXTERNAL_TEXTURE;
+                        }
                         let desc = DeviceDescriptor {
                             label: descriptor.label.as_ref().map(crate::Cow::from),
-                            required_features: descriptor.required_features,
+                            required_features,
                             required_limits: descriptor.required_limits.clone(),
                             memory_hints: MemoryHints::MemoryUsage,
                             trace: wgpu_types::Trace::Off,
                             experimental_features: ExperimentalFeatures::disabled(),
                         };
-                        let global = &self.global;
                         let device = WebGPUDevice(device_id);
                         let queue = WebGPUQueue(queue_id);
                         let result = global
@@ -1132,6 +1251,10 @@ impl WGPU {
                         if let Err(e) = self.script_sender.send(WebGPUMsg::FreeSampler(id)) {
                             warn!("Unable to send FreeSampler({:?}) ({:?})", id, e);
                         };
+                    },
+                    WebGPURequest::DropExternalTexture(id) => {
+                        // v1: drop the wgpu resource; the id-hub slot is not reclaimed (minor).
+                        self.global.external_texture_drop(id);
                     },
                     WebGPURequest::DropShaderModule(id) => {
                         let global = &self.global;

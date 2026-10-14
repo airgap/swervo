@@ -14,8 +14,10 @@ use script_bindings::cell::DomRefCell;
 use script_bindings::cformat;
 use script_bindings::reflector::reflect_dom_object_with_cx;
 use script_bindings::script_runtime::CanGc;
+use servo_base::generic_channel::GenericSharedMemory;
 use webgpu_traits::{
     PopError, WebGPU, WebGPUComputePipeline, WebGPUComputePipelineResponse, WebGPUDevice,
+    WebGPUExternalTexture,
     WebGPUPoppedErrorScopeResponse, WebGPUQueue, WebGPURenderPipeline,
     WebGPURenderPipelineResponse, WebGPURequest,
 };
@@ -33,7 +35,8 @@ use crate::dom::bindings::codegen::Bindings::EventBinding::EventInit;
 use crate::dom::bindings::codegen::Bindings::WebGPUBinding::{
     GPUAdapterMethods, GPUBindGroupDescriptor, GPUBindGroupLayoutDescriptor, GPUBufferDescriptor,
     GPUCommandEncoderDescriptor, GPUComputePipelineDescriptor, GPUDeviceLostReason,
-    GPUDeviceMethods, GPUErrorFilter, GPUPipelineErrorReason, GPUPipelineLayoutDescriptor,
+    GPUDeviceMethods, GPUErrorFilter, GPUExternalTextureDescriptor, GPUPipelineErrorReason,
+    GPUPipelineLayoutDescriptor,
     GPUQuerySetDescriptor, GPURenderBundleEncoderDescriptor, GPURenderPipelineDescriptor,
     GPUSamplerDescriptor, GPUShaderModuleDescriptor, GPUTextureDescriptor, GPUTextureFormat,
     GPUUncapturedErrorEventInit, GPUVertexStepMode,
@@ -58,6 +61,7 @@ use crate::dom::webgpu::gpubindgrouplayout::GPUBindGroupLayout;
 use crate::dom::webgpu::gpubuffer::GPUBuffer;
 use crate::dom::webgpu::gpucommandencoder::GPUCommandEncoder;
 use crate::dom::webgpu::gpucomputepipeline::GPUComputePipeline;
+use crate::dom::webgpu::gpuexternaltexture::GPUExternalTexture;
 use crate::dom::webgpu::gpupipelinelayout::GPUPipelineLayout;
 use crate::dom::webgpu::gpuqueue::GPUQueue;
 use crate::dom::webgpu::gpurenderbundleencoder::GPURenderBundleEncoder;
@@ -544,6 +548,49 @@ impl GPUDeviceMethods<crate::DomTypeHolder> for GPUDevice {
         descriptor: &GPUSamplerDescriptor,
     ) -> DomRoot<GPUSampler> {
         GPUSampler::create(cx, self, descriptor)
+    }
+
+    /// <https://gpuweb.github.io/gpuweb/#dom-gpudevice-importexternaltexture>
+    fn ImportExternalTexture(
+        &self,
+        descriptor: &GPUExternalTextureDescriptor,
+    ) -> Fallible<DomRoot<GPUExternalTexture>> {
+        // Snapshot the video's current frame (BGRA). No decoded frame -> OperationError.
+        let snapshot = descriptor
+            .source
+            .get_current_frame_data()
+            .ok_or(Error::Operation(None))?;
+        let size = snapshot.size();
+        let (width, height) = (size.width, size.height);
+        if width == 0 || height == 0 {
+            return Err(Error::Operation(None));
+        }
+        let data = GenericSharedMemory::from_bytes(snapshot.as_raw_bytes());
+        let hub = self.global().wgpu_id_hub();
+        let external_texture_id = hub.create_external_texture_id();
+        let plane_texture_id = hub.create_texture_id();
+        let plane_view_id = hub.create_texture_view_id();
+        self.channel()
+            .0
+            .send(WebGPURequest::CreateExternalTexture {
+                device_id: self.id().0,
+                queue_id: self.queue_id().0,
+                external_texture_id,
+                plane_texture_id,
+                plane_view_id,
+                width,
+                height,
+                data,
+            })
+            .expect("Failed to create WebGPU external texture");
+        Ok(GPUExternalTexture::new(
+            &self.global(),
+            self.channel(),
+            self.id(),
+            WebGPUExternalTexture(external_texture_id),
+            descriptor.parent.label.clone(),
+            CanGc::deprecated_note(),
+        ))
     }
 
     /// <https://gpuweb.github.io/gpuweb/#dom-gpudevice-createrenderpipeline>
