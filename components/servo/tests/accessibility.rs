@@ -9,8 +9,7 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use accesskit::Role::{self, GenericContainer};
-use accesskit::{Action, ActionRequest, Affine, NodeId, Rect, TreeId, TreeUpdate};
+use accesskit::{Action, ActionRequest, Affine, NodeId, Rect, Role, TreeId, TreeUpdate};
 use accesskit_consumer::TreeChangeHandler;
 use euclid::Scale;
 use servo::{
@@ -517,7 +516,7 @@ fn test_accessibility_children_of_heading_change() {
     let heading_children: Vec<_> = heading.children().collect();
     assert_eq!(heading_children.len(), 2);
     assert_eq!(heading_children[0].role(), Role::TextRun);
-    assert_eq!(heading_children[1].role(), Role::GenericContainer);
+    assert_eq!(heading_children[1].role(), Role::Code);
 
     let _ = evaluate_javascript(
         &servo_test,
@@ -552,7 +551,7 @@ fn test_accessibility_descendants_of_heading_change() {
     let heading_children: Vec<_> = heading.children().collect();
     assert_eq!(heading_children.len(), 3);
     assert_eq!(heading_children[0].role(), Role::TextRun);
-    assert_eq!(heading_children[1].role(), Role::GenericContainer);
+    assert_eq!(heading_children[1].role(), Role::Emphasis);
     assert_eq!(heading_children[2].role(), Role::TextRun);
 
     let em = heading_children[1];
@@ -909,12 +908,12 @@ fn test_accessibility_bounds_are_computed_for_inline_elements() {
     );
     assert!(heading.has_bounds());
 
-    let em = find_first_matching_node(heading, |node| node.role() == GenericContainer)
-        .expect("Heading should have one GenericContainer child");
+    let em = find_first_matching_node(heading, |node| node.role() == Role::Emphasis)
+        .expect("Heading should have one Emphasis child");
     assert!(em.has_bounds());
 
-    let strong = find_first_matching_node(em, |node| node.role() == GenericContainer)
-        .expect("<em> should have one GenericContainer child");
+    let strong = find_first_matching_node(em, |node| node.role() == Role::Strong)
+        .expect("<em> should have one Strong child");
     assert!(strong.has_bounds());
 }
 
