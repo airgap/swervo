@@ -5081,6 +5081,36 @@ impl VirtualMethods for Element {
                 }
             },
         };
+        // The attributes that the accessibility tree reads when building a node: its name,
+        // states and properties. Inertness changes whether the subtree is exposed at all.
+        if *attr.namespace() == ns!() {
+            match *attr.local_name() {
+                local_name!("inert") => {
+                    node.add_pending_accessibility_damage(AccessibilityDamage::Children)
+                },
+                local_name!("aria-checked")
+                | local_name!("aria-disabled")
+                | local_name!("aria-expanded")
+                | local_name!("aria-label")
+                | local_name!("aria-labelledby")
+                | local_name!("aria-readonly")
+                | local_name!("aria-required")
+                | local_name!("aria-selected")
+                | local_name!("alt")
+                | local_name!("checked")
+                | local_name!("disabled")
+                | local_name!("href")
+                | local_name!("id")
+                | local_name!("readonly")
+                | local_name!("required")
+                | local_name!("title")
+                | local_name!("type") => {
+                    node.add_pending_accessibility_damage(AccessibilityDamage::Node)
+                },
+                _ => {},
+            }
+        }
+
         // After the match: matching reads the id from `id_attribute`, updated above.
         self.invalidate_relative_selectors_for_attribute(attr.local_name(), attr.namespace());
 

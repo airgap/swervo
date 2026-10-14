@@ -39,9 +39,8 @@ use js::jsapi::JSObject;
 use js::realm::CurrentRealm;
 use js::rust::{HandleObject, HandleValue, MutableHandleValue};
 use layout_api::{
-    ContainerTimingRecord, DocumentSelection, LCPCandidate, PendingRestyle, ReflowGoal,
-    ReflowPhasesRun, ReflowStatistics, RestyleReason, ScrollContainerQueryFlags,
-    TrustedNodeAddress,
+    ContainerTimingRecord, LCPCandidate, PendingRestyle, ReflowGoal, ReflowPhasesRun,
+    ReflowStatistics, RestyleReason, ScrollContainerQueryFlags, TrustedNodeAddress,
 };
 use malloc_size_of::MallocSizeOfOps;
 use metrics::{InteractiveFlag, InteractiveWindow, ProgressiveWebMetrics};
@@ -183,7 +182,6 @@ use crate::dom::html::htmlallcollection::HTMLAllCollection;
 use crate::dom::html::htmlanchorelement::HTMLAnchorElement;
 use crate::dom::html::htmlareaelement::HTMLAreaElement;
 use crate::dom::html::htmlbaseelement::HTMLBaseElement;
-use crate::dom::html::htmlbrelement::HTMLBRElement;
 use crate::dom::html::htmlcollection::{CollectionFilter, HTMLCollection};
 use crate::dom::html::htmlelement::HTMLElement;
 use crate::dom::html::htmlembedelement::HTMLEmbedElement;
@@ -5870,24 +5868,6 @@ impl Document {
         Some((stop.node.clone(), stop.offset, Some(client_rect)))
     }
 
-    /// The caret that layout paints for a selection collapsed in the focused editing host.
-    /// Selected text is painted by layout from the visible selection
-    /// (`visible_selection_for_layout`), so only the caret is sent here.
-    pub(crate) fn selection_for_layout(&self) -> Option<DocumentSelection> {
-        let (container, offset) = self.selection.get()?.collapsed_dom_boundary()?;
-        let focused_area = self.focus_handler().focused_area();
-        let editing_host = container.editing_host_of()?;
-        if *editing_host != *focused_area.element()?.upcast::<Node>() {
-            return None;
-        }
-        let (node, offset) = caret_position_in_laid_out_text(&container, offset)?;
-        Some(DocumentSelection {
-            caret: Some((node.to_opaque(), offset)),
-            selected_text: Vec::new(),
-            end_node: None,
-        })
-    }
-
     pub(crate) fn custom_element_reaction_stack(&self) -> Rc<CustomElementReactionStack> {
         self.custom_element_reaction_stack.clone()
     }
@@ -8096,44 +8076,5 @@ impl Iterator for SameOriginDescendantNavigablesIterator {
             };
         }
         None
-    }
-}
-
-/// Where layout paints the caret of a selection collapsed at (`node`, `offset`): a position in
-/// a text node, or before (0) or after (1) a `<br>`. A position between elements becomes the
-/// nearest such position, preferring the end of text before it.
-fn caret_position_in_laid_out_text(node: &Node, offset: u32) -> Option<(DomRoot<Node>, u32)> {
-    let mut node = DomRoot::from_ref(node);
-    let mut offset = offset;
-    loop {
-        if node.is::<Text>() {
-            return Some((node, offset));
-        }
-        let before = offset
-            .checked_sub(1)
-            .and_then(|index| node.children().nth(index as usize));
-        let after = node.children().nth(offset as usize);
-        match (before, after) {
-            (Some(before), _) if before.is::<Text>() => {
-                let length = before.len();
-                return Some((before, length));
-            },
-            (_, Some(after)) if after.is::<Text>() || after.is::<HTMLBRElement>() => {
-                return Some((after, 0));
-            },
-            // After a final `<br>` there is no further line; its start is the caret position.
-            (Some(before), None) if before.is::<HTMLBRElement>() => return Some((before, 0)),
-            // Layout gives an empty editing host a line for its caret.
-            (None, None) if offset == 0 => return Some((node, 0)),
-            (_, Some(after)) if after.is::<Element>() => {
-                node = after;
-                offset = 0;
-            },
-            (Some(before), _) if before.is::<Element>() => {
-                offset = before.len();
-                node = before;
-            },
-            _ => return None,
-        }
     }
 }

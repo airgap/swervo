@@ -170,20 +170,6 @@ pub enum LayoutElementType {
     SVGSVGElement,
 }
 
-/// The selection of a document as layout paints it, in DOM terms. It can span many text nodes
-/// and inline formatting contexts.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct DocumentSelection {
-    /// The insertion point of a selection collapsed in the focused editing host: a text node, a
-    /// `<br>` or an empty editing host and a UTF-16 offset in it (0 or 1 for a `<br>`).
-    pub caret: Option<(OpaqueNode, u32)>,
-    /// The selected UTF-16 range of every text node in a non-collapsed selection, and the range
-    /// 0..1 of every `<br>` in it.
-    pub selected_text: Vec<(OpaqueNode, Range<u32>)>,
-    /// The node that a non-collapsed selection ends in.
-    pub end_node: Option<OpaqueNode>,
-}
-
 /// A position where a caret can be placed in text, as laid out.
 #[derive(Clone, Debug)]
 pub struct CaretStop {
@@ -279,9 +265,9 @@ pub fn parse_view_box(value: &str) -> Option<[f32; 4]> {
         numbers.next()?.ok()?,
         numbers.next()?.ok()?,
     ];
-    if numbers.next().is_some() ||
-        view_box[2].partial_cmp(&0.0) != Some(Ordering::Greater) ||
-        view_box[3].partial_cmp(&0.0) != Some(Ordering::Greater)
+    if numbers.next().is_some()
+        || view_box[2].partial_cmp(&0.0) != Some(Ordering::Greater)
+        || view_box[3].partial_cmp(&0.0) != Some(Ordering::Greater)
     {
         return None;
     }
@@ -470,9 +456,6 @@ pub trait Layout {
     ) -> NodeRenderingType;
 
     fn query_containing_block(&self, node: TrustedNodeAddress) -> Option<UntrustedNodeAddress>;
-    /// Resolve an AccessKit accessibility node id to the DOM node backing it, so an incoming
-    /// assistive-technology action can be dispatched to that node (LYK-1378 / Servo #4344).
-    fn query_accessibility_node(&self, node_id: accesskit::NodeId) -> Option<UntrustedNodeAddress>;
     fn query_containing_block_is_descendant(
         &self,
         root: TrustedNodeAddress,
@@ -920,8 +903,6 @@ pub struct ReflowRequest {
     /// The [`PaintTimingInfo`] for this reflow.
     /// <https://www.w3.org/TR/paint-timing/#paint-timing-info>
     pub paint_timing_info: PaintTimingInfo,
-    /// The selection of the document, which layout paints.
-    pub document_selection: Option<DocumentSelection>,
     /// The current font context.
     pub document_context: WebFontDocumentContext,
     /// If an accessibility tree update is necessary, all the information needed to do the update.
@@ -1043,8 +1024,9 @@ impl ImageAnimationState {
             return false;
         }
         let time_interval_since_last_update = now - self.frame_start_time;
-        let mut remain_time_interval = time_interval_since_last_update -
-            self.image
+        let mut remain_time_interval = time_interval_since_last_update
+            - self
+                .image
                 .frames
                 .get(self.active_frame)
                 .unwrap()

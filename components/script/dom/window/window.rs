@@ -3079,7 +3079,6 @@ impl Window {
             animations: document.animation_manager().sets(),
             animating_images: document.animation_manager().animating_images(),
             highlighted_dom_node: document.highlighted_dom_node().map(|node| node.to_opaque()),
-            document_selection: document.selection_for_layout(),
             frame_focused: self.webview_state().has_system_focus.get()
                 && document.focus_handler().has_focus(),
             halt_lcp: self.has_dispatched_scroll_event.get()

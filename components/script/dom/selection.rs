@@ -141,16 +141,6 @@ impl Selection {
             .is_none_or(|range| range.collapsed())
     }
 
-    /// The DOM boundary of this selection when it is collapsed, without creating its live range.
-    pub(crate) fn collapsed_dom_boundary(&self) -> Option<(DomRoot<Node>, u32)> {
-        let range = self.range.borrow();
-        let range = range.as_ref()?;
-        if !range.collapsed() {
-            return None;
-        }
-        Some((range.start.container.as_rooted(), range.start.offset))
-    }
-
     fn clear_cached_live_range(&self) {
         if let Some(old_range) = self.live_range.take() {
             old_range.disassociate_selection(self);
