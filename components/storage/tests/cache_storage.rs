@@ -2,6 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::path::{Path, PathBuf};
+
 use servo_base::generic_channel::{self, GenericCallback};
 use servo_base::id::{PIPELINE_NAMESPACE, PipelineNamespace, PipelineNamespaceId};
 use servo_url::{ImmutableOrigin, ServoUrl};
@@ -142,18 +144,14 @@ fn roundtrip(
     receiver.recv().unwrap()
 }
 
-#[test]
-fn test_cache_workflow() {
+/// A client storage thread rooted in `dir`, and a storage bottle for `origin`'s caches.
+fn client_storage_proxy(dir: &Path, origin: &ImmutableOrigin) -> StorageProxyMap {
     if PIPELINE_NAMESPACE.get().is_none() {
         PipelineNamespace::install(PipelineNamespaceId(1));
     }
-    let tmp_dir = tempfile::tempdir().unwrap();
     let client_storage: ClientStorageThreadHandle =
-        ClientStorageThreadFactory::new(Some(tmp_dir.path().to_path_buf()), false);
-    let handle: CacheStorageThreadHandle =
-        CacheStorageThreadFactory::new(Some(tmp_dir.path().to_path_buf()), false);
-    let origin: ImmutableOrigin = ServoUrl::parse("https://example.com").unwrap().origin();
-    let proxy: StorageProxyMap = client_storage
+        ClientStorageThreadFactory::new(Some(dir.to_path_buf()), false);
+    client_storage
         .obtain_a_storage_bottle_map(
             StorageType::Local,
             None,
@@ -162,7 +160,130 @@ fn test_cache_workflow() {
         )
         .recv()
         .unwrap()
+        .unwrap()
+}
+
+fn exit(handle: &CacheStorageThreadHandle) {
+    let (sender, receiver) = generic_channel::channel().unwrap();
+    handle
+        .send(CacheStorageThreadMessage::Exit(sender.into()))
         .unwrap();
+    receiver.recv().unwrap();
+}
+
+/// With a config dir, the cache storage is SQLite-backed.
+#[test]
+fn test_cache_workflow_sqlite() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    cache_workflow(tmp_dir.path(), Some(tmp_dir.path().to_path_buf()), false);
+}
+
+/// Without a config dir, or with temporary storage, the cache storage is in memory.
+#[test]
+fn test_cache_workflow_memory() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    cache_workflow(tmp_dir.path(), None, false);
+    let tmp_dir = tempfile::tempdir().unwrap();
+    cache_workflow(tmp_dir.path(), Some(tmp_dir.path().to_path_buf()), true);
+    assert!(!tmp_dir.path().join("cache_api.sqlite").exists());
+}
+
+/// Caches written by one cache storage thread are read back by the next one using the same
+/// config dir.
+#[test]
+fn test_cache_persistence() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let origin: ImmutableOrigin = ServoUrl::parse("https://example.com").unwrap().origin();
+    let proxy = client_storage_proxy(tmp_dir.path(), &origin);
+
+    let handle: CacheStorageThreadHandle =
+        CacheStorageThreadFactory::new(Some(tmp_dir.path().to_path_buf()), false);
+    for name in ["v1", "v2"] {
+        let reply = roundtrip(&handle, |callback| CacheStorageThreadMessage::OpenCache {
+            cache_name: name.to_owned(),
+            callback,
+            proxy: proxy.clone(),
+            origin: origin.clone(),
+        });
+        assert!(matches!(
+            reply,
+            CacheStorageThreadResponse::OpenCacheResult { result: Ok(()), .. }
+        ));
+    }
+    let mut stored = response("persisted");
+    stored.headers = vec![("Content-Type".to_owned(), b"text/plain".to_vec())];
+    stored.url = Some("https://example.com/a".to_owned());
+    stored.response_type = CacheApiResponseType::Cors;
+    let mut stored_request = request("https://example.com/a");
+    stored_request.headers = vec![("Accept".to_owned(), b"*/*".to_vec())];
+    let reply = roundtrip(&handle, |callback| CacheStorageThreadMessage::Put {
+        cache_name: "v2".to_owned(),
+        entries: vec![(stored_request.clone(), stored.clone())],
+        callback,
+        origin: origin.clone(),
+    });
+    assert!(matches!(
+        reply,
+        CacheStorageThreadResponse::PutResult(Ok(()))
+    ));
+    exit(&handle);
+    assert!(tmp_dir.path().join("cache_api.sqlite").exists());
+
+    // Reopen the same config dir.
+    let handle: CacheStorageThreadHandle =
+        CacheStorageThreadFactory::new(Some(tmp_dir.path().to_path_buf()), false);
+    let reply = roundtrip(&handle, |callback| CacheStorageThreadMessage::CacheNames {
+        callback,
+        origin: origin.clone(),
+    });
+    let CacheStorageThreadResponse::CacheNamesResult(Ok(names)) = reply else {
+        panic!("unexpected reply {reply:?}");
+    };
+    assert_eq!(names, vec!["v1".to_owned(), "v2".to_owned()]);
+
+    let reply = roundtrip(&handle, |callback| CacheStorageThreadMessage::Match {
+        scope: CacheMatchScope::AllCaches,
+        request: Some(request("https://example.com/a")),
+        options: CacheApiQueryOptions::default(),
+        max_results: usize::MAX,
+        callback,
+        origin: origin.clone(),
+    });
+    let CacheStorageThreadResponse::MatchResult(Ok(responses)) = reply else {
+        panic!("unexpected reply {reply:?}");
+    };
+    assert_eq!(responses, vec![stored]);
+
+    let reply = roundtrip(&handle, |callback| CacheStorageThreadMessage::Keys {
+        cache_name: "v2".to_owned(),
+        request: None,
+        options: CacheApiQueryOptions::default(),
+        callback,
+        origin: origin.clone(),
+    });
+    let CacheStorageThreadResponse::KeysResult(Ok(keys)) = reply else {
+        panic!("unexpected reply {reply:?}");
+    };
+    assert_eq!(keys, vec![stored_request]);
+
+    // Other origins don't see the caches.
+    let other: ImmutableOrigin = ServoUrl::parse("https://other.example").unwrap().origin();
+    let reply = roundtrip(&handle, |callback| CacheStorageThreadMessage::CacheNames {
+        callback,
+        origin: other,
+    });
+    assert!(matches!(
+        reply,
+        CacheStorageThreadResponse::CacheNamesResult(Ok(names)) if names.is_empty()
+    ));
+    exit(&handle);
+}
+
+fn cache_workflow(client_dir: &Path, cache_dir: Option<PathBuf>, temporary_storage: bool) {
+    let origin: ImmutableOrigin = ServoUrl::parse("https://example.com").unwrap().origin();
+    let proxy = client_storage_proxy(client_dir, &origin);
+    let handle: CacheStorageThreadHandle =
+        CacheStorageThreadFactory::new(cache_dir, temporary_storage);
 
     for name in ["v1", "v2"] {
         let reply = roundtrip(&handle, |callback| CacheStorageThreadMessage::OpenCache {
@@ -333,9 +454,5 @@ fn test_cache_workflow() {
         CacheStorageThreadResponse::HasCacheResult(Ok(false))
     ));
 
-    let (sender, receiver) = generic_channel::channel().unwrap();
-    handle
-        .send(CacheStorageThreadMessage::Exit(sender.into()))
-        .unwrap();
-    receiver.recv().unwrap();
+    exit(&handle);
 }

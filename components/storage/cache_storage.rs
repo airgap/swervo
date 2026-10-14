@@ -7,7 +7,7 @@ use std::fmt::Debug;
 use std::path::PathBuf;
 use std::thread;
 
-use log::error;
+use log::{error, warn};
 use servo_base::generic_channel::{self, GenericReceiver, GenericSender};
 use servo_url::ImmutableOrigin;
 use storage_traits::cache_storage::{
@@ -16,6 +16,10 @@ use storage_traits::cache_storage::{
     CacheStorageThreadResponse,
 };
 use storage_traits::client_storage::StorageProxyMap;
+
+use self::sqlite::SqliteCacheStorageEngine;
+
+mod sqlite;
 
 trait CacheStorageEngine {
     type Error: Debug;
@@ -548,35 +552,38 @@ pub trait CacheStorageThreadFactory {
 }
 
 impl CacheStorageThreadFactory for CacheStorageThreadHandle {
+    /// Spawn the cache storage thread. With a config dir and without temporary storage, caches
+    /// persist in a SQLite database in the config dir; otherwise they live only in memory.
     fn new(config_dir: Option<PathBuf>, temporary_storage: bool) -> CacheStorageThreadHandle {
         let (generic_sender, generic_receiver) = generic_channel::channel().unwrap();
-        let mut temp_dir: Option<tempfile::TempDir> = None;
-        let base_dir = config_dir
-            .unwrap_or_else(|| {
-                let tmp_dir = tempfile::tempdir().unwrap();
-                let path = tmp_dir.path().to_path_buf();
-                temp_dir = Some(tmp_dir);
-                path
-            })
-            .join("cachestorage");
-        let storage_dir = if temporary_storage {
-            let unique_id = uuid::Uuid::new_v4().to_string();
-            base_dir.join("temporary").join(unique_id)
-        } else {
-            base_dir.join("default_v1")
-        };
-        std::fs::create_dir_all(&storage_dir)
-            .expect("Failed to create CacheStorage storage directory");
+        let database_path = config_dir
+            .filter(|_| !temporary_storage)
+            .map(|dir| dir.join(sqlite::DB_FILE_NAME));
         let sender_clone = generic_sender.clone();
         thread::Builder::new()
             .name("CacheStorageThread".to_owned())
             .spawn(move || {
-                // Keep temp_dir alive while the thread runs.
-                let _ = temp_dir;
-                let engine = MemCacheStorageEngine::default();
-                let mut cache_storage_thread =
-                    CacheStorageThread::new(sender_clone, generic_receiver, engine);
-                cache_storage_thread.start();
+                let engine = database_path.and_then(|path| {
+                    SqliteCacheStorageEngine::open(&path)
+                        .inspect_err(|error| {
+                            warn!(
+                                "Failed to open Cache API storage at {path:?}, \
+                                 falling back to memory: {error:?}"
+                            )
+                        })
+                        .ok()
+                });
+                match engine {
+                    Some(engine) => {
+                        CacheStorageThread::new(sender_clone, generic_receiver, engine).start()
+                    },
+                    None => CacheStorageThread::new(
+                        sender_clone,
+                        generic_receiver,
+                        MemCacheStorageEngine::default(),
+                    )
+                    .start(),
+                }
             })
             .expect("Thread spawning failed");
 

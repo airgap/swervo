@@ -34,8 +34,9 @@ fn new_storage_thread_group(
         mem_profiler_chan,
         format!("storage-reporter-{label}"),
     );
+    // The private group keeps the Cache API in memory, so nothing private touches disk.
     let cache_storage: CacheStorageThreadHandle =
-        CacheStorageThreadFactory::new(config_dir, temporary_storage);
+        CacheStorageThreadFactory::new(config_dir, temporary_storage || label == "private");
 
     StorageThreads::new(
         client_storage.into(),
