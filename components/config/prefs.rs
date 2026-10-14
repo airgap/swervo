@@ -40,13 +40,9 @@ pub fn add_observer(observer: Box<dyn PreferencesObserver>) {
 /// Update the values of the global preferences for the current process. This also notifies the
 /// observers previously added using [`add_observer`].
 pub fn set(preferences: Preferences) {
-    // Get list of changes, returning early if the preferences haven't changed.
-    let changed = preferences.diff(&PREFERENCES.read().unwrap());
-    if changed.is_empty() {
-        return;
-    }
-
-    // Map between Stylo preference names and Servo preference names.
+    // Map between Stylo preference names and Servo preference names. This happens even when
+    // the preferences haven't changed, so that Servo defaults that differ from Stylo's static
+    // defaults (such as `:has()`) take effect on the first call.
     stylo_static_prefs::set_pref!("layout.unimplemented", preferences.layout_unimplemented);
     stylo_static_prefs::set_pref!("layout.threads", preferences.layout_threads as i32);
     stylo_static_prefs::set_pref!("layout.columns.enabled", preferences.layout_columns_enabled);
@@ -66,6 +62,20 @@ pub fn set(preferences: Preferences) {
         "layout.variable_fonts.enabled",
         preferences.layout_variable_fonts_enabled
     );
+    stylo_static_prefs::set_pref!(
+        "layout.css.has-selector.enabled",
+        preferences.layout_css_has_selector_enabled
+    );
+    stylo_static_prefs::set_pref!(
+        "layout.css.nth-child-of.enabled",
+        preferences.layout_css_nth_child_of_enabled
+    );
+
+    // Get list of changes, returning early if the preferences haven't changed.
+    let changed = preferences.diff(&PREFERENCES.read().unwrap());
+    if changed.is_empty() {
+        return;
+    }
 
     *PREFERENCES.write().unwrap() = preferences;
 
@@ -306,6 +316,10 @@ pub struct Preferences {
     pub layout_flexbox_balance: bool,
     pub layout_container_queries_enabled: bool,
     pub layout_css_ellipse_corners_enabled: bool,
+    /// Whether the `:has()` selector is parsed.
+    pub layout_css_has_selector_enabled: bool,
+    /// Whether `:nth-child(An+B of S)` and `:nth-last-child(An+B of S)` are parsed.
+    pub layout_css_nth_child_of_enabled: bool,
     pub layout_style_sharing_cache_enabled: bool,
     pub layout_threads: i64,
     /// The minimum number of parallelizable jobs required before turning on parallelism
@@ -479,8 +493,8 @@ impl Preferences {
             dom_testutils_enabled: false,
             // Following Firefox and Chrome, we are enabling the touch events legacy APIs for android.
             // Additionally, enabling it in ohos for compatibility as well.
-            dom_touch_events_legacy_apis_enabled: cfg!(target_os = "android") |
-                cfg!(target_env = "ohos"),
+            dom_touch_events_legacy_apis_enabled: cfg!(target_os = "android")
+                | cfg!(target_env = "ohos"),
             dom_transient_activation_duration_ms: 5000,
             dom_web_animations_enabled: false,
             dom_webgl2_enabled: false,
@@ -560,6 +574,8 @@ impl Preferences {
             layout_columns_enabled: false,
             layout_container_queries_enabled: false,
             layout_css_ellipse_corners_enabled: false,
+            layout_css_has_selector_enabled: true,
+            layout_css_nth_child_of_enabled: true,
             layout_flexbox_balance: false,
             layout_style_sharing_cache_enabled: true,
             // TODO(mrobinson): This should likely be based on the number of processors.
