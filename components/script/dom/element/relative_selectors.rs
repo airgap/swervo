@@ -127,9 +127,11 @@ impl Element {
         let window = self.owner_window();
         {
             let layout = window.layout();
+            // `Dom::from_ref` must run in script state; only the layout view is taken inside.
+            let dom = Dom::from_ref(self);
             with_layout_state(|| {
                 // Borrow the live element for the layout-only traversal; no script runs here.
-                let element = unsafe { Dom::from_ref(self).to_layout() };
+                let element = unsafe { dom.to_layout() };
                 invalidate(layout.stylist(), ServoDangerousStyleElement::from(element))
             });
         }
