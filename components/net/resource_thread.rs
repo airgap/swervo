@@ -13,12 +13,10 @@ use std::sync::{Arc, Weak};
 use std::thread;
 
 use cookie::Cookie;
-use crossbeam_channel::Sender;
-use devtools_traits::DevtoolsControlMsg;
 use embedder_traits::GenericEmbedderProxy;
 use hyper_serde::Serde;
-use ipc_channel::ipc::IpcSender;
 use log::{debug, trace, warn};
+use malloc_size_of_derive::MallocSizeOf;
 use net_traits::blob_url_store::{BlobTokenCommunicator, parse_blob_url};
 use net_traits::filemanager_thread::FileTokenCheck;
 use net_traits::pub_domains::public_suffix_list_size_of;
@@ -26,10 +24,12 @@ use net_traits::request::{Destination, PreloadEntry, PreloadId, RequestBuilder, 
 use net_traits::response::{Response, ResponseInit};
 use net_traits::{
     AsyncRuntime, CookieAsyncResponse, CookieData, CookieSource, CoreResourceMsg,
-    CoreResourceThread, DiscardFetch, FetchChannels, FetchTaskTarget, ResourceFetchTiming,
-    ResourceThreads, ResourceTimingType, WebSocketDomAction, WebSocketNetworkEvent,
+    CoreResourceThread, DiscardFetch, FetchChannels, FetchTaskTarget, NetworkError,
+    ResourceFetchTiming, ResourceThreads, ResourceTimingType, WebSocketDomAction,
+    WebSocketNetworkEvent,
 };
 use parking_lot::{Mutex, RwLock};
+use profile_traits::generic_callback::GenericCallback as ProfileGenericCallback;
 use profile_traits::mem::{
     ProcessReports, ProfilerChan as MemProfilerChan, Report, ReportKind, ReportsChan,
     perform_memory_report,
@@ -42,7 +42,7 @@ use rustls_pki_types::pem::PemObject;
 use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::{
     self, CallbackSetter, GenericCallback, GenericReceiver, GenericReceiverSet,
-    GenericSelectionResult,
+    GenericSelectionResult, GenericSender,
 };
 use servo_base::id::CookieStoreId;
 use servo_url::ServoUrl;
@@ -64,7 +64,7 @@ use crate::fetch::methods::{
 };
 use crate::filemanager_thread::FileManager;
 use crate::hsts::{self, HstsList};
-use crate::http_cache::HttpCache;
+use crate::http_cache::{HttpCache, HttpCacheAssignment};
 use crate::http_loader::{HttpState, http_redirect_fetch};
 use crate::protocols::ProtocolRegistry;
 use crate::request_interceptor::RequestInterceptor;
@@ -86,7 +86,7 @@ fn load_root_cert_store_from_file(file_path: String) -> io::Result<Vec<Certifica
 /// Returns a tuple of (public, private) senders to the new threads.
 #[expect(clippy::too_many_arguments)]
 pub fn new_resource_threads(
-    devtools_sender: Option<Sender<DevtoolsControlMsg>>,
+    devtools_sender: Option<crossbeam_channel::Sender<DevtoolsMessage>>,
     time_profiler_chan: ProfilerChan,
     mem_profiler_chan: MemProfilerChan,
     embedder_proxy: GenericEmbedderProxy<NetToEmbedderMsg>,
@@ -126,7 +126,7 @@ pub fn new_resource_threads(
 /// Create a CoreResourceThread
 #[expect(clippy::too_many_arguments)]
 pub fn new_core_resource_thread(
-    devtools_sender: Option<Sender<DevtoolsControlMsg>>,
+    devtools_sender: Option<crossbeam_channel::Sender<DevtoolsMessage>>,
     time_profiler_chan: ProfilerChan,
     mem_profiler_chan: MemProfilerChan,
     embedder_proxy: GenericEmbedderProxy<NetToEmbedderMsg>,
@@ -212,20 +212,13 @@ fn create_http_states(
         servo_base::read_json_from_file(&mut cookie_jar, config_dir, "cookie_jar.json");
     }
 
-    // Reload the persistent HTTP cache from disk (main profile only; the private state below stays
-    // memory-only). Still-fresh entries serve from cache on a cold start; stale ones revalidate.
-    let http_cache = match config_dir {
-        Some(config_dir) => HttpCache::load(config_dir),
-        None => HttpCache::default(),
-    };
-
     let override_manager = CertificateErrorOverrideManager::new();
     let http_state = HttpState {
         hsts_list: RwLock::new(hsts_list),
         cookie_jar: RwLock::new(cookie_jar),
         auth_cache: RwLock::new(auth_cache),
         history_states: RwLock::new(FxHashMap::default()),
-        http_cache,
+        http_cache: HttpCache::new(HttpCacheAssignment::Public),
         client: create_http_client(create_tls_config(
             ca_certificates.clone(),
             ignore_certificate_errors,
@@ -242,7 +235,7 @@ fn create_http_states(
         cookie_jar: RwLock::new(CookieStorage::new(150)),
         auth_cache: RwLock::new(AuthCache::default()),
         history_states: RwLock::new(FxHashMap::default()),
-        http_cache: HttpCache::default(),
+        http_cache: HttpCache::new(HttpCacheAssignment::Private),
         client: create_http_client(create_tls_config(
             ca_certificates,
             ignore_certificate_errors,
@@ -655,9 +648,6 @@ impl ResourceChannelManager {
                 }
             },
             CoreResourceMsg::ToFileManager(msg) => self.resource_manager.filemanager.handle(msg),
-            CoreResourceMsg::StorePreloadedResponse(preload_id, response) => self
-                .resource_manager
-                .handle_preloaded_response(preload_id, response),
             CoreResourceMsg::TotalSizeOfInFlightKeepAliveRecords(pipeline_id, sender) => {
                 let total = self
                     .resource_manager
@@ -681,10 +671,9 @@ impl ResourceChannelManager {
                     servo_base::write_json_to_file(&*jar, config_dir, "cookie_jar.json");
                     let hsts = http_state.hsts_list.read();
                     servo_base::write_json_to_file(&*hsts, config_dir, "hsts_list.json");
-                    // Persist the HTTP cache now that in-flight bodies have completed.
-                    http_state.http_cache.persist(config_dir);
                 }
                 self.resource_manager.exit();
+
                 let _ = sender.send(());
                 return false;
             },
@@ -697,7 +686,7 @@ impl ResourceChannelManager {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, MallocSizeOf)]
 pub struct AuthCacheEntry {
     pub user_name: String,
     pub password: String,
@@ -712,14 +701,20 @@ impl Default for AuthCache {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, MallocSizeOf)]
 pub struct AuthCache {
     pub version: u32,
     pub entries: HashMap<String, AuthCacheEntry>,
 }
 
+#[cfg(feature = "devtools")]
+type DevtoolsMessage = devtools_traits::DevtoolsControlMsg;
+
+#[cfg(not(feature = "devtools"))]
+type DevtoolsMessage = ();
+
 pub struct CoreResourceManager {
-    devtools_sender: Option<Sender<DevtoolsControlMsg>>,
+    devtools_sender: Option<crossbeam_channel::Sender<DevtoolsMessage>>,
     sw_managers: crate::fetch::methods::SharedServiceWorkerManagers,
     filemanager: FileManager,
     request_interceptor: RequestInterceptor,
@@ -732,7 +727,7 @@ pub struct CoreResourceManager {
 
 impl CoreResourceManager {
     pub fn new(
-        devtools_sender: Option<Sender<DevtoolsControlMsg>>,
+        devtools_sender: Option<crossbeam_channel::Sender<DevtoolsMessage>>,
         _profiler_chan: ProfilerChan,
         embedder_proxy: GenericEmbedderProxy<NetToEmbedderMsg>,
         ca_certificates: CACertificates<'static>,
@@ -751,8 +746,23 @@ impl CoreResourceManager {
         }
     }
 
-    fn handle_preloaded_response(&self, preload_id: PreloadId, response: Response) {
-        let mut preloaded_resources = self.preloaded_resources.lock().unwrap();
+    fn handle_preloaded_response(
+        preloaded_resources: SharedPreloadedResources,
+        preload_id: PreloadId,
+        response: Response,
+    ) {
+        // https://html.spec.whatwg.org/multipage/#preload
+        // Step 11.1. If bodyBytes is a byte sequence, then set response's body to bodyBytes as a body.
+        // Step 11.2. Otherwise, set response to a network error.
+        let response = response
+            .get_network_error()
+            .map(|_| {
+                Response::network_error(NetworkError::ResourceLoadError("Failed to preload".into()))
+            })
+            .unwrap_or(response);
+        let mut preloaded_resources = preloaded_resources.lock().unwrap();
+        // Step 11.5. If entry's on response available is null, then set entry's response to response;
+        // otherwise call entry's on response available given response.
         if let Some(entry) = preloaded_resources.get_mut(&preload_id) {
             entry.with_response(response);
         }
@@ -786,6 +796,7 @@ impl CoreResourceManager {
         protocols: Arc<ProtocolRegistry>,
     ) {
         let http_state = http_state.clone();
+        #[cfg(feature = "devtools")]
         let devtools_chan = self.devtools_sender.clone();
         let filemanager = self.filemanager.clone();
         let sw_managers = self.sw_managers.clone();
@@ -808,7 +819,7 @@ impl CoreResourceManager {
             "blob" => {
                 if let Some(token) = request.current_url_with_blob_claim().token() {
                     (FileTokenCheck::Required(token.token), Some(token.file_id))
-                } else if let Ok((id, _)) = parse_blob_url(&url) {
+                } else if let Ok(id) = parse_blob_url(&url) {
                     // See https://github.com/servo/servo/issues/25226
                     log::warn!(
                         "Failed to claim blob URL entry of valid blob URL before passing it to `net`. This causes race conditions."
@@ -839,6 +850,7 @@ impl CoreResourceManager {
             let context = FetchContext {
                 state: http_state,
                 user_agent: servo_config::pref!(user_agent),
+                #[cfg(feature = "devtools")]
                 devtools_chan,
                 filemanager,
                 file_token,
@@ -849,7 +861,7 @@ impl CoreResourceManager {
                 websocket_chan: None,
                 ca_certificates,
                 ignore_certificate_errors,
-                preloaded_resources,
+                preloaded_resources: preloaded_resources.clone(),
                 in_flight_keep_alive_records,
                 sw_managers,
             };
@@ -879,7 +891,11 @@ impl CoreResourceManager {
                     }
                 },
                 None => {
-                    fetch(request, &mut sender, &context).await;
+                    let preload_id = request.preload_id.clone();
+                    let response = fetch(request, &mut sender, &context).await;
+                    if let Some(preload_id) = preload_id {
+                        Self::handle_preloaded_response(preloaded_resources, preload_id, response);
+                    }
                 },
             };
 
@@ -896,13 +912,14 @@ impl CoreResourceManager {
     fn websocket_connect(
         &self,
         mut request: RequestBuilder,
-        event_sender: IpcSender<WebSocketNetworkEvent>,
+        event_sender: ProfileGenericCallback<WebSocketNetworkEvent>,
         action_receiver: CallbackSetter<WebSocketDomAction>,
         http_state: &Arc<HttpState>,
         cancellation_listener: Arc<CancellationListener>,
         protocols: Arc<ProtocolRegistry>,
     ) {
         let http_state = http_state.clone();
+        #[cfg(feature = "devtools")]
         let devtools_chan = self.devtools_sender.clone();
         let filemanager = self.filemanager.clone();
         let sw_managers = self.sw_managers.clone();
@@ -933,6 +950,7 @@ impl CoreResourceManager {
                     let context = FetchContext {
                         state: http_state,
                         user_agent: servo_config::pref!(user_agent),
+                        #[cfg(feature = "devtools")]
                         devtools_chan,
                         filemanager,
                         file_token: FileTokenCheck::NotRequired,

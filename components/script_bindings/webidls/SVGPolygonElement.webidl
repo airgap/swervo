@@ -6,3 +6,5 @@
 [Exposed=Window]
 interface SVGPolygonElement : SVGGeometryElement {
 };
+
+// SVGPolygonElement includes SVGAnimatedPoints;

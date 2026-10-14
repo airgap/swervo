@@ -25,7 +25,7 @@ use crate::error::Fallible;
 use crate::interfaces::{DomHelpers, GlobalScopeHelpers};
 use crate::reflector::{DomGlobalGeneric, DomObjectIteratorWrap, DomObjectWrap, Reflector};
 use crate::root::{Dom, DomRoot, Root};
-use crate::trace::{NoTrace, RootedTraceableBox};
+use crate::trace::NoTrace;
 use crate::utils::DOMClass;
 use crate::{DomTypes, JSTraceable};
 
@@ -46,12 +46,13 @@ pub trait Iterable {
     type Key: ToJSValConvertible;
     /// The type of the value of the iterator pair.
     type Value: ToJSValConvertible;
+
     /// Return the number of entries that can be iterated over.
-    fn get_iterable_length(&self) -> u32;
+    fn get_iterable_length(&self, cx: &mut JSContext) -> u32;
     /// Return the value at the provided index.
-    fn get_value_at_index(&self, index: u32) -> Self::Value;
+    fn get_value_at_index(&self, cx: &mut JSContext, index: u32) -> Self::Value;
     /// Return the key at the provided index.
-    fn get_key_at_index(&self, index: u32) -> Self::Key;
+    fn get_key_at_index(&self, cx: &mut JSContext, index: u32) -> Self::Key;
 }
 
 /// A version of the [IDLInterface] trait that is specific to types that have
@@ -63,7 +64,7 @@ pub trait IteratorDerives {
 }
 
 /// An iterator over the iterable entries of a given DOM interface.
-#[dom_struct]
+#[dom_struct(no_has_parent)]
 pub struct IterableIterator<
     D: DomTypes,
     T: DomObjectIteratorWrap<D> + JSTraceable + Iterable + DomGlobalGeneric<D>,
@@ -88,6 +89,8 @@ impl<
     fn derives(class: &'static DOMClass) -> bool {
         <T as IteratorDerives>::derives(class)
     }
+
+    const PROTO_ID: crate::codegen::PrototypeList::ID = crate::codegen::PrototypeList::ID::Last;
 }
 
 impl<D: DomTypes, T: DomObjectIteratorWrap<D> + JSTraceable + Iterable + DomGlobalGeneric<D>>
@@ -107,7 +110,7 @@ impl<D: DomTypes, T: DomObjectIteratorWrap<D> + JSTraceable + Iterable + DomGlob
             _marker: NoTrace(PhantomData),
         });
         let global = D::GlobalScope::from_current_realm(realm);
-        <D as DomHelpers<D>>::reflect_dom_object_with_cx(realm, iterator, &*global)
+        <D as DomHelpers<D>>::reflect_dom_object(realm, iterator, &*global)
     }
 
     /// Return the next value from the iterable object.
@@ -115,30 +118,30 @@ impl<D: DomTypes, T: DomObjectIteratorWrap<D> + JSTraceable + Iterable + DomGlob
     pub fn Next(&self, cx: &mut JSContext, return_value: MutableHandleObject) -> Fallible<()> {
         let index = self.index.get();
         rooted!(&in(cx) let mut value = UndefinedValue());
-        let result = if index >= self.iterable.get_iterable_length() {
+        let result = if index >= self.iterable.get_iterable_length(cx) {
             dict_return(cx, return_value, true, value.handle())
         } else {
             match self.type_ {
                 IteratorType::Keys => {
                     self.iterable
-                        .get_key_at_index(index)
-                        .safe_to_jsval(cx, value.handle_mut());
+                        .get_key_at_index(cx, index)
+                        .to_jsval(cx, value.handle_mut());
                     dict_return(cx, return_value, false, value.handle())
                 },
                 IteratorType::Values => {
                     self.iterable
-                        .get_value_at_index(index)
-                        .safe_to_jsval(cx, value.handle_mut());
+                        .get_value_at_index(cx, index)
+                        .to_jsval(cx, value.handle_mut());
                     dict_return(cx, return_value, false, value.handle())
                 },
                 IteratorType::Entries => {
                     rooted!(&in(cx) let mut key = UndefinedValue());
                     self.iterable
-                        .get_key_at_index(index)
-                        .safe_to_jsval(cx, key.handle_mut());
+                        .get_key_at_index(cx, index)
+                        .to_jsval(cx, key.handle_mut());
                     self.iterable
-                        .get_value_at_index(index)
-                        .safe_to_jsval(cx, value.handle_mut());
+                        .get_value_at_index(cx, index)
+                        .to_jsval(cx, value.handle_mut());
                     key_and_value_return(cx, return_value, key.handle(), value.handle())
                 },
             }
@@ -185,7 +188,7 @@ fn key_and_value_return(
     dict.value = Some(
         vec![key, value]
             .into_iter()
-            .map(|handle| RootedTraceableBox::from_box(Heap::boxed(handle.get())))
+            .map(|handle| Heap::boxed(handle.get()))
             .collect(),
     );
 

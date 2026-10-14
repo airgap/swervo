@@ -6,3 +6,5 @@
 [Exposed=Window]
 interface SVGPolylineElement : SVGGeometryElement {
 };
+
+// SVGPolylineElement includes SVGAnimatedPoints;

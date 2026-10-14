@@ -23,10 +23,11 @@ use js::jsapi::{
 };
 use js::jsval::{ObjectValue, UndefinedValue};
 use js::rust::{Handle, HandleId, HandleValue, MutableHandleValue, ToNumber};
+use layout_api::HitTestFlags;
 use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericBindings::DocumentBinding::DocumentMethods;
 use script_bindings::codegen::GenericBindings::ShadowRootBinding::ShadowRootMethods;
-use script_bindings::conversions::{SafeToJSValConvertible, jsid_to_string, root_from_handlevalue};
+use script_bindings::conversions::{ToJSValConvertible, jsid_to_string, root_from_handlevalue};
 use script_bindings::error::{Error, ErrorResult};
 use script_bindings::reflector::DomObject;
 use script_bindings::utils::get_array_index_from_id;
@@ -38,6 +39,7 @@ use style::stylesheets::scope_rule::ImplicitScopeRoot;
 use style::stylesheets::{Stylesheet, StylesheetContents};
 use webrender_api::units::LayoutPoint;
 
+use crate::css::stylesheet_set::StylesheetSetRef;
 use crate::dom::Document;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::GetRootNodeOptions;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::Node_Binding::NodeMethods;
@@ -53,7 +55,6 @@ use crate::dom::element::Element;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::node::{self, Node, NodeTraits};
 use crate::dom::types::{CSSStyleSheet, EventTarget, ShadowRoot};
-use crate::stylesheet_set::StylesheetSetRef;
 
 /// Stylesheet could be constructed by a CSSOM object CSSStylesheet or parsed
 /// from HTML element such as `<style>` or `<link>`.
@@ -65,9 +66,9 @@ pub(crate) enum StylesheetSource {
 }
 
 impl StylesheetSource {
-    pub(crate) fn get_cssom_object(&self) -> Option<DomRoot<CSSStyleSheet>> {
+    pub(crate) fn get_cssom_object(&self, cx: &mut JSContext) -> Option<DomRoot<CSSStyleSheet>> {
         match self {
-            StylesheetSource::Element(el) => el.upcast::<Node>().get_cssom_stylesheet(),
+            StylesheetSource::Element(el) => el.upcast::<Node>().get_cssom_stylesheet(cx),
             StylesheetSource::Constructed(ss) => Some(ss.as_rooted()),
         }
     }
@@ -162,7 +163,7 @@ impl DocumentOrShadowRoot {
     pub(crate) fn retarget_hit_test_result(
         &self,
         this: &Node,
-        node: DomRoot<Node>,
+        node: &Node,
     ) -> Option<DomRoot<Element>> {
         let retargeted_node =
             DomRoot::downcast::<Node>(node.upcast::<EventTarget>().retarget(this.upcast()))?;
@@ -204,8 +205,8 @@ impl DocumentOrShadowRoot {
             return None;
         }
 
-        let results = window.elements_from_point_query(LayoutPoint::new(x, y));
-        let Some(result) = results.first() else {
+        let result = window.elements_from_point_query(HitTestFlags::empty(), LayoutPoint::new(x, y));
+        let Some(result) = result.items.first() else {
             return document_element;
         };
 
@@ -214,7 +215,7 @@ impl DocumentOrShadowRoot {
         let address = UntrustedNodeAddress(result.node.0 as *const c_void);
         let node = unsafe { node::from_untrusted_node_address(address) };
 
-        self.retarget_hit_test_result(this, node)
+        self.retarget_hit_test_result(this, &node)
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-document-elementsfrompoint>
@@ -246,16 +247,17 @@ impl DocumentOrShadowRoot {
         // box, that would be a target for hit testing at coordinates x,y even if nothing
         // would be overlapping it, when applying the transforms that apply to the
         // descendants of the viewport, append the associated element to sequence.
-        let nodes = window.elements_from_point_query(LayoutPoint::new(x, y));
+        let result = window.elements_from_point_query(HitTestFlags::empty(), LayoutPoint::new(x, y));
 
-        let mut elements: Vec<_> = nodes
+        let mut elements: Vec<_> = result
+            .items
             .iter()
             .flat_map(|result| {
                 // SAFETY: This is safe because `Self::query_elements_from_point` has ensured that
                 // layout has run and any OpaqueNodes that no longer refer to real nodes are gone.
                 let address = UntrustedNodeAddress(result.node.0 as *const c_void);
                 let node = unsafe { node::from_untrusted_node_address(address) };
-                self.retarget_hit_test_result(this, node)
+                self.retarget_hit_test_result(this, &node)
             })
             .collect();
 
@@ -365,10 +367,10 @@ impl DocumentOrShadowRoot {
 
         match insertion_point {
             Some(ip) => {
-                stylesheets.insert_stylesheet_before(None, sheet, ip, &guard);
+                stylesheets.insert_stylesheet_before(sheet, ip, &guard);
             },
             None => {
-                stylesheets.append_stylesheet(None, sheet, &guard);
+                stylesheets.append_stylesheet(sheet, &guard);
             },
         }
     }
@@ -387,7 +389,6 @@ impl DocumentOrShadowRoot {
     // TODO: Handle duplicated adoptedstylesheet correctly, Stylo is preventing duplicates inside a
     //       Stylesheet Set. But this is not ideal. https://bugzilla.mozilla.org/show_bug.cgi?id=1978755
     fn set_adopted_stylesheet(
-        cx: &mut JSContext,
         adopted_stylesheets: &mut Vec<Dom<CSSStyleSheet>>,
         incoming_stylesheets: &[Dom<CSSStyleSheet>],
         owner: &StyleSheetListOwner,
@@ -405,7 +406,10 @@ impl DocumentOrShadowRoot {
             // > If value’s constructed flag is not set, or its constructor document is not equal
             // > to this DocumentOrShadowRoot’s node document, throw a "NotAllowedError" DOMException.
             if !sheet.constructor_document_matches(&owner_doc) {
-                return Err(Error::NotAllowed(None));
+                return Err(Error::NotAllowed(Some(
+                    "Stylesheet is not constructed or its constructor document does not match"
+                        .into(),
+                )));
             }
         }
 
@@ -446,7 +450,7 @@ impl DocumentOrShadowRoot {
                 sheet.add_adopter(owner.clone());
             }
 
-            owner.append_constructed_stylesheet(cx, sheet);
+            owner.append_constructed_stylesheet(sheet);
         }
 
         *adopted_stylesheets = incoming_stylesheets.to_vec();
@@ -502,7 +506,7 @@ impl AdoptedStyleSheets {
         }
 
         rooted!(&in(cx) let mut backing = UndefinedValue());
-        self.rooted_sheets().safe_to_jsval(cx, backing.handle_mut());
+        self.rooted_sheets().to_jsval(cx, backing.handle_mut());
         rooted!(&in(cx) let backing = backing.to_object());
         rooted!(&in(cx) let proxy = unsafe {
             WrapperNew(
@@ -532,12 +536,9 @@ impl AdoptedStyleSheets {
         owner: &StyleSheetListOwner,
         value: HandleValue,
     ) -> ErrorResult {
-        match Vec::<DomRoot<CSSStyleSheet>>::safe_from_jsval(cx, value, ()) {
-            Ok(ConversionResult::Success(sheets)) => self.replace(cx, owner, sheets),
-            Ok(ConversionResult::Failure(msg)) => Err(Error::Type(msg.into_owned())),
-            Err(_) => Err(Error::Type(
-                c"The provided value is not a sequence of 'CSSStylesheet'.".to_owned(),
-            )),
+        match Vec::<DomRoot<CSSStyleSheet>>::from_jsval(cx, value, ()).map_err(|_| Error::JSFailed)? {
+            ConversionResult::Success(sheets) => self.replace(cx, owner, sheets),
+            ConversionResult::Failure(msg) => Err(Error::Type(msg.into_owned())),
         }
     }
 
@@ -550,12 +551,13 @@ impl AdoptedStyleSheets {
         sheets: Vec<DomRoot<CSSStyleSheet>>,
     ) -> ErrorResult {
         rooted_vec!(let incoming <- sheets.iter().map(|sheet| sheet.as_traced()));
-        DocumentOrShadowRoot::set_adopted_stylesheet(
-            cx,
-            &mut self.sheets.borrow_mut(),
-            &incoming,
-            owner,
-        )?;
+        {
+            let mut adopted = self.sheets.safe_borrow_mut(cx.no_gc());
+            DocumentOrShadowRoot::set_adopted_stylesheet(&mut adopted, &incoming, owner)?;
+        }
+        // Restyle with the new stylesheet set, which also covers the observable array's
+        // single-element changes.
+        owner.invalidate_stylesheets(cx.no_gc());
 
         let Some(proxy) = self.proxy.borrow().as_ref().map(|proxy| proxy.get()) else {
             return Ok(());
@@ -568,7 +570,7 @@ impl AdoptedStyleSheets {
         }
         for (index, sheet) in sheets.iter().enumerate() {
             rooted!(&in(cx) let mut value = UndefinedValue());
-            sheet.safe_to_jsval(cx, value.handle_mut());
+            sheet.to_jsval(cx, value.handle_mut());
             if !unsafe {
                 JS_DefineElement(
                     cx.raw_cx(),

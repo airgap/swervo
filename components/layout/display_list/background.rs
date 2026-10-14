@@ -77,7 +77,7 @@ impl<'a> BackgroundPainter<'a> {
             // `background-clip: text` paints the background over the whole border box; the
             // glyph-shaped clipping is applied separately as an image-mask stacking context
             // in `BuilderForBoxFragment::build` (see `build_text_clip_chain`).
-            Clip::BorderBox | Clip::Text => fragment_builder.border_rect,
+            Clip::BorderBox | Clip::BorderArea | Clip::Text => fragment_builder.border_rect,
         }
     }
 
@@ -112,6 +112,7 @@ impl<'a> BackgroundPainter<'a> {
             Clip::BorderBox | Clip::Text => {
                 fragment_builder.border_edge_clip(builder, state, force_clip_creation)
             },
+            Clip::BorderArea => unreachable!("Should be disabled behind a pref"),
         }
     }
 
@@ -171,7 +172,7 @@ impl<'a> BackgroundPainter<'a> {
 }
 
 pub(super) fn layout_layer(
-    fragment_builder: &mut super::BuilderForBoxFragment,
+    fragment_builder: &super::BuilderForBoxFragment,
     painter: &BackgroundPainter,
     builder: &mut DisplayListBuilder,
     state: &TraversalState,

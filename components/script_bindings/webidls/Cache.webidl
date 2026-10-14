@@ -2,16 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// https://w3c.github.io/ServiceWorker/#cache-interface
-
-[SecureContext, Exposed=(Window,Worker), Pref="dom_cache_api_enabled"]
+// https://w3c.github.io/ServiceWorker/#cache
+[Pref="dom_serviceworker_enabled", SecureContext, Exposed=(Window,Worker)]
 interface Cache {
-  [NewObject] Promise<(Response or undefined)> match(RequestInfo request, optional CacheQueryOptions options = {});
-  [NewObject] Promise<sequence<Response>> matchAll(optional RequestInfo request, optional CacheQueryOptions options = {});
-  [NewObject] Promise<undefined> add(RequestInfo request);
-  [NewObject] Promise<undefined> addAll(sequence<RequestInfo> requests);
-  [NewObject] Promise<undefined> put(RequestInfo request, Response response);
-  [NewObject] Promise<boolean> delete(RequestInfo request, optional CacheQueryOptions options = {});
+  // [NewObject] Promise<FrozenArray<Request>> keys(optional RequestInfo request, optional CacheQueryOptions options = {});
+  // Workaround until FrozenArray get implemented.
   [NewObject] Promise<sequence<Request>> keys(optional RequestInfo request, optional CacheQueryOptions options = {});
 };
 

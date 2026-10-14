@@ -26,6 +26,8 @@ use style::dom::OpaqueNode;
 use style::values::computed::color::Color;
 use style::values::computed::image::{Gradient, Image};
 use style_traits::DevicePixel;
+use uuid::Uuid;
+use webrender_api::ImageKey;
 use webrender_api::units::{DeviceIntSize, DeviceSize};
 
 use crate::cell::WeakRefCell;
@@ -91,6 +93,7 @@ pub enum ResolvedImage<'a> {
     Image {
         image: CachedImage,
         size: DeviceSize,
+        url: ServoUrl,
     },
 }
 
@@ -276,7 +279,7 @@ impl ImageResolver {
         image_id: PendingImageId,
         size: DeviceIntSize,
         node: OpaqueNode,
-        svg_id: Option<String>,
+        svg_id: Option<Uuid>,
         for_mask: bool,
     ) -> Option<RasterImage> {
         let result = self
@@ -292,6 +295,28 @@ impl ImageResolver {
                 });
         }
         result
+    }
+
+    /// Resolve a cached image to a WebRender [`ImageKey`]
+    pub(crate) fn image_key_from_cached_image(
+        &self,
+        image: &CachedImage,
+        size: DeviceIntSize,
+        node: Option<OpaqueNode>,
+    ) -> Option<ImageKey> {
+        match image {
+            CachedImage::Raster(raster_image) => raster_image.id,
+            CachedImage::Vector(vector_image) => node.and_then(|node| {
+                self.rasterize_vector_image(
+                    vector_image.id,
+                    size,
+                    node,
+                    vector_image.svg_id,
+                    false,
+                )
+                .and_then(|rasterized_image| rasterized_image.id)
+            }),
+        }
     }
 
     pub(crate) fn queue_svg_element_for_serialization(&self, element: ServoLayoutNode<'_>) {
@@ -329,7 +354,11 @@ impl ImageResolver {
                 )?;
                 let metadata = image.metadata();
                 let size = Size2D::new(metadata.width, metadata.height).to_f32();
-                Ok(ResolvedImage::Image { image, size })
+                Ok(ResolvedImage::Image {
+                    image,
+                    size,
+                    url: image_url.clone().into(),
+                })
             },
             Image::ImageSet(image_set) => {
                 image_set
@@ -341,6 +370,7 @@ impl ImageResolver {
                             .map(|info| match info {
                                 ResolvedImage::Image {
                                     image: cached_image,
+                                    url,
                                     ..
                                 } => {
                                     // From <https://drafts.csswg.org/css-images-4/#image-set-notation>:
@@ -364,6 +394,7 @@ impl ImageResolver {
                                     ResolvedImage::Image {
                                         image: cached_image,
                                         size,
+                                        url,
                                     }
                                 },
                                 _ => info,

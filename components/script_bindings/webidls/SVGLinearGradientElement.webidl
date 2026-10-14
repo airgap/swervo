@@ -5,4 +5,8 @@
 // https://svgwg.org/svg2-draft/pservers.html#InterfaceSVGLinearGradientElement
 [Exposed=Window]
 interface SVGLinearGradientElement : SVGGradientElement {
+  //[SameObject] readonly attribute SVGAnimatedLength x1;
+  //[SameObject] readonly attribute SVGAnimatedLength y1;
+  //[SameObject] readonly attribute SVGAnimatedLength x2;
+  //[SameObject] readonly attribute SVGAnimatedLength y2;
 };

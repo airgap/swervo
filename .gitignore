@@ -79,3 +79,6 @@ support/macos/Brewfile.lock.json
 justfile
 /.ci
 /.ci-env
+
+# devcontainer
+devcontainer-lock.json

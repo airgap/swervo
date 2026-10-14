@@ -30,6 +30,9 @@ use crate::dom::execcommand::commands::fontsize::{
 use crate::dom::execcommand::commands::forecolor::execute_forecolor_command;
 use crate::dom::execcommand::commands::forwarddelete::execute_forward_delete_command;
 use crate::dom::execcommand::commands::hilitecolor::execute_hilitecolor_command;
+use crate::dom::execcommand::commands::indent::execute_indent_command;
+use crate::dom::execcommand::commands::inserthorizontalrule::execute_insert_horizontal_rule_command;
+use crate::dom::execcommand::commands::insertimage::execute_insert_image_command;
 use crate::dom::execcommand::commands::insertlinebreak::execute_insert_line_break_command;
 use crate::dom::execcommand::commands::insertparagraph::execute_insert_paragraph_command;
 use crate::dom::execcommand::commands::inserttext::execute_insert_text_command;
@@ -45,6 +48,7 @@ use crate::dom::html::htmlelement::HTMLElement;
 use crate::dom::html::htmlfontelement::HTMLFontElement;
 use crate::dom::iterators::ShadowIncluding;
 use crate::dom::node::{Node, NodeTraits};
+use crate::dom::range::Range;
 use crate::dom::selection::Selection;
 
 #[derive(Default, Clone, Copy, MallocSizeOf)]
@@ -66,8 +70,8 @@ impl DefaultSingleLineContainerName {
 impl From<DefaultSingleLineContainerName> for DOMString {
     fn from(default_single_line_container_name: DefaultSingleLineContainerName) -> Self {
         match default_single_line_container_name {
-            DefaultSingleLineContainerName::Div => DOMString::from("div"),
-            DefaultSingleLineContainerName::Paragraph => DOMString::from("p"),
+            DefaultSingleLineContainerName::Div => DOMString::from_static("div"),
+            DefaultSingleLineContainerName::Paragraph => DOMString::from_static("p"),
         }
     }
 }
@@ -156,7 +160,7 @@ impl CssPropertyName {
         Some(
             match self {
                 CssPropertyName::BackgroundColor => {
-                    let background_color = style.clone_background_color();
+                    let background_color = style.get_background_color();
                     if let Some(absolute_color) = background_color.as_absolute() {
                         // Used as an early-exit when figuring out on which element to resolve
                         // the style in `effective_command_value`
@@ -185,7 +189,7 @@ impl CssPropertyName {
                             return Some(color);
                         }
                     }
-                    style.clone_color().to_css_string()
+                    style.get_color().to_css_string()
                 },
                 CssPropertyName::FontFamily => {
                     // Detached font elements (e.g. does created with `document.createElement`
@@ -200,7 +204,7 @@ impl CssPropertyName {
                             return Some(face);
                         }
                     }
-                    style.clone_font_family().to_css_string()
+                    style.get_font_family().to_css_string()
                 },
                 CssPropertyName::FontSize => {
                     // Font size is special, in that it can't use the resolved styles to compute
@@ -231,8 +235,8 @@ impl CssPropertyName {
                             Some(format!("{}px", pixels).into())
                         });
                 },
-                CssPropertyName::FontWeight => style.clone_font_weight().to_css_string(),
-                CssPropertyName::FontStyle => style.clone_font_style().to_css_string(),
+                CssPropertyName::FontWeight => style.get_font_weight().to_css_string(),
+                CssPropertyName::FontStyle => style.get_font_style().to_css_string(),
                 CssPropertyName::TextDecoration => unreachable!("Should use longhands instead"),
                 CssPropertyName::TextDecorationLine => {
                     let text_decoration_line = style.get_text().text_decoration_line;
@@ -304,7 +308,7 @@ impl CssPropertyName {
     ) {
         let style = element.Style(cx);
 
-        let _ = style.SetProperty(cx, self.property_name(), new_value, "".into());
+        let _ = style.SetProperty(cx, self.property_name(), new_value, DOMString::new());
     }
 
     pub(crate) fn remove_from_element(&self, cx: &mut JSContext, element: &HTMLElement) {
@@ -369,12 +373,12 @@ impl CommandName {
         let Some(selection) = document.GetSelection(cx) else {
             return false;
         };
-        let Some(active_range) = selection.active_range() else {
+        let Some(active_range) = selection.active_range(cx) else {
             return false;
         };
         let mut at_least_two_different_effective_values = false;
         let mut previous_effective_value: Option<DOMString> = None;
-        active_range.for_each_effectively_contained_child(|node| {
+        active_range.for_each_effectively_contained_child(cx, |cx, node| {
             if at_least_two_different_effective_values || !node.is_formattable(cx.no_gc()) {
                 return;
             }
@@ -420,10 +424,10 @@ impl CommandName {
                     return None;
                 }
                 let selection = document.GetSelection(cx)?;
-                let active_range = selection.active_range()?;
+                let active_range = selection.active_range(cx)?;
                 let mut at_least_one_child_is_formattable = false;
                 let mut all_children_have_matching_command_values = true;
-                active_range.for_each_effectively_contained_child(|node| {
+                active_range.for_each_effectively_contained_child(cx, |cx, node| {
                     if !node.is_formattable(cx.no_gc()) {
                         return;
                     }
@@ -468,7 +472,7 @@ impl CommandName {
                 // > the effective command value of the active range's start node;
                 // > or if that is null, the empty string.
                 let selection = document.GetSelection(cx)?;
-                let active_range = selection.active_range()?;
+                let active_range = selection.active_range(cx)?;
 
                 active_range
                     .first_formattable_contained_node(cx.no_gc())
@@ -552,7 +556,7 @@ impl CommandName {
     }
 
     /// <https://w3c.github.io/editing/docs/execCommand/#record-current-overrides>
-    fn record_current_overrides(document: &Document) -> Vec<RecordedStateOfCommand> {
+    pub(crate) fn record_current_overrides(document: &Document) -> Vec<RecordedStateOfCommand> {
         // Step 1. Let overrides be a list of (string, string or boolean) ordered pairs, initially empty.
         let mut overrides = vec![];
         // Step 2. If there is a value override for "createLink",
@@ -629,6 +633,46 @@ impl CommandName {
                 CommandName::ForeColor |
                 CommandName::HiliteColor
         )
+    }
+
+    pub(crate) fn is_enabled(&self, cx: &JSContext, range: &Range, editing_host: &Node) -> bool {
+        match self {
+            // The delete command is not enabled in the situation that the cursor is inside the
+            // editing host at the start, where a backspace would do nothing. However, if the
+            // editing host itself is selected then it is enabled.
+            //
+            // Therefore, start at the start_container and traverse its ancestors up to editing
+            // host. If the index remains 0, then there is no effective character to delete and
+            // the command is disabled.
+            CommandName::Delete => {
+                if !range.collapsed() {
+                    return true;
+                }
+                let start_container = range.start_container();
+                if *start_container == *editing_host {
+                    // TODO: This should return true. However, that crashes deletes at the start
+                    // of the editing host. There currently is no way to distinguish between a
+                    // range that is collapsed to a full node and set to before a node. Chromium
+                    // tracks this with a concept of "anchor position before/after node":
+                    // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/core/editing/position.h;l=39;drc=a5c6d7b223bfc6028ecae4b1f17d711374238c0d
+                    return false;
+                }
+                let mut current_offset = range.start_offset();
+                for current_ancestor in
+                    start_container.inclusive_ancestors_unrooted(cx, ShadowIncluding::Yes)
+                {
+                    if current_offset != 0 {
+                        return true;
+                    }
+                    if *current_ancestor == editing_host {
+                        return false;
+                    }
+                    current_offset = current_ancestor.index();
+                }
+                false
+            },
+            _ => true,
+        }
     }
 
     pub(crate) fn is_enabled_in_plaintext_only_state(&self) -> bool {
@@ -712,6 +756,13 @@ impl CommandName {
                 result
             },
             CommandName::HiliteColor => execute_hilitecolor_command(cx, document, selection, value),
+            CommandName::Indent => execute_indent_command(cx, document, selection),
+            CommandName::InsertHorizontalRule => {
+                execute_insert_horizontal_rule_command(cx, document, selection)
+            },
+            CommandName::InsertImage => {
+                execute_insert_image_command(cx, document, selection, value)
+            },
             CommandName::InsertLineBreak => {
                 execute_insert_line_break_command(cx, document, selection)
             },
@@ -734,7 +785,7 @@ impl CommandName {
         // > After taking the action, if the active range is collapsed,
         // > it must restore states and values from the recorded list.
         if let Some(active_range) = selection
-            .active_range()
+            .active_range(cx)
             .filter(|active_range| active_range.collapsed())
         {
             active_range.restore_states_and_values(cx, selection, document, overrides);

@@ -9,21 +9,20 @@ use std::{io, mem, str};
 
 use base64::Engine as _;
 use base64::engine::general_purpose;
+use bytes::Bytes;
 use content_security_policy as csp;
-use crossbeam_channel::Sender;
-use devtools_traits::DevtoolsControlMsg;
 use embedder_traits::resources::{self, Resource};
 use headers::{AccessControlExposeHeaders, ContentType, HeaderMapExt};
 use http::header::{self, HeaderMap, HeaderName, RANGE};
 use http::{HeaderValue, Method, StatusCode};
-use ipc_channel::ipc::{self, IpcSender};
+use ipc_channel::ipc;
 use log::{debug, trace, warn};
 use malloc_size_of_derive::MallocSizeOf;
 use mime::{self, Mime};
 use net_traits::fetch::headers::{determine_nosniff, extract_mime_type_as_mime};
 use net_traits::filemanager_thread::{FileTokenCheck, RelativePos};
 use net_traits::http_status::HttpStatus;
-use net_traits::policy_container::{PolicyContainer, RequestPolicyContainer};
+use net_traits::policy_container::PolicyContainer;
 use net_traits::request::{
     BodyChunkRequest, BodyChunkResponse, CredentialsMode, Destination, Initiator,
     InsecureRequestsPolicy, InternalRequest, Origin, ParserMetadata, RedirectMode, Referrer,
@@ -37,10 +36,11 @@ use net_traits::{
     WebSocketDomAction, WebSocketNetworkEvent, set_default_accept_language,
 };
 use parking_lot::Mutex;
+use profile_traits::generic_callback::GenericCallback as ProfileGenericCallback;
 use rustc_hash::FxHashMap;
 use rustls_pki_types::CertificateDer;
 use serde::{Deserialize, Serialize};
-use servo_base::generic_channel::CallbackSetter;
+use servo_base::generic_channel::{CallbackSetter, GenericSender};
 use servo_base::id::PipelineId;
 use servo_url::{Host, ImmutableOrigin, ServoUrl};
 use tokio::sync::Mutex as TokioMutex;
@@ -64,20 +64,21 @@ pub type Target<'a> = &'a mut (dyn FetchTaskTarget + Send);
 
 #[derive(Clone, Deserialize, Serialize)]
 pub enum Data {
-    Payload(Vec<u8>),
+    Payload(bytes::Bytes),
+    ContentLength(usize),
     Done,
     Cancelled,
     Error(NetworkError),
 }
 
 pub struct WebSocketChannel {
-    pub sender: IpcSender<WebSocketNetworkEvent>,
+    pub sender: ProfileGenericCallback<WebSocketNetworkEvent>,
     pub receiver: Option<CallbackSetter<WebSocketDomAction>>,
 }
 
 impl WebSocketChannel {
     pub fn new(
-        sender: IpcSender<WebSocketNetworkEvent>,
+        sender: ProfileGenericCallback<WebSocketNetworkEvent>,
         receiver: Option<CallbackSetter<WebSocketDomAction>>,
     ) -> Self {
         Self { sender, receiver }
@@ -98,13 +99,14 @@ pub type SharedInflightKeepAliveRecords =
 /// Per-origin senders to registered ServiceWorker managers, shared with the fetch tasks so
 /// main_fetch can offer requests to a controlling service worker (Step 3 of main fetch).
 pub type SharedServiceWorkerManagers =
-    Arc<Mutex<HashMap<ImmutableOrigin, ipc_channel::ipc::IpcSender<CustomResponseMediator>>>>;
+    Arc<Mutex<HashMap<ImmutableOrigin, GenericSender<CustomResponseMediator>>>>;
 
 #[derive(Clone)]
 pub struct FetchContext {
     pub state: Arc<HttpState>,
     pub user_agent: String,
-    pub devtools_chan: Option<Sender<DevtoolsControlMsg>>,
+    #[cfg(feature = "devtools")]
+    pub devtools_chan: Option<crossbeam_channel::Sender<devtools_traits::DevtoolsControlMsg>>,
     pub filemanager: FileManager,
     pub file_token: FileTokenCheck,
     pub request_interceptor: Arc<TokioMutex<RequestInterceptor>>,
@@ -437,16 +439,17 @@ pub async fn main_fetch(
     }
 
     // The request should have a valid policy_container associated with it.
-    let policy_container = match &request.policy_container {
-        RequestPolicyContainer::Client => unreachable!(),
-        RequestPolicyContainer::PolicyContainer(container) => container.to_owned(),
-    };
-
     // Step 4. Run report Content Security Policy violations for request.
     let csp_request = convert_request_to_csp_request(request);
     if let Some(csp_request) = csp_request.as_ref() {
         // Step 2.2.
-        let violations = report_violations_for_request_by_csp(csp_request, &policy_container);
+        let violations = report_violations_for_request_by_csp(
+            csp_request,
+            request
+                .policy_container
+                .policy_container()
+                .expect("Always has a valid policycontainer"),
+        );
 
         if !violations.is_empty() {
             target.process_csp_violations(request, violations);
@@ -490,8 +493,14 @@ pub async fn main_fetch(
         // Step 7. If should request be blocked due to a bad port, should fetching request be blocked
         // as mixed content, or should request be blocked by Content Security Policy returns blocked,
         // then set response to a network error.
-        let (check_result, violations) =
-            should_request_be_blocked_by_csp(csp_request, &policy_container);
+
+        let (check_result, violations) = should_request_be_blocked_by_csp(
+            csp_request,
+            request
+                .policy_container
+                .policy_container()
+                .expect("Always has a valid policy container"),
+        );
 
         if !violations.is_empty() {
             target.process_csp_violations(request, violations);
@@ -512,7 +521,11 @@ pub async fn main_fetch(
     // Step 8: If request’s referrer policy is the empty string, then set request’s referrer policy
     // to request’s policy container’s referrer policy.
     if request.referrer_policy == ReferrerPolicy::EmptyString {
-        request.referrer_policy = policy_container.get_referrer_policy();
+        request.referrer_policy = request
+            .policy_container
+            .policy_container()
+            .expect("Always has a valid policycontainer")
+            .get_referrer_policy();
     }
 
     // Step 9, If request’s referrer is not "no-referrer", then set request’s referrer to the result
@@ -717,8 +730,14 @@ pub async fn main_fetch(
         let should_replace_with_mixed_content = !response_is_network_error &&
             should_response_be_blocked_as_mixed_content(request, &response, &context.protocols);
         let should_replace_with_csp_error = csp_request.is_some_and(|csp_request| {
-            let (check_result, violations) =
-                should_response_be_blocked_by_csp(&csp_request, &response, &policy_container);
+            let (check_result, violations) = should_response_be_blocked_by_csp(
+                &csp_request,
+                &response,
+                request
+                    .policy_container
+                    .policy_container()
+                    .expect("Always has a valid policy container"),
+            );
             if !violations.is_empty() {
                 target.process_csp_violations(request, violations);
             }
@@ -905,14 +924,21 @@ async fn wait_for_response(
     context: &FetchContext,
 ) {
     if let Some(ref mut ch) = *done_chan {
+        #[cfg(feature = "devtools")]
         let mut devtools_body = context.devtools_chan.as_ref().map(|_| Vec::new());
+        #[cfg(not(feature = "devtools"))]
+        let devtools_body = None;
         loop {
             match ch.1.recv().await {
-                Some(Data::Payload(vec)) => {
+                Some(Data::ContentLength(length)) => {
+                    target.process_response_length_hint(request, length);
+                },
+                Some(Data::Payload(bytes)) => {
+                    #[cfg(feature = "devtools")]
                     if let Some(body) = devtools_body.as_mut() {
-                        body.extend(&vec);
+                        body.extend(&bytes);
                     }
-                    target.process_response_chunk(request, vec);
+                    target.process_response_chunk(request, bytes);
                 },
                 Some(Data::Error(network_error)) => {
                     if network_error == NetworkError::DecompressionError {
@@ -930,7 +956,8 @@ async fn wait_for_response(
                     response.aborted.store(true, Ordering::Release);
                     break;
                 },
-                _ => {
+
+                None => {
                     panic!("fetch worker should always send Done before terminating");
                 },
             }
@@ -941,7 +968,8 @@ async fn wait_for_response(
                 // in case there was no channel to wait for, the body was
                 // obtained synchronously via scheme_fetch for data/file/about/etc
                 // We should still send the body across as a chunk
-                target.process_response_chunk(request, vec.clone());
+                target.process_response_chunk(request, Bytes::copy_from_slice(vec));
+                #[cfg(feature = "devtools")]
                 if context.devtools_chan.is_some() {
                     // Now that we've replayed the entire cached body,
                     // notify the DevTools server with the full Response.

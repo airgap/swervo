@@ -140,6 +140,8 @@ impl Element {
             return;
         }
         let document = self.owner_document();
+        // SAFETY: Only the dirty-root bookkeeping runs below; it does not run script or GC.
+        let no_gc = unsafe { NoGC::new() };
         for (anchor, siblings) in anchors {
             // SAFETY: The anchors are ancestors of this element or their earlier siblings, so
             // the tree keeps them alive, and no script has run since they were noted.
@@ -148,9 +150,9 @@ impl Element {
                 let parent = anchor
                     .GetParentNode()
                     .expect("Restyled the later siblings of an element without a parent");
-                document.note_node_with_invalidated_descendants(&parent);
+                document.note_node_with_invalidated_descendants(&no_gc, &parent);
             } else {
-                document.note_node_with_invalidated_descendants(anchor);
+                document.note_node_with_invalidated_descendants(&no_gc, anchor);
             }
         }
     }

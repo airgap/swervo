@@ -3,13 +3,16 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use js::context::JSContext;
+use script_bindings::codegen::GenericBindings::NodeBinding::NodeMethods;
+use script_bindings::codegen::GenericBindings::RangeBinding::RangeMethods;
+use script_bindings::codegen::GenericBindings::SelectionBinding::SelectionMethods;
 use script_bindings::inheritance::Castable;
 
-use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
-use crate::dom::bindings::codegen::Bindings::RangeBinding::RangeMethods;
+use crate::dom::bindings::root::DomRoot;
 use crate::dom::document::Document;
 use crate::dom::element::Element;
 use crate::dom::execcommand::contenteditable::node::{NodeOrString, is_allowed_child};
+use crate::dom::execcommand::contenteditable::selection::SelectionDeletionStripWrappers;
 use crate::dom::node::Node;
 use crate::dom::selection::Selection;
 use crate::dom::text::Text;
@@ -25,85 +28,127 @@ pub(crate) fn execute_insert_line_break_command(
         cx,
         document,
         Default::default(),
-        Default::default(),
+        SelectionDeletionStripWrappers::NoStrip,
         Default::default(),
     );
-    let active_range = selection
-        .active_range()
-        .expect("Must always have an active range");
-    let start_node = active_range.start_container();
-    // Step 2. If the active range's start node is neither editable nor an editing host,
-    // return true.
-    if !start_node.is_editable_or_editing_host() {
+
+    // Step 2. If the active range's start node is neither editable nor an editing host, return
+    //         true.
+    let mut active_range = selection
+        .active_range(cx)
+        .expect("Must always have an active range.");
+    if !active_range.start_container().is_editable_or_editing_host() {
         return true;
     }
-    // Step 3. If the active range's start node is an Element, and "br" is not an allowed child
-    // of it, return true.
-    if start_node.is::<Element>() &&
+
+    // Step 3. If the active range's start node is an Element, and "br" is not an allowed child of
+    //         it, return true.
+    if active_range.start_container().is::<Element>() &&
         !is_allowed_child(
             NodeOrString::String("br".to_owned()),
-            NodeOrString::Node(start_node.clone()),
+            NodeOrString::from_node(&active_range.start_container(), cx.no_gc()),
         )
     {
-        return true;
+        return false;
     }
-    // Step 4. If the active range's start node is not an Element, and "br" is not an allowed
-    // child of the active range's start node's parent, return true.
-    if !start_node.is::<Element>() &&
+
+    // Step 4. If the active range's start node is not an Element, and "br" is not an allowed child
+    //         of the active range's start node's parent, return true.
+    if !active_range.start_container().is::<Element>() &&
         !is_allowed_child(
             NodeOrString::String("br".to_owned()),
-            NodeOrString::Node(
-                start_node
+            NodeOrString::from_node(
+                &active_range
+                    .start_container()
                     .GetParentNode()
-                    .expect("Must always have a parent"),
+                    .expect("Must always have a parent."),
+                cx.no_gc(),
             ),
         )
     {
-        return true;
+        return false;
     }
-    if start_node.is::<Text>() {
-        // Step 5. If the active range's start node is a Text node and its start offset is zero,
-        // call collapse() on the context object's selection, with first argument equal to the
-        // active range's start node's parent and second argument equal to the active range's
-        // start node's index.
-        if active_range.start_offset() == 0 {
-            let parent = start_node
-                .GetParentNode()
-                .expect("Must always have a parent");
-            selection.collapse_current_range(&parent, start_node.index());
-        } else if active_range.start_offset() == start_node.len() {
-            // Step 6. If the active range's start node is a Text node and its start offset is the
-            // length of its start node, call collapse() on the context object's selection, with
-            // first argument equal to the active range's start node's parent and second argument
-            // equal to one plus the active range's start node's index.
-            let parent = start_node
-                .GetParentNode()
-                .expect("Must always have a parent");
-            selection.collapse_current_range(&parent, 1 + start_node.index());
+
+    // Step 5. If the active range's start node is a Text node and its start offset is zero, call
+    //         collapse() on the context object's selection, with first argument equal to the
+    //         active range's start node's parent and second argument equal to the active range's
+    //         start node's index.
+    if active_range.start_container().is::<Text>() && active_range.start_offset() == 0 {
+        if selection
+            .Collapse(
+                cx,
+                active_range.start_container().GetParentNode().as_deref(),
+                active_range.start_container().index(),
+            )
+            .is_err()
+        {
+            unreachable!("Should always be able to collapse the selection.");
         }
+        active_range = selection
+            .active_range(cx)
+            .expect("Must always have an active range");
     }
+
+    // Step 6. If the active range's start node is a Text node and its start offset is the length
+    //         of its start node, call collapse() on the context object's selection, with first
+    //         argument equal to the active range's start node's parent and second argument equal
+    //         to one plus the active range's start node's index.
+    if active_range.start_container().is::<Text>() &&
+        active_range.start_offset() == active_range.start_container().len()
+    {
+        if selection
+            .Collapse(
+                cx,
+                active_range.start_container().GetParentNode().as_deref(),
+                1 + active_range.start_container().index(),
+            )
+            .is_err()
+        {
+            unreachable!("Should always be able to collapse the selection.");
+        }
+        active_range = selection
+            .active_range(cx)
+            .expect("Must always have an active range");
+    }
+
     // Step 7. Let br be the result of calling createElement("br") on the context object.
     let br = document.create_element(cx, "br");
+
     // Step 8. Call insertNode(br) on the active range.
-    if active_range.InsertNode(cx, br.upcast()).is_err() {
-        unreachable!("Must always be able to insert");
+    let br_node: DomRoot<Node> = DomRoot::upcast(br);
+    if active_range.InsertNode(cx, &br_node).is_err() {
+        unreachable!("The node should always be insertable.");
     }
+
     // Step 9. Call collapse() on the context object's selection, with br's parent as the first
-    // argument and one plus br's index as the second argument.
-    let br = br.upcast::<Node>();
-    let parent = br.GetParentNode().expect("Was just inserted");
-    selection.collapse_current_range(&parent, 1 + br.index());
-    // Step 10. If br is a collapsed line break, call createElement("br") on the context object
-    // and let extra br be the result, then call insertNode(extra br) on the active range.
-    if br.precedes_a_line_break(cx.no_gc()) {
+    //         argument and one plus br's index as the second argument.
+    if selection
+        .Collapse(cx, br_node.GetParentNode().as_deref(), 1 + br_node.index())
+        .is_err()
+    {
+        unreachable!("Should always be able to collapse the selection.");
+    }
+
+    // Step 10. If br is a collapsed line break, call createElement("br") on the context object and
+    //          let extra br be the result, then call insertNode(extra br) on the active range.
+    if br_node.precedes_a_line_break(cx.no_gc()) {
         let extra_br = document.create_element(cx, "br");
+        let active_range = selection
+            .active_range(cx)
+            .expect("Must always have an active range");
         if active_range.InsertNode(cx, extra_br.upcast()).is_err() {
-            unreachable!("Must always be able to insert");
+            unreachable!("The node should always be insertable.");
         }
         // Inserting into the collapsed range made it contain the extra br; the caret stays
         // between the two, as in other browsers.
-        selection.collapse_current_range(&parent, 1 + br.index());
+        if selection
+            .Collapse(cx, br_node.GetParentNode().as_deref(), 1 + br_node.index())
+            .is_err()
+        {
+            unreachable!("Should always be able to collapse the selection.");
+        }
     }
+
     // Step 11. Return true.
     true
 }

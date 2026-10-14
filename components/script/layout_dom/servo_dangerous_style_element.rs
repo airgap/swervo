@@ -85,20 +85,6 @@ impl<'dom> DangerousStyleElement<'dom> for ServoDangerousStyleElement<'dom> {
     }
 }
 
-impl<'dom> style::dom::AttributeProvider for ServoDangerousStyleElement<'dom> {
-    fn get_attr(&self, attr: &style::LocalName, namespace: &style::Namespace) -> Option<String> {
-        // All attribute names on HTML elements in HTML docs match ASCII-case-insensitively.
-        // See note in https://html.spec.whatwg.org/multipage/#custom-data-attribute
-        if self.is_html_element_in_html_document() {
-            let attr = &style::LocalName::new(attr.to_ascii_lowercase());
-            self.element.get_attr_val_for_layout(namespace, attr)
-        } else {
-            self.element.get_attr_val_for_layout(namespace, attr)
-        }
-        .map(Into::into)
-    }
-}
-
 impl<'dom> style::dom::TElement for ServoDangerousStyleElement<'dom> {
     type ConcreteNode = ServoDangerousStyleNode<'dom>;
     type TraversalChildrenIterator = DOMDescendantIterator<'dom>;
@@ -503,7 +489,7 @@ impl<'dom> style::dom::TElement for ServoDangerousStyleElement<'dom> {
         // As long as this "unopaqued" element does not escape this function, we're not leaking
         // potentially-mutable elements from opaque elements.
         let host = unsafe {
-            let ptr = opaque_host.as_const_ptr::<JSObject>();
+            let ptr = opaque_host.to_ptr().as_ptr() as *const JSObject;
             let untrusted_address = UntrustedNodeAddress::from_id(ptr as usize);
             let node = Node::from_untrusted_node_address(untrusted_address);
             let trusted_address = node.to_trusted_node_address();
@@ -638,9 +624,7 @@ impl<'dom> style::dom::TElement for ServoDangerousStyleElement<'dom> {
         };
 
         let text_shaping_needs_recollect = || {
-            if old.clone_direction() != new.clone_direction() ||
-                old.clone_unicode_bidi() != new.clone_unicode_bidi()
-            {
+            if !old.direction_equals(new) || !old.unicode_bidi_equals(new) {
                 return true;
             }
 
@@ -670,6 +654,18 @@ impl<'dom> style::dom::TElement for ServoDangerousStyleElement<'dom> {
             // fragment as well.
             RestyleDamage::RELAYOUT
         }
+    }
+
+    fn get_attr(&self, attr: &style::LocalName, namespace: &style::Namespace) -> Option<String> {
+        // All attribute names on HTML elements in HTML docs match ASCII-case-insensitively.
+        // See note in https://html.spec.whatwg.org/multipage/#custom-data-attribute
+        if self.is_html_element_in_html_document() {
+            let attr = &style::LocalName::new(attr.to_ascii_lowercase());
+            self.element.get_attr_val_for_layout(namespace, attr)
+        } else {
+            self.element.get_attr_val_for_layout(namespace, attr)
+        }
+        .map(Into::into)
     }
 }
 

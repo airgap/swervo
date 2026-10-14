@@ -4,7 +4,6 @@
 
 use std::collections::VecDeque;
 use std::default::Default;
-use std::rc::Rc;
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
@@ -12,7 +11,7 @@ use js::jsval::UndefinedValue;
 use js::realm::CurrentRealm;
 use script_bindings::cell::DomRefCell;
 use script_bindings::inheritance::Castable;
-use script_bindings::reflector::reflect_dom_object_with_cx;
+use script_bindings::reflector::reflect_dom_object;
 use servo_base::generic_channel::GenericCallback;
 use servo_constellation_traits::{
     Job, JobError, JobResult, JobResultValue, JobType, ScriptToConstellationMessage,
@@ -37,8 +36,9 @@ use crate::dom::promise::Promise;
 use crate::dom::serviceworker::ServiceWorker;
 use crate::dom::serviceworkerregistration::ServiceWorkerRegistration;
 use crate::dom::types::MessageEvent;
-use crate::script_runtime::CanGc;
+use crate::dom::{RootedPromise, TracedPromise};
 
+/// <https://w3c.github.io/ServiceWorker/#serviceworkercontainer>
 #[dom_struct]
 pub(crate) struct ServiceWorkerContainer {
     eventtarget: EventTarget,
@@ -47,15 +47,14 @@ pub(crate) struct ServiceWorkerContainer {
     /// The cached `ready` promise (one per container; resolved once a registration for this
     /// client has an active worker).
     #[conditional_malloc_size_of]
-    ready_promise: DomRefCell<Option<Rc<Promise>>>,
+    ready_promise: DomRefCell<Option<TracedPromise>>,
     /// The registration `ready` resolves with, once known (this engine activates immediately
     /// on install, so this is set when a register job resolves with an active worker).
     ready_registration: MutNullableDom<ServiceWorkerRegistration>,
 
     /// Pending results for
     /// <https://w3c.github.io/ServiceWorker/#algorithms>
-    #[conditional_malloc_size_of]
-    pending_algorithm_results: DomRefCell<VecDeque<Rc<Promise>>>,
+    pending_algorithm_results: DomRefCell<VecDeque<TracedPromise>>,
 
     /// Handler of algorithm results.
     #[no_trace]
@@ -75,16 +74,16 @@ impl ServiceWorkerContainer {
     }
 
     pub(crate) fn new(cx: &mut JSContext, global: &GlobalScope) -> DomRoot<ServiceWorkerContainer> {
-        reflect_dom_object_with_cx(
+        reflect_dom_object(
+            cx,
             Box::new(ServiceWorkerContainer::new_inherited()),
             global,
-            cx,
         )
     }
 
     /// <https://w3c.github.io/ServiceWorker/#reject-job-promise>
     /// <https://w3c.github.io/ServiceWorker/#resolve-job-promise>
-    fn handle_job_result(&self, cx: &mut JSContext, result: JobResult, promise: Rc<Promise>) {
+    fn handle_job_result(&self, cx: &mut JSContext, result: JobResult, promise: &RootedPromise) {
         let global = self.global();
         match result {
             // <https://w3c.github.io/ServiceWorker/#reject-job-promise>
@@ -124,13 +123,13 @@ impl ServiceWorkerContainer {
                         // set convertedValue to the result of getting the service worker registration object
                         // that represents value in equivalentJob’s client.
                         let registration = global.get_serviceworker_registration(
+                            cx,
                             &script_url,
                             &scope_url,
                             id,
                             installing_worker,
                             waiting_worker,
                             active_worker,
-                            CanGc::from_cx(cx),
                         );
 
                         // TODO Step 2.3: Else, set convertedValue to value, in equivalentJob’s client’s Realm.
@@ -144,7 +143,12 @@ impl ServiceWorkerContainer {
                         // the transition.
                         if let Some(active) = registration.GetActive() {
                             self.ready_registration.set(Some(&registration));
-                            if let Some(ready) = self.ready_promise.borrow().as_ref() {
+                            let ready = self
+                                .ready_promise
+                                .borrow()
+                                .as_ref()
+                                .map(|promise| promise.root(cx));
+                            if let Some(ready) = ready {
                                 ready.resolve_native(cx, &*registration);
                             }
                             let newly_controlled = self.controller.get().is_none();
@@ -166,7 +170,7 @@ impl ServiceWorkerContainer {
         &self,
         cx: &mut JSContext,
         registration_info: Option<ServiceWorkerRegistrationInfo>,
-        promise: Rc<Promise>,
+        promise: &RootedPromise,
     ) {
         // Step 8.1 Let registration be the result of running Match Service Worker Registration given storage key and clientURL.
         // Note: the `registration_info` argument is the result from the parallel algorithm run.
@@ -180,13 +184,13 @@ impl ServiceWorkerContainer {
         // Step 8.3: Resolve promise with the result of getting the service worker registration object
         // that represents registration in promise’s relevant settings object.
         let registration = self.global().get_serviceworker_registration(
+            cx,
             &info.script_url,
             &info.scope_url,
             info.id,
             info.installing_worker,
             info.waiting_worker,
             info.active_worker,
-            CanGc::from_cx(cx),
         );
         promise.resolve_native(cx, &*registration);
     }
@@ -194,18 +198,28 @@ impl ServiceWorkerContainer {
     fn handle_algorithm_result(&self, cx: &mut JSContext, result: ServiceWorkerAlgorithmResult) {
         match result {
             ServiceWorkerAlgorithmResult::Job(job_result) => {
-                let Some(promise) = self.pending_algorithm_results.borrow_mut().pop_front() else {
+                let promise = self
+                    .pending_algorithm_results
+                    .borrow_mut()
+                    .pop_front()
+                    .map(|promise| promise.root(cx));
+                let Some(promise) = promise else {
                     debug_assert!(false, "No pending algorithm result.");
                     return;
                 };
-                self.handle_job_result(cx, job_result, promise);
+                self.handle_job_result(cx, job_result, &promise);
             },
             ServiceWorkerAlgorithmResult::MatchServiceWorkerRegistration(registration_info) => {
-                let Some(promise) = self.pending_algorithm_results.borrow_mut().pop_front() else {
+                let promise = self
+                    .pending_algorithm_results
+                    .borrow_mut()
+                    .pop_front()
+                    .map(|promise| promise.root(cx));
+                let Some(promise) = promise else {
                     debug_assert!(false, "No pending algorithm result.");
                     return;
                 };
-                self.handle_match_registration_result(cx, registration_info, promise);
+                self.handle_match_registration_result(cx, registration_info, &promise);
             },
             ServiceWorkerAlgorithmResult::MessageFromWorker {
                 message,
@@ -224,8 +238,7 @@ impl ServiceWorkerContainer {
                 // Note: spec uses a MesssageEvent, so it's unclear what to do with source.
                 // Perhaps an ExtendableMessageEvent should be used instead.
                 // See https://github.com/w3c/ServiceWorker/issues/1823
-                let _source =
-                    global.get_serviceworker(&script_url, &scope_url, source, CanGc::from_cx(cx));
+                let _source = global.get_serviceworker(cx, &script_url, &scope_url, source);
 
                 // Step 4.5.4: Let messageClone be deserializeRecord.[[Deserialized]].
                 // Step 4.5.5: Let newPorts be a new frozen array consisting of all MessagePort objects
@@ -242,7 +255,7 @@ impl ServiceWorkerContainer {
                         self.upcast(),
                         &global,
                         message_val.handle(),
-                        Some(&origin.ascii_serialization()),
+                        Some(origin.ascii_serialization().as_ref()),
                         None,
                         ports,
                     );
@@ -256,11 +269,11 @@ impl ServiceWorkerContainer {
     /// Setup the callback to the backend service, if this hasn't been done already.
     fn get_or_setup_callback(
         &self,
-        promise: Rc<Promise>,
+        promise: &RootedPromise,
     ) -> GenericCallback<ServiceWorkerAlgorithmResult> {
         self.pending_algorithm_results
             .borrow_mut()
-            .push_back(promise);
+            .push_back(promise.to_traced());
         if let Some(cb) = self.callback.borrow_mut().as_ref() {
             return cb.clone();
         }
@@ -303,7 +316,7 @@ impl ServiceWorkerContainer {
         storage_key: ImmutableOrigin,
         scope: ServoUrl,
         script_url: ServoUrl,
-        promise: Rc<Promise>,
+        promise: &RootedPromise,
     ) {
         let global = self.global();
         let result_handler = self.get_or_setup_callback(promise);
@@ -351,16 +364,16 @@ impl ServiceWorkerContainerMethods<crate::DomTypeHolder> for ServiceWorkerContai
     }
 
     /// <https://w3c.github.io/ServiceWorker/#navigator-service-worker-ready>
-    fn Ready(&self, cx: &mut JSContext) -> Rc<Promise> {
+    fn Ready(&self, cx: &mut JSContext) -> RootedPromise {
         if let Some(promise) = self.ready_promise.borrow().as_ref() {
-            return promise.clone();
+            return promise.root(cx);
         }
         let global = self.global();
         let promise = Promise::new(cx, &global);
         if let Some(registration) = self.ready_registration.get() {
             promise.resolve_native(cx, &*registration);
         }
-        *self.ready_promise.borrow_mut() = Some(promise.clone());
+        *self.ready_promise.borrow_mut() = Some(promise.to_traced());
         promise
     }
 
@@ -376,7 +389,7 @@ impl ServiceWorkerContainerMethods<crate::DomTypeHolder> for ServiceWorkerContai
     /// Reduced: registrations are per-session (no persistence yet), and this client's container
     /// learns of its registration when its register job resolves — so the container-local
     /// registration IS the origin's registration set for now.
-    fn GetRegistrations(&self, cx: &mut JSContext) -> Rc<Promise> {
+    fn GetRegistrations(&self, cx: &mut JSContext) -> RootedPromise {
         let global = self.global();
         let promise = Promise::new(cx, &global);
         let registrations: Vec<DomRoot<ServiceWorkerRegistration>> =
@@ -404,7 +417,7 @@ impl ServiceWorkerContainerMethods<crate::DomTypeHolder> for ServiceWorkerContai
         realm: &mut CurrentRealm,
         script_url: USVString,
         options: &RegistrationOptions,
-    ) -> Rc<Promise> {
+    ) -> RootedPromise {
         // A: Step 2.
         let global = self.global();
 
@@ -484,7 +497,7 @@ impl ServiceWorkerContainerMethods<crate::DomTypeHolder> for ServiceWorkerContai
             return promise;
         }
 
-        let result_handler = self.get_or_setup_callback(promise.clone());
+        let result_handler = self.get_or_setup_callback(&promise);
 
         let scope_things =
             ServiceWorkerRegistration::create_scope_things(&global, script_url.clone());
@@ -537,7 +550,7 @@ impl ServiceWorkerContainerMethods<crate::DomTypeHolder> for ServiceWorkerContai
     }
 
     /// <https://w3c.github.io/ServiceWorker/#navigator-service-worker-getRegistration>
-    fn GetRegistration(&self, realm: &mut CurrentRealm, client_url: USVString) -> Rc<Promise> {
+    fn GetRegistration(&self, realm: &mut CurrentRealm, client_url: USVString) -> RootedPromise {
         // Step 1: Let client be this’s service worker client.
         let global = self.global();
 
@@ -573,7 +586,7 @@ impl ServiceWorkerContainerMethods<crate::DomTypeHolder> for ServiceWorkerContai
             return promise;
         }
 
-        let result_handler = self.get_or_setup_callback(promise.clone());
+        let result_handler = self.get_or_setup_callback(&promise);
 
         // Step 8: Run the following substeps in parallel:
         // Note: continues in parallel in the service worker manager,
@@ -600,4 +613,10 @@ impl ServiceWorkerContainerMethods<crate::DomTypeHolder> for ServiceWorkerContai
         // Step 9: Return promise.
         promise
     }
+
+    // <https://w3c.github.io/ServiceWorker/#dom-serviceworkercontainer-onmessage>
+    event_handler!(message, GetOnmessage, SetOnmessage);
+
+    // <https://w3c.github.io/ServiceWorker/#dom-serviceworkercontainer-onmessageerror>
+    event_handler!(messageerror, GetOnmessageerror, SetOnmessageerror);
 }

@@ -8,6 +8,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use embedder_traits::MouseButton;
 use euclid::Point2D;
 use js::context::JSContext;
 use keyboard_types::Modifiers;
@@ -17,7 +18,7 @@ use script_bindings::codegen::GenericBindings::HTMLImageElementBinding::HTMLImag
 use script_bindings::inheritance::Castable;
 use script_bindings::root::DomRoot;
 use script_bindings::str::DOMString;
-use script_traits::ConstellationInputEvent;
+use script_traits::{ConstellationInputEvent, MouseButtons};
 use style::Atom;
 use style_traits::CSSPixel;
 
@@ -30,7 +31,7 @@ use crate::dom::node::Node;
 use crate::dom::types::{
     DragEvent, Element, HTMLAnchorElement, HTMLElement, HTMLImageElement, Window,
 };
-use crate::drag_data_store::{DragDataStore, Mode};
+use crate::drag::drag_data_store::{DragDataStore, Mode};
 
 /// How far, in CSS pixels along either axis, the pointer has to travel with the primary button
 /// held before a press on a draggable element becomes a drag. This is Chrome's threshold on
@@ -107,7 +108,7 @@ pub(crate) struct PointerState {
     client_point: Point2D<i32, CSSPixel>,
     page_point: Point2D<i32, CSSPixel>,
     modifiers: Modifiers,
-    buttons: u16,
+    buttons: MouseButtons,
 }
 
 impl PointerState {
@@ -214,7 +215,7 @@ impl DragAndDrop {
         let Some(source_node) = self.drag_candidate.get() else {
             return false;
         };
-        if input_event.pressed_mouse_buttons & 1 == 0 {
+        if !input_event.primary_button_is_pressed() {
             self.drag_candidate.set(None);
             return false;
         }
@@ -557,7 +558,7 @@ impl DragAndDrop {
             state.client_point,
             state.page_point,
             state.modifiers,
-            0,
+            MouseButton::Primary,
             state.buttons,
             related_target.map(|element| element.upcast()),
             Some(&data_transfer),

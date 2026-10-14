@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::{self, GenericCallback, GenericSend, GenericSender, SendResult};
 use servo_url::ImmutableOrigin;
 
-use crate::cache_storage::CacheStorageThreadMsg;
+use crate::cache_storage::CacheStorageThreadMessage;
 use crate::client_storage::{ClientStorageThreadHandle, ClientStorageThreadMessage};
 use crate::indexeddb::IndexedDBThreadMsg;
 use crate::webstorage_thread::{OriginDescriptor, WebStorageThreadMsg, WebStorageType};
@@ -19,24 +19,24 @@ pub mod webstorage_thread;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StorageThreads {
-    cache_storage_thread: GenericSender<CacheStorageThreadMsg>,
     client_storage_thread: GenericSender<ClientStorageThreadMessage>,
     idb_thread: GenericSender<IndexedDBThreadMsg>,
     web_storage_thread: GenericSender<WebStorageThreadMsg>,
+    cache_storage_thread: GenericSender<CacheStorageThreadMessage>,
 }
 
 impl StorageThreads {
     pub fn new(
-        cache_storage_thread: GenericSender<CacheStorageThreadMsg>,
         client_storage_thread: GenericSender<ClientStorageThreadMessage>,
         idb_thread: GenericSender<IndexedDBThreadMsg>,
         web_storage_thread: GenericSender<WebStorageThreadMsg>,
+        cache_storage_thread: GenericSender<CacheStorageThreadMessage>,
     ) -> StorageThreads {
         StorageThreads {
-            cache_storage_thread,
             client_storage_thread,
             idb_thread,
             web_storage_thread,
+            cache_storage_thread,
         }
     }
 
@@ -99,16 +99,6 @@ impl StorageThreads {
     }
 }
 
-impl GenericSend<CacheStorageThreadMsg> for StorageThreads {
-    fn send(&self, msg: CacheStorageThreadMsg) -> SendResult {
-        self.cache_storage_thread.send(msg)
-    }
-
-    fn sender(&self) -> GenericSender<CacheStorageThreadMsg> {
-        self.cache_storage_thread.clone()
-    }
-}
-
 impl GenericSend<ClientStorageThreadMessage> for StorageThreads {
     fn send(&self, msg: ClientStorageThreadMessage) -> SendResult {
         self.client_storage_thread.send(msg)
@@ -136,6 +126,16 @@ impl GenericSend<WebStorageThreadMsg> for StorageThreads {
 
     fn sender(&self) -> GenericSender<WebStorageThreadMsg> {
         self.web_storage_thread.clone()
+    }
+}
+
+impl GenericSend<CacheStorageThreadMessage> for StorageThreads {
+    fn send(&self, msg: CacheStorageThreadMessage) -> SendResult {
+        self.cache_storage_thread.send(msg)
+    }
+
+    fn sender(&self) -> GenericSender<CacheStorageThreadMessage> {
+        self.cache_storage_thread.clone()
     }
 }
 

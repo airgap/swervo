@@ -3,11 +3,13 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use dom_struct::dom_struct;
+use embedder_traits::MouseButton;
 use euclid::Point2D;
 use js::context::JSContext;
 use js::rust::HandleObject;
 use keyboard_types::Modifiers;
-use script_bindings::reflector::reflect_dom_object_with_proto_and_cx;
+use script_bindings::reflector::reflect_dom_object_with_proto;
+use script_traits::MouseButtons;
 use style::Atom;
 use style_traits::CSSPixel;
 
@@ -43,12 +45,7 @@ impl DragEvent {
         window: &Window,
         proto: Option<HandleObject>,
     ) -> DomRoot<DragEvent> {
-        reflect_dom_object_with_proto_and_cx(
-            Box::new(DragEvent::new_inherited()),
-            window,
-            proto,
-            cx,
-        )
+        reflect_dom_object_with_proto(cx, Box::new(DragEvent::new_inherited()), window, proto)
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -65,8 +62,8 @@ impl DragEvent {
         client_point: Point2D<i32, CSSPixel>,
         page_point: Point2D<i32, CSSPixel>,
         modifiers: Modifiers,
-        button: i16,
-        buttons: u16,
+        button: MouseButton,
+        buttons: MouseButtons,
         related_target: Option<&EventTarget>,
         data_transfer: Option<&DataTransfer>,
     ) -> DomRoot<DragEvent> {
@@ -120,8 +117,8 @@ impl DragEventMethods<crate::DomTypeHolder> for DragEvent {
             Point2D::new(mouse_init.clientX, mouse_init.clientY),
             page_point,
             mouse_init.parent.modifiers(),
-            mouse_init.button,
-            mouse_init.buttons,
+            mouse_init.button.into(),
+            MouseButtons::from_bits_retain(mouse_init.buttons),
             mouse_init.relatedTarget.as_deref(),
             init.dataTransfer.as_deref(),
         );

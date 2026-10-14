@@ -2,465 +2,345 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-//! The Cache API storage thread (<https://w3c.github.io/ServiceWorker/#cache-objects>).
-//!
-//! Origin-keyed named caches of request → response pairs, SQLite-backed with write-through
-//! persistence (each `put`/`delete` is durable immediately — no exit-time flush to lose on a
-//! crash). One thread per storage group; the private (incognito) group uses an in-memory
-//! database so nothing touches disk.
-//!
-//! Matching implements the spec's "query cache" algorithm: fragment-stripped URL comparison,
-//! `ignoreSearch`/`ignoreMethod`/`ignoreVary`, and `Vary` header comparison against the stored
-//! request headers. Entries for a cache are loaded and filtered in Rust rather than in SQL —
-//! per-cache entry counts are small (tens to low hundreds for real PWAs) and the matching rules
-//! are much clearer as code than as SQL.
-
+use std::collections::HashMap;
+use std::fmt::Debug;
 use std::path::PathBuf;
 use std::thread;
 
-use log::{error, warn};
-use rusqlite::{Connection, params};
+use log::error;
+use net_traits::request::Request;
+use net_traits::response::Response;
 use servo_base::generic_channel::{self, GenericReceiver, GenericSender};
 use servo_url::ImmutableOrigin;
 use storage_traits::cache_storage::{
-    CacheApiQueryOptions, CacheApiRequest, CacheApiResponse, CacheStorageThreadMsg,
+    CacheStorageError, CacheStorageThreadHandle, CacheStorageThreadMessage,
+    CacheStorageThreadResponse,
 };
+use storage_traits::client_storage::StorageProxyMap;
+
+trait CacheStorageEngine {
+    type Error: Debug;
+
+    /// <https://w3c.github.io/ServiceWorker/#cache-storage-has>
+    fn has_cache(
+        &mut self,
+        origin: ImmutableOrigin,
+        cache_name: &str,
+    ) -> Result<bool, CacheStorageError<Self::Error>>;
+
+    /// <https://w3c.github.io/ServiceWorker/#cache-storage-open>
+    fn open_cache(
+        &mut self,
+        origin: ImmutableOrigin,
+        cache_name: String,
+        proxy_map: &StorageProxyMap,
+    ) -> Result<(), CacheStorageError<Self::Error>>;
+
+    /// <https://w3c.github.io/ServiceWorker/#cache-keys>
+    fn keys(
+        &mut self,
+        origin: ImmutableOrigin,
+        cache_name: &str,
+    ) -> Result<Vec<String>, CacheStorageError<Self::Error>>;
+
+    /// <https://w3c.github.io/ServiceWorker/#dom-cachestorage-delete>
+    fn delete_cache(
+        &mut self,
+        origin: ImmutableOrigin,
+        cache_name: &str,
+        proxy_map: &StorageProxyMap,
+    ) -> Result<bool, CacheStorageError<Self::Error>>;
+}
+
+/// <https://w3c.github.io/ServiceWorker/#dfn-request-response-list>
+pub struct RequestResponseList {
+    /// A list of tuples consisting of a request (a request) and a response (a response)
+    pub list: Vec<(Request, Response)>,
+}
+
+pub struct MemCacheStorageEngine {
+    /// <https://w3c.github.io/ServiceWorker/#dfn-name-to-cache-map>
+    name_to_cache_map: HashMap<(ImmutableOrigin, String), RequestResponseList>,
+}
+
+impl CacheStorageEngine for MemCacheStorageEngine {
+    type Error = ();
+
+    /// <https://w3c.github.io/ServiceWorker/#cache-storage-has>
+    /// The parallel steps.
+    fn has_cache(
+        &mut self,
+        origin: ImmutableOrigin,
+        cache_name: &str,
+    ) -> Result<bool, CacheStorageError<Self::Error>> {
+        // Step 2.1:For each key → value of the relevant name to cache map:
+        // Step 2.1.1: If cacheName matches key, resolve promise with true and abort these steps.
+        // Step 2.2: Resolve promise with false.
+        // Note: promise resolved in the callback in CacheStorage.
+        Ok(self
+            .name_to_cache_map
+            .contains_key(&(origin, cache_name.to_string())))
+    }
+
+    /// <https://w3c.github.io/ServiceWorker/#cache-storage-open>
+    /// The parallel steps.
+    fn open_cache(
+        &mut self,
+        origin: ImmutableOrigin,
+        cache_name: String,
+        proxy_map: &StorageProxyMap,
+    ) -> Result<(), CacheStorageError<Self::Error>> {
+        // Step 2.1: For each key → value of the relevant name to cache map:
+        // Step 2.1.1: If cacheName matches key, then:
+        // Resolve promise with a new Cache object that represents value.
+        // Note: promise resolved in script.
+        if self
+            .name_to_cache_map
+            .contains_key(&(origin.clone(), cache_name.clone()))
+        {
+            // Step 2.1.2: Abort these steps.
+            return Ok(());
+        }
+
+        // Step 2.2: Let cache be a new request response list.
+        let cache = RequestResponseList { list: Vec::new() };
+
+        // Step 2.3: Set the relevant name to cache map[cacheName] to cache.
+        // If this cache write operation failed due to exceeding the granted quota limit,
+        // reject promise with a QuotaExceededError and abort these steps.
+        // Note: there are no quota checks storage side at this point.
+        let Ok(response) = proxy_map
+            .handle
+            .create_database(proxy_map.bottle_id, cache_name.clone())
+            .recv()
+        else {
+            return Err(CacheStorageError::Internal(()));
+        };
+        if response.is_err() {
+            return Err(CacheStorageError::Internal(()));
+        }
+        self.name_to_cache_map.insert((origin, cache_name), cache);
+
+        // Step 2.4: Resolve promise with a new Cache object that represents cache.
+        // Note: promise resolved in script.
+        Ok(())
+    }
+
+    /// <https://w3c.github.io/ServiceWorker/#cache-keys>
+    /// The parallel steps.
+    fn keys(
+        &mut self,
+        origin: ImmutableOrigin,
+        cache_name: &str,
+    ) -> Result<Vec<String>, CacheStorageError<Self::Error>> {
+        // Step 5.1: Let requests be an empty list.
+        let mut requests: Vec<String> = Vec::new();
+
+        // Step 5.2: If the optional argument request is omitted, then:
+        // Step 5.2.1: For each requestResponse of the relevant request response list:
+        let Some(relevant_cache) = self
+            .name_to_cache_map
+            .get(&(origin, cache_name.to_string()))
+        else {
+            return Err(CacheStorageError::Internal(()));
+        };
+        // Step 5.2.2: Add requestResponse’s request to requests.
+        for (request, _response) in &relevant_cache.list {
+            requests.push(request.url().to_string());
+        }
+
+        // Step 5.3: Else:
+        // Note: implementing this steps depends on Query Cache; todo.
+
+        Ok(requests)
+    }
+
+    /// <https://w3c.github.io/ServiceWorker/#dom-cachestorage-delete>
+    /// The "running the algorithm specified in has" part, and the parallel steps.
+    fn delete_cache(
+        &mut self,
+        origin: ImmutableOrigin,
+        cache_name: &str,
+        proxy: &StorageProxyMap,
+    ) -> Result<bool, CacheStorageError<Self::Error>> {
+        // Step 1: Let promise be the result of running the algorithm specified in has(cacheName) method with cacheName.
+        // Step 2: Return the result of reacting to promise with a fulfillment handler that,
+        // when called with argument cacheExists,
+        // performs the following substeps:
+        // Note: skipping th promise here.
+
+        // Step 2.1: If cacheExists is false, then:
+        // Step 2.1.1: Resolve promise with false.
+        // Note: done below using return value from `is_some`.
+
+        // Step 2.3: Run the following substeps in parallel:
+        // Step 2.3.1: Remove the relevant name to cache map[cacheName].
+        let has = self
+            .name_to_cache_map
+            .remove(&(origin, cache_name.to_string()))
+            .is_some();
+
+        if has {
+            let Ok(response) = proxy
+                .handle
+                .delete_database(proxy.bottle_id, cache_name.to_string())
+                .recv()
+            else {
+                return Err(CacheStorageError::Internal(()));
+            };
+            if response.is_err() {
+                return Err(CacheStorageError::Internal(()));
+            }
+        }
+
+        // Step 2.3.2: Resolve promise with true.
+        // Note: promise resolved in script.
+        Ok(has)
+    }
+}
 
 pub trait CacheStorageThreadFactory {
-    fn new(config_dir: Option<PathBuf>, in_memory: bool) -> Self;
+    fn new(config_dir: Option<PathBuf>, temporary_storage: bool) -> Self;
 }
 
-impl CacheStorageThreadFactory for GenericSender<CacheStorageThreadMsg> {
-    /// Spawn the cache storage thread for one storage group.
-    fn new(config_dir: Option<PathBuf>, in_memory: bool) -> GenericSender<CacheStorageThreadMsg> {
-        let (chan, port) = generic_channel::channel().unwrap();
+impl CacheStorageThreadFactory for CacheStorageThreadHandle {
+    fn new(config_dir: Option<PathBuf>, temporary_storage: bool) -> CacheStorageThreadHandle {
+        let (generic_sender, generic_receiver) = generic_channel::channel().unwrap();
+        let mut temp_dir: Option<tempfile::TempDir> = None;
+        let base_dir = config_dir
+            .unwrap_or_else(|| {
+                let tmp_dir = tempfile::tempdir().unwrap();
+                let path = tmp_dir.path().to_path_buf();
+                temp_dir = Some(tmp_dir);
+                path
+            })
+            .join("cachestorage");
+        let storage_dir = if temporary_storage {
+            let unique_id = uuid::Uuid::new_v4().to_string();
+            base_dir.join("temporary").join(unique_id)
+        } else {
+            base_dir.join("default_v1")
+        };
+        std::fs::create_dir_all(&storage_dir)
+            .expect("Failed to create CacheStorage storage directory");
+        let sender_clone = generic_sender.clone();
         thread::Builder::new()
-            .name("CacheStorageManager".to_owned())
-            .spawn(
-                move || match CacheStorageManager::new(port, config_dir, in_memory) {
-                    Ok(manager) => manager.start(),
-                    Err(e) => error!("Cache API storage failed to initialize: {e}"),
-                },
-            )
+            .name("CacheStorageThread".to_owned())
+            .spawn(move || {
+                // Keep temp_dir alive while the thread runs.
+                let _ = temp_dir;
+                let engine = MemCacheStorageEngine {
+                    name_to_cache_map: Default::default(),
+                };
+                let mut cache_storage_thread =
+                    CacheStorageThread::new(sender_clone, generic_receiver, engine);
+                cache_storage_thread.start();
+            })
             .expect("Thread spawning failed");
-        chan
+
+        CacheStorageThreadHandle::new(generic_sender)
     }
 }
 
-struct CacheStorageManager {
-    port: GenericReceiver<CacheStorageThreadMsg>,
-    db: Connection,
+struct CacheStorageThread<E: CacheStorageEngine> {
+    receiver: GenericReceiver<CacheStorageThreadMessage>,
+    // Note: a sender to self might be required later for the storage engine.
+    _sender: GenericSender<CacheStorageThreadMessage>,
+    engine: E,
 }
 
-/// A stored entry, hydrated for matching.
-struct Entry {
-    rowid: i64,
-    url: String,
-    method: String,
-    request_headers: Vec<(String, Vec<u8>)>,
-    vary: Option<String>,
-    status: u16,
-    status_message: Vec<u8>,
-    response_headers: Vec<(String, Vec<u8>)>,
-    response_url: Option<String>,
-    body: Vec<u8>,
-}
-
-/// Strip the fragment (and optionally the query) for URL comparison. Operates textually so
-/// unparseable stored URLs still compare stably against themselves.
-fn comparison_url(url: &str, ignore_search: bool) -> &str {
-    let end_frag = url.find('#').unwrap_or(url.len());
-    let no_frag = &url[..end_frag];
-    if ignore_search {
-        let end_query = no_frag.find('?').unwrap_or(no_frag.len());
-        &no_frag[..end_query]
-    } else {
-        no_frag
-    }
-}
-
-fn header_value<'h>(headers: &'h [(String, Vec<u8>)], name: &str) -> Option<&'h [u8]> {
-    headers
-        .iter()
-        .find(|(n, _)| n.eq_ignore_ascii_case(name))
-        .map(|(_, v)| v.as_slice())
-}
-
-/// <https://w3c.github.io/ServiceWorker/#request-matches-cached-item>
-fn request_matches(query: &CacheApiRequest, entry: &Entry, options: &CacheApiQueryOptions) -> bool {
-    // Step: unless ignoreMethod, only GET/HEAD queries can match (stored entries are GETs).
-    if !options.ignore_method &&
-        !query.method.eq_ignore_ascii_case("GET") &&
-        !query.method.eq_ignore_ascii_case("HEAD")
-    {
-        return false;
-    }
-
-    if comparison_url(&query.url, options.ignore_search) !=
-        comparison_url(&entry.url, options.ignore_search)
-    {
-        return false;
-    }
-
-    // Vary: every listed request-header must have the same value now as when stored; `*` never
-    // matches.
-    if !options.ignore_vary &&
-        let Some(vary) = &entry.vary
-    {
-        for field in vary.split(',') {
-            let field = field.trim();
-            if field.is_empty() {
-                continue;
-            }
-            if field == "*" {
-                return false;
-            }
-            if header_value(&query.headers, field) != header_value(&entry.request_headers, field) {
-                return false;
-            }
+impl<E> CacheStorageThread<E>
+where
+    E: CacheStorageEngine,
+{
+    pub fn new(
+        _sender: GenericSender<CacheStorageThreadMessage>,
+        receiver: GenericReceiver<CacheStorageThreadMessage>,
+        engine: E,
+    ) -> CacheStorageThread<E> {
+        CacheStorageThread {
+            _sender,
+            receiver,
+            engine,
         }
     }
 
-    true
-}
-
-impl CacheStorageManager {
-    fn new(
-        port: GenericReceiver<CacheStorageThreadMsg>,
-        config_dir: Option<PathBuf>,
-        in_memory: bool,
-    ) -> Result<Self, String> {
-        let db = match (&config_dir, in_memory) {
-            (Some(dir), false) => {
-                let _ = std::fs::create_dir_all(dir);
-                Connection::open(dir.join("cache_api.sqlite")).map_err(|e| e.to_string())?
-            },
-            // Private group / no profile dir: keep everything in memory.
-            _ => Connection::open_in_memory().map_err(|e| e.to_string())?,
-        };
-        db.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA foreign_keys=ON;
-             CREATE TABLE IF NOT EXISTS caches(
-                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 origin TEXT NOT NULL,
-                 name TEXT NOT NULL,
-                 UNIQUE(origin, name)
-             );
-             CREATE TABLE IF NOT EXISTS entries(
-                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 cache_id INTEGER NOT NULL REFERENCES caches(id) ON DELETE CASCADE,
-                 url TEXT NOT NULL,
-                 method TEXT NOT NULL,
-                 request_headers BLOB NOT NULL,
-                 vary TEXT,
-                 status INTEGER NOT NULL,
-                 status_message BLOB NOT NULL,
-                 response_headers BLOB NOT NULL,
-                 response_url TEXT,
-                 body BLOB NOT NULL
-             );
-             CREATE INDEX IF NOT EXISTS entries_by_cache ON entries(cache_id);",
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(CacheStorageManager { port, db })
-    }
-
-    fn start(self) {
-        loop {
-            let Ok(msg) = self.port.recv() else {
-                // All senders gone; shut down with the process.
-                break;
-            };
-            match msg {
-                CacheStorageThreadMsg::Open {
-                    sender,
-                    origin,
-                    name,
-                } => {
-                    let _ = sender.send(self.open(&origin, &name));
-                },
-                CacheStorageThreadMsg::Has {
-                    sender,
-                    origin,
-                    name,
-                } => {
-                    let _ = sender.send(self.cache_id(&origin, &name).is_some());
-                },
-                CacheStorageThreadMsg::Delete {
-                    sender,
-                    origin,
-                    name,
-                } => {
-                    let _ = sender.send(self.delete_cache(&origin, &name));
-                },
-                CacheStorageThreadMsg::Names { sender, origin } => {
-                    let _ = sender.send(self.names(&origin));
-                },
-                CacheStorageThreadMsg::Match {
-                    sender,
-                    origin,
-                    cache_id,
+    pub fn start(&mut self) {
+        while let Ok(message) = self.receiver.recv() {
+            match message {
+                CacheStorageThreadMessage::HasCache {
                     cache_name,
-                    request,
-                    options,
-                    max_results,
+                    callback,
+                    proxy: _,
+                    origin,
                 } => {
-                    let _ = sender.send(self.query(
-                        &origin,
-                        cache_id,
-                        cache_name.as_deref(),
-                        request.as_ref(),
-                        &options,
-                        max_results,
-                    ));
+                    let result = self.engine.has_cache(origin.clone(), &cache_name);
+                    if callback
+                        .send(CacheStorageThreadResponse::HasCacheResult(
+                            result.map_err(|e| format!("{:?}", e)),
+                        ))
+                        .is_err()
+                    {
+                        error!("Failed to send response to script for HasCache message.");
+                    }
                 },
-                CacheStorageThreadMsg::Put {
-                    sender,
-                    cache_id,
-                    request,
-                    response,
+                CacheStorageThreadMessage::OpenCache {
+                    cache_name,
+                    callback,
+                    proxy,
+                    origin,
                 } => {
-                    let _ = sender.send(self.put(cache_id, &request, &response));
+                    let result = self
+                        .engine
+                        .open_cache(origin.clone(), cache_name.clone(), &proxy);
+                    if callback
+                        .send(CacheStorageThreadResponse::OpenCacheResult {
+                            result: result.map_err(|e| format!("{:?}", e)),
+                            cache_name,
+                        })
+                        .is_err()
+                    {
+                        error!("Failed to send response to script for OpenCache message.");
+                    }
                 },
-                CacheStorageThreadMsg::DeleteEntry {
-                    sender,
-                    cache_id,
-                    request,
-                    options,
+                CacheStorageThreadMessage::Keys {
+                    cache_name,
+                    callback,
+                    origin,
                 } => {
-                    let _ = sender.send(self.delete_entry(cache_id, &request, &options));
+                    let result = self.engine.keys(origin.clone(), &cache_name);
+                    if callback
+                        .send(CacheStorageThreadResponse::KeysResult(
+                            result.map_err(|e| format!("{:?}", e)),
+                        ))
+                        .is_err()
+                    {
+                        error!("Failed to send response to script for Keys message.");
+                    }
                 },
-                CacheStorageThreadMsg::Keys {
-                    sender,
-                    cache_id,
-                    request,
-                    options,
+                CacheStorageThreadMessage::DeleteCache {
+                    cache_name,
+                    callback,
+                    proxy,
+                    origin,
                 } => {
-                    let _ = sender.send(self.keys(cache_id, request.as_ref(), &options));
+                    let result = self
+                        .engine
+                        .delete_cache(origin.clone(), &cache_name, &proxy);
+                    if callback
+                        .send(CacheStorageThreadResponse::DeleteCacheResult(
+                            result.map_err(|e| format!("{:?}", e)),
+                        ))
+                        .is_err()
+                    {
+                        error!("Failed to send response to script for DeleteCache message.");
+                    }
                 },
-                CacheStorageThreadMsg::Exit(sender) => {
+                CacheStorageThreadMessage::Exit(sender) => {
                     let _ = sender.send(());
                     break;
                 },
             }
         }
-    }
-
-    fn cache_id(&self, origin: &ImmutableOrigin, name: &str) -> Option<i64> {
-        self.db
-            .query_row(
-                "SELECT id FROM caches WHERE origin = ?1 AND name = ?2",
-                params![origin.ascii_serialization(), name],
-                |row| row.get(0),
-            )
-            .ok()
-    }
-
-    fn open(&self, origin: &ImmutableOrigin, name: &str) -> Result<i64, String> {
-        if let Some(id) = self.cache_id(origin, name) {
-            return Ok(id);
-        }
-        self.db
-            .execute(
-                "INSERT INTO caches(origin, name) VALUES (?1, ?2)",
-                params![origin.ascii_serialization(), name],
-            )
-            .map_err(|e| e.to_string())?;
-        Ok(self.db.last_insert_rowid())
-    }
-
-    fn delete_cache(&self, origin: &ImmutableOrigin, name: &str) -> bool {
-        let Some(id) = self.cache_id(origin, name) else {
-            return false;
-        };
-        // Manual cascade: foreign_keys pragma is connection-scoped and cheap to not rely on.
-        let _ = self
-            .db
-            .execute("DELETE FROM entries WHERE cache_id = ?1", params![id]);
-        self.db
-            .execute("DELETE FROM caches WHERE id = ?1", params![id])
-            .map(|n| n > 0)
-            .unwrap_or(false)
-    }
-
-    fn names(&self, origin: &ImmutableOrigin) -> Vec<String> {
-        let Ok(mut stmt) = self
-            .db
-            .prepare("SELECT name FROM caches WHERE origin = ?1 ORDER BY id")
-        else {
-            return vec![];
-        };
-        stmt.query_map(params![origin.ascii_serialization()], |row| row.get(0))
-            .map(|rows| rows.filter_map(Result::ok).collect())
-            .unwrap_or_default()
-    }
-
-    fn load_entries(&self, cache_id: i64) -> Vec<Entry> {
-        let Ok(mut stmt) = self.db.prepare(
-            "SELECT id, url, method, request_headers, vary, status, status_message, \
-             response_headers, response_url, body FROM entries WHERE cache_id = ?1 ORDER BY id",
-        ) else {
-            return vec![];
-        };
-        let rows = stmt.query_map(params![cache_id], |row| {
-            let request_headers: Vec<u8> = row.get(3)?;
-            let response_headers: Vec<u8> = row.get(7)?;
-            Ok(Entry {
-                rowid: row.get(0)?,
-                url: row.get(1)?,
-                method: row.get(2)?,
-                request_headers: postcard::from_bytes(&request_headers).unwrap_or_default(),
-                vary: row.get(4)?,
-                status: row.get::<_, i64>(5)? as u16,
-                status_message: row.get(6)?,
-                response_headers: postcard::from_bytes(&response_headers).unwrap_or_default(),
-                response_url: row.get(8)?,
-                body: row.get(9)?,
-            })
-        });
-        rows.map(|rows| rows.filter_map(Result::ok).collect())
-            .unwrap_or_default()
-    }
-
-    /// Cache ids to search: a specific cache, a named cache, or all of the origin's caches in
-    /// creation order (`CacheStorage.match`).
-    fn caches_to_search(
-        &self,
-        origin: &ImmutableOrigin,
-        cache_id: Option<i64>,
-        cache_name: Option<&str>,
-    ) -> Vec<i64> {
-        if let Some(id) = cache_id {
-            return vec![id];
-        }
-        if let Some(name) = cache_name {
-            return self.cache_id(origin, name).into_iter().collect();
-        }
-        let Ok(mut stmt) = self
-            .db
-            .prepare("SELECT id FROM caches WHERE origin = ?1 ORDER BY id")
-        else {
-            return vec![];
-        };
-        stmt.query_map(params![origin.ascii_serialization()], |row| row.get(0))
-            .map(|rows| rows.filter_map(Result::ok).collect())
-            .unwrap_or_default()
-    }
-
-    fn query(
-        &self,
-        origin: &ImmutableOrigin,
-        cache_id: Option<i64>,
-        cache_name: Option<&str>,
-        request: Option<&CacheApiRequest>,
-        options: &CacheApiQueryOptions,
-        max_results: u32,
-    ) -> Vec<CacheApiResponse> {
-        let mut out = Vec::new();
-        for id in self.caches_to_search(origin, cache_id, cache_name) {
-            for entry in self.load_entries(id) {
-                let matches = match request {
-                    Some(request) => request_matches(request, &entry, options),
-                    None => true,
-                };
-                if matches {
-                    out.push(CacheApiResponse {
-                        status: entry.status,
-                        status_message: entry.status_message,
-                        headers: entry.response_headers,
-                        url: entry.response_url,
-                        body: entry.body,
-                    });
-                    if out.len() as u32 >= max_results {
-                        return out;
-                    }
-                }
-            }
-        }
-        out
-    }
-
-    fn put(
-        &self,
-        cache_id: i64,
-        request: &CacheApiRequest,
-        response: &CacheApiResponse,
-    ) -> Result<(), String> {
-        // Batch cache operations replace any entry the incoming request matches.
-        for entry in self.load_entries(cache_id) {
-            if request_matches(request, &entry, &CacheApiQueryOptions::default()) {
-                let _ = self
-                    .db
-                    .execute("DELETE FROM entries WHERE id = ?1", params![entry.rowid]);
-            }
-        }
-        let request_headers = postcard::to_allocvec(&request.headers).map_err(|e| e.to_string())?;
-        let response_headers =
-            postcard::to_allocvec(&response.headers).map_err(|e| e.to_string())?;
-        let vary = header_value(&response.headers, "vary")
-            .map(|v| String::from_utf8_lossy(v).into_owned());
-        self.db
-            .execute(
-                "INSERT INTO entries(cache_id, url, method, request_headers, vary, status, \
-                 status_message, response_headers, response_url, body) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![
-                    cache_id,
-                    request.url,
-                    request.method,
-                    request_headers,
-                    vary,
-                    response.status as i64,
-                    response.status_message,
-                    response_headers,
-                    response.url,
-                    response.body,
-                ],
-            )
-            .map_err(|e| {
-                warn!("Cache API put failed: {e}");
-                e.to_string()
-            })?;
-        Ok(())
-    }
-
-    fn delete_entry(
-        &self,
-        cache_id: i64,
-        request: &CacheApiRequest,
-        options: &CacheApiQueryOptions,
-    ) -> bool {
-        let mut deleted = false;
-        for entry in self.load_entries(cache_id) {
-            if request_matches(request, &entry, options) {
-                deleted |= self
-                    .db
-                    .execute("DELETE FROM entries WHERE id = ?1", params![entry.rowid])
-                    .map(|n| n > 0)
-                    .unwrap_or(false);
-            }
-        }
-        deleted
-    }
-
-    fn keys(
-        &self,
-        cache_id: i64,
-        request: Option<&CacheApiRequest>,
-        options: &CacheApiQueryOptions,
-    ) -> Vec<CacheApiRequest> {
-        self.load_entries(cache_id)
-            .into_iter()
-            .filter(|entry| match request {
-                Some(request) => request_matches(request, entry, options),
-                None => true,
-            })
-            .map(|entry| CacheApiRequest {
-                url: entry.url,
-                method: entry.method,
-                headers: entry.request_headers,
-            })
-            .collect()
     }
 }

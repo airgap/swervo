@@ -6,3 +6,5 @@
 [Exposed=Window]
 interface SVGSymbolElement : SVGGraphicsElement {
 };
+
+//SVGSymbolElement includes SVGFitToViewBox;

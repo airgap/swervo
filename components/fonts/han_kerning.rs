@@ -12,7 +12,7 @@
 //! punctuation (left-aligned in Japanese and Simplified Chinese fonts, centered in Traditional
 //! Chinese ones) and whether curly quotes are fullwidth.
 
-use icu_properties::{EastAsianWidth, GeneralCategory, maps};
+use icu_properties::props::{EastAsianWidth, EnumeratedProperty, GeneralCategory};
 use read_fonts::FontRead;
 use read_fonts::tables::gpos::Gpos;
 use read_fonts::types::Tag;
@@ -103,11 +103,11 @@ impl HanKerningData {
             '\u{2018}' | '\u{201C}' if self.quotes_are_fullwidth => CharType::Open,
             '\u{2019}' | '\u{201D}' if self.quotes_are_fullwidth => CharType::Close,
             _ => {
-                let width = maps::east_asian_width().get(character);
+                let width = EastAsianWidth::for_char(character);
                 if width != EastAsianWidth::Wide && width != EastAsianWidth::Fullwidth {
                     return CharType::Other;
                 }
-                match maps::general_category().get(character) {
+                match GeneralCategory::for_char(character) {
                     GeneralCategory::OpenPunctuation => CharType::Open,
                     GeneralCategory::ClosePunctuation => CharType::Close,
                     _ => CharType::Other,

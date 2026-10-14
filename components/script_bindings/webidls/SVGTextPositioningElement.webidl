@@ -5,4 +5,9 @@
 // https://svgwg.org/svg2-draft/text.html#InterfaceSVGTextPositioningElement
 [Exposed=Window, Abstract]
 interface SVGTextPositioningElement : SVGTextContentElement {
+  // [SameObject] readonly attribute SVGAnimatedLengthList x;
+  // [SameObject] readonly attribute SVGAnimatedLengthList y;
+  // [SameObject] readonly attribute SVGAnimatedLengthList dx;
+  // [SameObject] readonly attribute SVGAnimatedLengthList dy;
+  // [SameObject] readonly attribute SVGAnimatedNumberList rotate;
 };

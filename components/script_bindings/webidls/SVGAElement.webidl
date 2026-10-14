@@ -17,3 +17,4 @@ interface SVGAElement : SVGGraphicsElement {
 };
 
 SVGAElement includes SVGURIReference;
+// SVGAElement includes HTMLHyperlinkElementUtils;

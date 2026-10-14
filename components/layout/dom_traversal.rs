@@ -3,7 +3,9 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::borrow::Cow;
+use std::ops::Deref;
 
+use atomic_refcell::AtomicRef;
 use layout_api::{
     LayoutElement, LayoutElementType, LayoutNode, LayoutNodeType, PseudoElementChain,
 };
@@ -16,7 +18,6 @@ use style::str::char_is_whitespace;
 use style::values::generics::counters::{Content, ContentItem};
 use style::values::specified::Quotes;
 use style::values::specified::box_::Display as StyloDisplay;
-use web_atoms::LocalName;
 
 use crate::context::LayoutContext;
 use crate::dom::{BoxSlot, LayoutBox, NodeExt};
@@ -89,8 +90,46 @@ pub(super) enum PseudoElementContentItem {
     Replaced(ReplacedContents),
 }
 
+/// A reference to a string encountered during box tree construction. This
+/// can either be a reference to a borrowed DOM string, a `&str` or an owned
+/// `String`.
+pub(crate) enum BoxTreeString<'a> {
+    /// Text borrowed in its entirety from a DOM node.
+    Ref(AtomicRef<'a, str>),
+    /// Text that exists independent of a particular DOM node.
+    Cow(Cow<'a, str>),
+}
+
+impl<'a> From<AtomicRef<'a, str>> for BoxTreeString<'a> {
+    fn from(text: AtomicRef<'a, str>) -> BoxTreeString<'a> {
+        BoxTreeString::Ref(text)
+    }
+}
+
+impl<'a> From<Cow<'a, str>> for BoxTreeString<'a> {
+    fn from(text: Cow<'a, str>) -> BoxTreeString<'a> {
+        BoxTreeString::Cow(text)
+    }
+}
+
+impl From<String> for BoxTreeString<'_> {
+    fn from(text: String) -> BoxTreeString<'static> {
+        BoxTreeString::Cow(text.into())
+    }
+}
+
+impl Deref for BoxTreeString<'_> {
+    type Target = str;
+    fn deref(&self) -> &str {
+        match self {
+            Self::Ref(ref_) => ref_,
+            Self::Cow(cow) => cow,
+        }
+    }
+}
+
 pub(super) trait TraversalHandler<'dom> {
-    fn handle_text(&mut self, info: &NodeAndStyleInfo<'dom>, text: Cow<'dom, str>);
+    fn handle_text(&mut self, info: &NodeAndStyleInfo<'dom>, text: BoxTreeString<'dom>);
 
     /// Or pseudo-element
     fn handle_element(
@@ -134,7 +173,7 @@ fn traverse_children_of<'dom>(
         for child in parent_element_info.node.flat_tree_children() {
             if child.is_text_node() {
                 let info = NodeAndStyleInfo::new(child, child.style(&context.style_context));
-                handler.handle_text(&info, child.text_content());
+                handler.handle_text(&info, child.text_content().into());
             } else if child.is_element() {
                 traverse_element(child, context, handler);
             }
@@ -188,28 +227,21 @@ fn traverse_element<'dom>(
     match Display::from(info.style.get_box().display) {
         Display::None => {},
         Display::Contents => {
-            if ReplacedContents::for_element(element, context).is_some() {
-                // `display: content` on a replaced element computes to `display: none`
-                // <https://drafts.csswg.org/css-display-3/#valdef-display-contents>
-                element.unset_all_boxes()
-            } else {
-                let shared_inline_styles =
-                    SharedInlineStyles::from_info_and_context(&info, context);
-                element
-                    .box_slot()
-                    .set(LayoutBox::DisplayContents(shared_inline_styles.clone()));
+            let shared_inline_styles = SharedInlineStyles::from_info_and_context(&info, context);
+            element
+                .box_slot()
+                .set(LayoutBox::DisplayContents(shared_inline_styles.clone()));
 
-                handler.enter_display_contents(shared_inline_styles);
-                traverse_children_of(&info, context, handler);
-                handler.leave_display_contents();
-            }
+            handler.enter_display_contents(shared_inline_styles);
+            traverse_children_of(&info, context, handler);
+            handler.leave_display_contents();
         },
         Display::GeneratingBox(display) => {
             if info.style.in_top_layer() {
                 traverse_backdrop_pseudo_element(&info, context, handler);
             }
             let contents = Contents::for_element(element, context);
-            let display = display.used_value_for_contents(&contents);
+            let display = display.used_value_for_contents(&contents, &info);
             let box_slot = element.box_slot();
             handler.handle_element(&info, display, contents, box_slot);
         },
@@ -324,7 +356,7 @@ pub(crate) fn traverse_ruby_column<'dom>(
     for &node in &column.base {
         if node.is_text_node() {
             let info = NodeAndStyleInfo::new(node, node.style(&context.style_context));
-            handler.handle_text(&info, node.text_content());
+            handler.handle_text(&info, node.text_content().into());
         } else {
             traverse_element(node, context, handler);
         }
@@ -418,7 +450,8 @@ impl Contents {
         let is_widget = matches!(
             node.type_id(),
             Some(LayoutNodeType::Element(
-                LayoutElementType::HTMLInputElement |
+                LayoutElementType::HTMLButtonElement |
+                    LayoutElementType::HTMLInputElement |
                     LayoutElementType::HTMLSelectElement |
                     LayoutElementType::HTMLTextAreaElement
             ))
@@ -498,40 +531,6 @@ pub(crate) fn generate_pseudo_element_content(
                 match item {
                     ContentItem::String(s) => {
                         vec.push(PseudoElementContentItem::Text(s.to_string()));
-                    },
-                    ContentItem::Attr(attr) => {
-                        let element = pseudo_element_info
-                            .node
-                            .as_element()
-                            .expect("Expected an element");
-
-                        // From
-                        // <https://html.spec.whatwg.org/multipage/#case-sensitivity-of-the-css-%27attr%28%29%27-function>
-                        //
-                        // > CSS Values and Units leaves the case-sensitivity of attribute names for
-                        // > the purpose of the `attr()` function to be defined by the host language.
-                        // > [[CSSVALUES]].
-                        // >
-                        // > When comparing the attribute name part of a CSS `attr()`function to the
-                        // > names of namespace-less attributes on HTML elements in HTML documents,
-                        // > the name part of the CSS `attr()` function must first be converted to
-                        // > ASCII lowercase. The same function when compared to other attributes must
-                        // > be compared according to its original case. In both cases, to match the
-                        // > values must be identical to each other (and therefore the comparison is
-                        // > case sensitive).
-                        let attr_name = match element.is_html_element_in_html_document() {
-                            true => &*attr.attribute.to_ascii_lowercase(),
-                            false => &*attr.attribute,
-                        };
-
-                        pseudo_element_info
-                            .node
-                            .set_uses_content_attribute_with_attr(true);
-                        let attr_val =
-                            element.attribute(&attr.namespace_url, &LocalName::from(attr_name));
-                        vec.push(PseudoElementContentItem::Text(
-                            attr_val.map_or("".to_string(), |s| s.to_string()),
-                        ));
                     },
                     ContentItem::Image(image) => {
                         if let Some(replaced_content) =

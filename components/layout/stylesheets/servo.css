@@ -1,3 +1,7 @@
+html {
+  color: CanvasText;
+}
+
 input[type="hidden"] {
   display: none !important;
 }
@@ -39,7 +43,7 @@ textarea {
     min-block-size: 1lh;
 }
 
-input {
+input:not([type="image"]) {
     padding: 1px 2px;
 }
 
@@ -198,7 +202,15 @@ input[type="file"]::file-selector-button {
   border-radius: 2px;
   border: 1px solid ButtonBorder;
   padding: 1px 6px; /* Chrome's button padding */
-  color: black;
+  color: ButtonText;
+}
+
+input[type="text"],
+input[type="email"],
+input[type="date"],
+input[type="password"],
+input[type="number"] {
+  color: FieldText;
 }
 
 button,
@@ -410,9 +422,9 @@ input[type="range"]::slider-thumb {
   border-radius: 50%;
   background: #007aff;
 
-  /* Vertically centered, adjust inline direction by width so thumb
-     is centered on range value. */
-  transform: translate(-8px, -50%);
+  /* The thumb is placed by setting `inset-inline-start` to the value's position within the
+     input's padding box. Adjust inline direction by width so thumb is centered on range value. */
+  margin-inline-start: -8px;
 }
 
 input[type="range"]:disabled::slider-fill,
@@ -496,7 +508,7 @@ input[type="radio"] {
   display: inline-block;
 
   /* TODO: According to https://wpt.fyi/results/css/css-grid/stretch-grid-item-radio-input.html,
-     radio buttons should be able to grow / shrink depending of the width/height of the input 
+     radio buttons should be able to grow / shrink depending of the width/height of the input
      element. These values should probably be changed once `aspect-ratio` has been supported
      for non-replaced elements.
   */
@@ -511,7 +523,7 @@ input[type="radio"]::before {
   content: "";
   background: transparent;
 
-  /* TODO: The ring should be able to grow & shrink according to min(width, height). 
+  /* TODO: The ring should be able to grow & shrink according to min(width, height).
     However, this is currently not possible to be implemented as `aspect-ratio` hasn't
     been supported for non-replaced elements.
   */
@@ -532,7 +544,7 @@ input[type="radio"]::after {
   content: "";
   background: transparent;
 
-  /* TODO:  The bullet should be able to grow & shrink according to min(width, height). 
+  /* TODO:  The bullet should be able to grow & shrink according to min(width, height).
   However, this is currently not possible to be implemented as `aspect-ratio` hasn't been supported for non-replaced elements. */
   width: 8px;
   height: 8px;

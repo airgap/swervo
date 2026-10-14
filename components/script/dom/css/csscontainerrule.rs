@@ -6,13 +6,14 @@ use std::cell::RefCell;
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
-use script_bindings::reflector::reflect_dom_object_with_cx;
+use script_bindings::reflector::reflect_dom_object;
 use servo_arc::Arc;
 use style::shared_lock::{SharedRwLockReadGuard, ToCssWithGuard};
 use style::stylesheets::{ContainerRule, CssRuleType};
 use style_traits::ToCss;
 
 use super::cssconditionrule::CSSConditionRule;
+use super::cssgroupingrule::CSSGroupingRule;
 use super::cssrule::SpecificCSSRule;
 use super::cssstylesheet::CSSStyleSheet;
 use crate::dom::bindings::codegen::Bindings::CSSContainerRuleBinding::CSSContainerRuleMethods;
@@ -31,12 +32,17 @@ pub(crate) struct CSSContainerRule {
 
 impl CSSContainerRule {
     fn new_inherited(
+        parent_rule: Option<&CSSGroupingRule>,
         parent_stylesheet: &CSSStyleSheet,
         container_rule: Arc<ContainerRule>,
     ) -> CSSContainerRule {
         let rules = container_rule.rules.clone();
         CSSContainerRule {
-            css_condition_rule: CSSConditionRule::new_inherited(parent_stylesheet, rules),
+            css_condition_rule: CSSConditionRule::new_inherited(
+                parent_rule,
+                parent_stylesheet,
+                rules,
+            ),
             container_rule: RefCell::new(container_rule),
         }
     }
@@ -44,16 +50,18 @@ impl CSSContainerRule {
     pub(crate) fn new(
         cx: &mut JSContext,
         window: &Window,
+        parent_rule: Option<&CSSGroupingRule>,
         parent_stylesheet: &CSSStyleSheet,
         container_rule: Arc<ContainerRule>,
     ) -> DomRoot<CSSContainerRule> {
-        reflect_dom_object_with_cx(
+        reflect_dom_object(
+            cx,
             Box::new(CSSContainerRule::new_inherited(
+                parent_rule,
                 parent_stylesheet,
                 container_rule,
             )),
             window,
-            cx,
         )
     }
 

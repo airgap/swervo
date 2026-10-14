@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use app_units::{Au, MAX_AU};
 use malloc_size_of_derive::MallocSizeOf;
 use style::Zero;
-use style::logical_geometry::Direction;
+use style::logical_geometry::LogicalAxis;
 use style::values::computed::{
     LengthPercentage, MaxSize as StyleMaxSize, Percentage, Size as StyleSize,
 };
@@ -158,7 +158,7 @@ pub(crate) fn outer_inline(
             let block_size =
                 if let Some(block_content_size) = get_tentative_block_content_size(aspect_ratio) {
                     SizeConstraint::Definite(content_box_sizes.block.resolve(
-                        Direction::Block,
+                        LogicalAxis::Block,
                         automatic_size,
                         || auto_minimum.block,
                         available_block_size,
@@ -380,15 +380,15 @@ impl<T: Clone> Size<T> {
     }
 }
 
-impl From<StyleSize> for Size<LengthPercentage> {
-    fn from(size: StyleSize) -> Self {
+impl From<&StyleSize> for Size<LengthPercentage> {
+    fn from(size: &StyleSize) -> Self {
         match size {
-            StyleSize::LengthPercentage(lp) => Size::Numeric(lp.0),
+            StyleSize::LengthPercentage(lp) => Size::Numeric(lp.0.clone()),
             StyleSize::Auto => Size::Initial,
             StyleSize::MinContent => Size::MinContent,
             StyleSize::MaxContent => Size::MaxContent,
             StyleSize::FitContent => Size::FitContent,
-            StyleSize::FitContentFunction(lp) => Size::FitContentFunction(lp.0),
+            StyleSize::FitContentFunction(lp) => Size::FitContentFunction(lp.0.clone()),
             StyleSize::Stretch | StyleSize::WebkitFillAvailable => Size::Stretch,
             StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
                 unreachable!("anchor-size() should be disabled")
@@ -397,15 +397,15 @@ impl From<StyleSize> for Size<LengthPercentage> {
     }
 }
 
-impl From<StyleMaxSize> for Size<LengthPercentage> {
-    fn from(max_size: StyleMaxSize) -> Self {
+impl From<&StyleMaxSize> for Size<LengthPercentage> {
+    fn from(max_size: &StyleMaxSize) -> Self {
         match max_size {
-            StyleMaxSize::LengthPercentage(lp) => Size::Numeric(lp.0),
+            StyleMaxSize::LengthPercentage(lp) => Size::Numeric(lp.0.clone()),
             StyleMaxSize::None => Size::Initial,
             StyleMaxSize::MinContent => Size::MinContent,
             StyleMaxSize::MaxContent => Size::MaxContent,
             StyleMaxSize::FitContent => Size::FitContent,
-            StyleMaxSize::FitContentFunction(lp) => Size::FitContentFunction(lp.0),
+            StyleMaxSize::FitContentFunction(lp) => Size::FitContentFunction(lp.0.clone()),
             StyleMaxSize::Stretch | StyleMaxSize::WebkitFillAvailable => Size::Stretch,
             StyleMaxSize::AnchorSizeFunction(_) | StyleMaxSize::AnchorContainingCalcFunction(_) => {
                 unreachable!("anchor-size() should be disabled")
@@ -655,14 +655,14 @@ impl Sizes {
     #[inline]
     pub(crate) fn resolve(
         &self,
-        axis: Direction,
+        axis: LogicalAxis,
         automatic_size: Size<Au>,
         get_automatic_minimum_size: impl FnOnce() -> Au,
         stretch_size: Option<Au>,
         get_content_size: impl FnOnce() -> ContentSizes,
         is_table: bool,
     ) -> Au {
-        if is_table && axis == Direction::Block {
+        if is_table && axis == LogicalAxis::Block {
             // The intrinsic block size of a table already takes sizing properties into account,
             // but it can be a smaller amount if there are collapsed rows.
             // Therefore, disregard sizing properties and just defer to the intrinsic size.
@@ -768,7 +768,7 @@ pub(crate) fn content_sizes_with_aspect_ratio(
     match block_size {
         SizeConstraint::Definite(block_size) => Some(
             preferred_aspect_ratio
-                .compute_dependent_size(Direction::Inline, block_size)
+                .compute_dependent_size(LogicalAxis::Inline, block_size)
                 .max(content_sizes.min_content)
                 .into(),
         ),
@@ -811,7 +811,7 @@ pub(crate) fn automatic_inline_size_with_aspect_ratio(
 /// stays zero, like in Blink, so that `box-sizing: border-box` doesn't turn it into a
 /// non-zero inline minimum.
 fn transferred_inline_extremums(ratio: AspectRatio, min: Au, max: Option<Au>) -> (Au, Option<Au>) {
-    let transfer = |size| ratio.compute_dependent_size(Direction::Inline, size);
+    let transfer = |size| ratio.compute_dependent_size(LogicalAxis::Inline, size);
     let min = if min.is_zero() { min } else { transfer(min) };
     (min, max.map(transfer))
 }
@@ -833,14 +833,14 @@ pub(crate) fn block_size_from_aspect_ratio(
         block_sizes.resolve_each_extrinsic(Size::FitContent, Au::zero(), block_stretch_size);
     Some(
         preferred_aspect_ratio?
-            .compute_dependent_size(Direction::Block, inline_size)
+            .compute_dependent_size(LogicalAxis::Block, inline_size)
             .clamp_between_extremums(min, max),
     )
 }
 
 struct LazySizeData<'a> {
     sizes: &'a Sizes,
-    axis: Direction,
+    axis: LogicalAxis,
     automatic_size: Size<Au>,
     get_automatic_minimum_size: fn() -> Au,
     stretch_size: Option<Au>,
@@ -869,7 +869,7 @@ pub(crate) struct LazySize<'a> {
 impl<'a> LazySize<'a> {
     pub(crate) fn new(
         sizes: &'a Sizes,
-        axis: Direction,
+        axis: LogicalAxis,
         automatic_size: Size<Au>,
         get_automatic_minimum_size: fn() -> Au,
         stretch_size: Option<Au>,

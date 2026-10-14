@@ -5,11 +5,13 @@
 use std::cell::Cell;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use dom_struct::dom_struct;
 use html5ever::{LocalName, Prefix, local_name, ns};
-use js::context::JSContext;
+use js::context::{JSContext, NoGC};
 use js::rust::HandleObject;
 use net_traits::blob_url_store::UrlWithBlobClaim;
+use net_traits::fetch::fetch_controller::FetchController;
 use net_traits::image_cache::{
     Image, ImageCache, ImageCacheResult, ImageLoadListener, ImageOrMetadataAvailable,
     ImageResponse, PendingImageId,
@@ -38,8 +40,8 @@ use crate::dom::node::{Node, NodeDamage, NodeTraits};
 use crate::dom::performance::performanceresourcetiming::InitiatorType;
 use crate::dom::svg::svggraphicselement::SVGGraphicsElement;
 use crate::dom::svg::svgsvgelement::SVGSVGElement;
-use crate::fetch::{FetchCanceller, RequestWithGlobalScope};
-use crate::network_listener::{self, FetchResponseListener, ResourceTimingListener};
+use crate::fetch::fetch::RequestWithGlobalScope;
+use crate::fetch::network_listener::{self, FetchResponseListener, ResourceTimingListener};
 use crate::url::ensure_blob_referenced_by_url_is_kept_alive;
 
 /// <https://svgwg.org/svg2-draft/embedded.html#Placement>
@@ -115,7 +117,7 @@ impl SVGImageElement {
         *self.image.borrow_mut() = None;
 
         let Some(href) = self.image_href() else {
-            self.upcast::<Node>().dirty(NodeDamage::Other);
+            self.upcast::<Node>().dirty(cx.no_gc(), NodeDamage::Other);
             return;
         };
         let global = self.owner_global();
@@ -193,14 +195,14 @@ impl SVGImageElement {
         document.fetch_background(request, context);
     }
 
-    fn process_image_response(&self, response: ImageResponse, _cx: &mut JSContext) {
+    fn process_image_response(&self, response: ImageResponse, cx: &mut JSContext) {
         match response {
             ImageResponse::Loaded(image, _url) => {
                 *self.image.borrow_mut() = Some(image);
-                self.upcast::<Node>().dirty(NodeDamage::Other);
+                self.upcast::<Node>().dirty(cx.no_gc(), NodeDamage::Other);
                 // The raster is baked into the enclosing svg's serialized
                 // rasterization; that snapshot predates these pixels.
-                self.invalidate_enclosing_svg_serializations();
+                self.invalidate_enclosing_svg_serializations(cx.no_gc());
                 self.queue_simple_event("load");
             },
             ImageResponse::MetadataLoaded(..) | ImageResponse::PartiallyDecoded(_) => {},
@@ -211,13 +213,13 @@ impl SVGImageElement {
         }
     }
 
-    fn invalidate_enclosing_svg_serializations(&self) {
+    fn invalidate_enclosing_svg_serializations(&self, no_gc: &NoGC) {
         for svg_root in self
             .upcast::<Node>()
             .inclusive_ancestors(ShadowIncluding::No)
             .filter_map(DomRoot::downcast::<SVGSVGElement>)
         {
-            svg_root.invalidate_cached_serialized_subtree_and_rasterization_result();
+            svg_root.invalidate_cached_serialized_subtree_and_rasterization_result(no_gc);
         }
     }
 
@@ -255,8 +257,8 @@ impl VirtualMethods for SVGImageElement {
                 AttributeMutation::Removed => {
                     self.generation_id.set(self.generation_id.get() + 1);
                     *self.image.borrow_mut() = None;
-                    self.upcast::<Node>().dirty(NodeDamage::Other);
-                    self.invalidate_enclosing_svg_serializations();
+                    self.upcast::<Node>().dirty(cx.no_gc(), NodeDamage::Other);
+                    self.invalidate_enclosing_svg_serializations(cx.no_gc());
                 },
             }
         }
@@ -297,13 +299,13 @@ struct SVGImageFetchContext {
     cancelled: bool,
     /// Url for the resource.
     url: ServoUrl,
-    /// A [`FetchCanceller`] for this request.
-    fetch_canceller: FetchCanceller,
+    /// A [`FetchController`] for this request.
+    fetch_controller: FetchController,
 }
 
 impl FetchResponseListener for SVGImageFetchContext {
     fn process_request_body(&mut self, _: RequestId) {
-        self.fetch_canceller.ignore()
+        self.fetch_controller.ignore()
     }
 
     fn process_response(
@@ -328,16 +330,11 @@ impl FetchResponseListener for SVGImageFetchContext {
 
         if !status_is_ok {
             self.cancelled = true;
-            self.fetch_canceller.abort();
+            self.fetch_controller.abort();
         }
     }
 
-    fn process_response_chunk(
-        &mut self,
-        _: &mut JSContext,
-        request_id: RequestId,
-        payload: Vec<u8>,
-    ) {
+    fn process_response_chunk(&mut self, _: &mut JSContext, request_id: RequestId, payload: Bytes) {
         if self.cancelled {
             // An error was received previously, skip processing the payload.
             return;
@@ -345,7 +342,7 @@ impl FetchResponseListener for SVGImageFetchContext {
 
         self.image_cache.notify_pending_response(
             self.id,
-            FetchResponseMsg::ProcessResponseChunk(request_id, payload.into()),
+            FetchResponseMsg::ProcessResponseChunk(request_id, payload),
         );
     }
 
@@ -406,7 +403,7 @@ impl SVGImageFetchContext {
             id,
             cancelled: false,
             url,
-            fetch_canceller: FetchCanceller::new(request_id, false, core_resource_thread),
+            fetch_controller: FetchController::new(request_id, false, core_resource_thread),
         }
     }
 }

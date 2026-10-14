@@ -3,12 +3,12 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
 use script_bindings::reflector::{Reflector, reflect_dom_object};
 
 use crate::dom::bindings::codegen::Bindings::BarPropBinding::BarPropMethods;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::window::Window;
-use crate::script_runtime::CanGc;
 
 /// <https://html.spec.whatwg.org/multipage/#barprop>
 #[dom_struct]
@@ -17,13 +17,13 @@ pub(crate) struct BarProp {
 }
 
 impl BarProp {
-    pub(crate) fn new(window: &Window, can_gc: CanGc) -> DomRoot<BarProp> {
+    pub(crate) fn new(cx: &mut JSContext, window: &Window) -> DomRoot<BarProp> {
         reflect_dom_object(
+            cx,
             Box::new(BarProp {
                 reflector_: Reflector::new(),
             }),
             window,
-            can_gc,
         )
     }
 }

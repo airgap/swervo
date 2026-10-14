@@ -295,10 +295,10 @@ pub(crate) fn add_noto_fallback_families(
     not(target_env = "ohos")
 ))]
 pub(crate) fn han_generic_font_family(
-    language: &icu_locid::LanguageIdentifier,
+    language: &icu_locale_core::LanguageIdentifier,
     generic: style::values::computed::font::GenericFontFamily,
 ) -> Option<&'static str> {
-    use icu_locid::subtags::{language, region, script};
+    use icu_locale_core::subtags::{language, region, script};
     use style::values::computed::font::GenericFontFamily;
 
     let serif = match generic {
@@ -337,7 +337,7 @@ pub(crate) fn han_generic_font_family(
     not(target_env = "ohos")
 )))]
 pub(crate) fn han_generic_font_family(
-    _: &icu_locid::LanguageIdentifier,
+    _: &icu_locale_core::LanguageIdentifier,
     _: style::values::computed::font::GenericFontFamily,
 ) -> Option<&'static str> {
     None

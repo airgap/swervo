@@ -54,6 +54,7 @@ use std::ops::{Range, RangeInclusive};
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
+use cookie::Cookie;
 use resvg::usvg::fontdb::Source;
 use resvg::usvg::{self, tiny_skia_path};
 use style::properties::ComputedValues;
@@ -667,9 +668,16 @@ impl<T: MallocSizeOf> MallocConditionalSizeOf for servo_arc::Arc<T> {
     }
 }
 
+/// Recover the allocation base: `Arc::as_ptr`/`Rc::as_ptr` point at the data
+/// after the two reference counts in the `#[repr(C)]` heap allocation.
+fn refcounted_allocation_base<T>(data: *const T) -> *const T {
+    let data_offset = std::mem::align_of::<T>().max(std::mem::size_of::<usize>() * 2);
+    data.wrapping_byte_sub(data_offset)
+}
+
 impl<T> MallocUnconditionalShallowSizeOf for Arc<T> {
     fn unconditional_shallow_size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
-        unsafe { ops.malloc_size_of(Arc::as_ptr(self)) }
+        unsafe { ops.malloc_size_of(refcounted_allocation_base(Arc::as_ptr(self))) }
     }
 }
 
@@ -701,7 +709,7 @@ impl<T: MallocSizeOf> MallocConditionalSizeOf for Arc<T> {
 
 impl<T> MallocUnconditionalShallowSizeOf for Rc<T> {
     fn unconditional_shallow_size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
-        unsafe { ops.malloc_size_of(Rc::as_ptr(self)) }
+        unsafe { ops.malloc_size_of(refcounted_allocation_base(Rc::as_ptr(self))) }
     }
 }
 
@@ -729,6 +737,20 @@ impl<T: MallocSizeOf> MallocSizeOf for std::sync::Weak<T> {
     }
 }
 
+impl MallocSizeOf for bytes::Bytes {
+    fn size_of(&self, _ops: &mut MallocSizeOfOps) -> usize {
+        // This is an underapproximation but because it is efficiently stored, we might not have the correct data.
+        if self.is_unique() { self.len() } else { 0 }
+    }
+}
+
+impl MallocSizeOf for bytes::BytesMut {
+    fn size_of(&self, _ops: &mut MallocSizeOfOps) -> usize {
+        // This is an underapproximation but because it is efficiently stored, we might not have the correct data.
+        self.len()
+    }
+}
+
 /// If a mutex is stored directly as a member of a data type that is being measured,
 /// it is the unique owner of its contents and deserves to be measured.
 ///
@@ -750,6 +772,18 @@ impl<T: MallocSizeOf> MallocSizeOf for std::sync::RwLock<T> {
 impl<T: MallocSizeOf> MallocSizeOf for parking_lot::Mutex<T> {
     fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
         (*self.lock()).size_of(ops)
+    }
+}
+
+impl<T: MallocSizeOf> MallocSizeOf for tokio::sync::Mutex<T> {
+    fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
+        self.blocking_lock().size_of(ops)
+    }
+}
+
+impl<T: MallocSizeOf> MallocSizeOf for tokio::sync::RwLock<T> {
+    fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
+        self.blocking_read().size_of(ops)
     }
 }
 
@@ -1071,6 +1105,22 @@ impl MallocSizeOf for usvg::ClipPath {
     }
 }
 
+impl<'a> MallocSizeOf for usvg::Options<'a> {
+    fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
+        self.font_family.size_of(ops) +
+            self.languages.size_of(ops) +
+            self.style_sheet.size_of(ops) +
+            self.fontdb.conditional_size_of(ops) +
+            self.resources_dir.size_of(ops)
+    }
+}
+
+impl MallocSizeOf for usvg::Font {
+    fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
+        self.families().size_of(ops) + self.variations().size_of(ops)
+    }
+}
+
 // Placeholder for unique case where internals of Sender cannot be measured.
 // malloc size of is 0 macro complains about type supplied!
 impl<T> MallocSizeOf for crossbeam_channel::Sender<T> {
@@ -1115,6 +1165,17 @@ impl MallocSizeOf for ipc_channel::ipc::IpcSharedMemory {
     }
 }
 
+impl MallocSizeOf for vello_cpu::Pixmap {
+    fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
+        let data = self.data();
+        if data.is_empty() {
+            0
+        } else {
+            unsafe { ops.malloc_size_of(data.as_ptr()) }
+        }
+    }
+}
+
 impl<T> MallocSizeOf for std::sync::mpsc::Sender<T> {
     fn size_of(&self, _ops: &mut MallocSizeOfOps) -> usize {
         0
@@ -1137,9 +1198,28 @@ impl MallocSizeOf for http::HeaderMap {
     }
 }
 
+impl<'a> MallocSizeOf for Cookie<'a> {
+    fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
+        // While the cookie storage can be more efficient by using the same striing it is unlikely that the values have this property.
+        // We take the string that is probably allocated in cookie an allocate it here to get the correct heap size.
+        self.value().to_owned().size_of(ops)
+    }
+}
+
 impl MallocSizeOf for data_url::mime::Mime {
     fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
         self.type_.size_of(ops) + self.parameters.size_of(ops) + self.subtype.size_of(ops)
+    }
+}
+
+impl<T> MallocSizeOf for hyper_serde::Serde<T>
+where
+    T: MallocSizeOf,
+    for<'a> hyper_serde::Ser<'a, T>: serde_core::Serialize,
+    for<'de> hyper_serde::De<T>: serde_core::Deserialize<'de>,
+{
+    fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
+        self.0.size_of(ops)
     }
 }
 
@@ -1158,9 +1238,10 @@ malloc_size_of_is_0!(content_security_policy::sandboxing_directive::SandboxingFl
 malloc_size_of_is_0!(encoding_rs::Decoder);
 malloc_size_of_is_0!(http::StatusCode);
 malloc_size_of_is_0!(http::Method);
-malloc_size_of_is_0!(icu_locid::subtags::Language);
+malloc_size_of_is_0!(icu_locale_core::subtags::Language);
 malloc_size_of_is_0!(keyboard_types::Code);
 malloc_size_of_is_0!(keyboard_types::Modifiers);
+malloc_size_of_is_0!(headers::ContentType); // ContentType stores a mime type which is most likely an interned string
 malloc_size_of_is_0!(mime::Mime);
 malloc_size_of_is_0!(resvg::usvg::fontdb::ID);
 malloc_size_of_is_0!(resvg::usvg::fontdb::Style);
@@ -1188,11 +1269,33 @@ malloc_size_of_is_0!(style::queries::values::PrefersColorScheme);
 malloc_size_of_is_0!(style::stylesheets::Stylesheet);
 malloc_size_of_is_0!(style::stylesheets::FontFaceRule);
 malloc_size_of_is_0!(style::values::specified::source_size_list::SourceSizeList);
-malloc_size_of_is_0!(taffy::Layout);
 malloc_size_of_is_0!(time::Duration);
 malloc_size_of_is_0!(unicode_bidi::Level);
 malloc_size_of_is_0!(unicode_script::Script);
 malloc_size_of_is_0!(std::net::TcpStream);
+malloc_size_of_is_0!(memmap2::Mmap);
+
+malloc_size_of_is_0!(taffy::Layout);
+malloc_size_of_is_0!(taffy::Baselines);
+malloc_size_of_is_0!(taffy::DetailedGridItemsInfo);
+impl<T> MallocSizeOf for taffy::Line<T>
+where
+    T: MallocSizeOf,
+{
+    fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
+        self.start.size_of(ops) + self.end.size_of(ops)
+    }
+}
+impl<T> MallocSizeOf for taffy::DetailedGridInfo<T>
+where
+    T: MallocSizeOf + taffy::CheapCloneStr,
+{
+    fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
+        self.items.size_of(ops) +
+            self.rows.positions.size_of(ops) +
+            self.columns.positions.size_of(ops)
+    }
+}
 
 impl MallocSizeOf for urlpattern::UrlPattern {
     fn size_of(&self, _ops: &mut MallocSizeOfOps) -> usize {
@@ -1246,6 +1349,7 @@ malloc_size_of_is_webrender_malloc_size_of!(webrender_api::ExternalScrollId);
 malloc_size_of_is_webrender_malloc_size_of!(webrender_api::FontInstanceFlags);
 malloc_size_of_is_webrender_malloc_size_of!(webrender_api::FontInstanceOptions);
 malloc_size_of_is_webrender_malloc_size_of!(webrender_api::FontInstanceKey);
+malloc_size_of_is_webrender_malloc_size_of!(webrender_api::FontInstancePlatformOptions);
 malloc_size_of_is_webrender_malloc_size_of!(webrender_api::FontKey);
 malloc_size_of_is_webrender_malloc_size_of!(webrender_api::FontVariation);
 malloc_size_of_is_webrender_malloc_size_of!(webrender_api::GlyphInstance);
@@ -1321,6 +1425,19 @@ impl<T: stylo_malloc_size_of::MallocSizeOf, const FRACTION_BITS: u16> MallocSize
     }
 }
 
+impl<Integer, Number, LinearStops> MallocSizeOf
+    for style::values::generics::easing::TimingFunction<Integer, Number, LinearStops>
+where
+    Integer: stylo_malloc_size_of::MallocSizeOf,
+    Number: stylo_malloc_size_of::MallocSizeOf,
+    LinearStops: stylo_malloc_size_of::MallocSizeOf,
+{
+    fn size_of(&self, ops: &mut MallocSizeOfOps) -> usize {
+        <Self as stylo_malloc_size_of::MallocSizeOf>::size_of(self, ops)
+    }
+}
+
+malloc_size_of_is_stylo_malloc_size_of!(style::properties::PropertyId);
 malloc_size_of_is_stylo_malloc_size_of!(style::animation::DocumentAnimationSet);
 malloc_size_of_is_stylo_malloc_size_of!(style::attr::AttrIdentifier);
 malloc_size_of_is_stylo_malloc_size_of!(style::attr::AttrValue);
@@ -1328,11 +1445,12 @@ malloc_size_of_is_stylo_malloc_size_of!(style::color::AbsoluteColor);
 malloc_size_of_is_stylo_malloc_size_of!(style::computed_values::font_variant_caps::T);
 malloc_size_of_is_stylo_malloc_size_of!(style::computed_values::font_variant_position::T);
 malloc_size_of_is_stylo_malloc_size_of!(style::computed_values::text_decoration_style::T);
+malloc_size_of_is_stylo_malloc_size_of!(style::computed_values::text_decoration_thickness::T);
 malloc_size_of_is_stylo_malloc_size_of!(style::computed_values::text_rendering::T);
 malloc_size_of_is_stylo_malloc_size_of!(style::dom::OpaqueNode);
-malloc_size_of_is_stylo_malloc_size_of!(style::font_face::ComputedFontStretchRange);
-malloc_size_of_is_stylo_malloc_size_of!(style::font_face::ComputedFontStyleDescriptor);
+malloc_size_of_is_stylo_malloc_size_of!(style::font_face::ComputedFontStyleRange);
 malloc_size_of_is_stylo_malloc_size_of!(style::font_face::ComputedFontWeightRange);
+malloc_size_of_is_stylo_malloc_size_of!(style::font_face::ComputedFontWidthRange);
 malloc_size_of_is_stylo_malloc_size_of!(style::font_face::Source);
 malloc_size_of_is_stylo_malloc_size_of!(style::invalidation::element::restyle_hints::RestyleHint);
 malloc_size_of_is_stylo_malloc_size_of!(style::logical_geometry::WritingMode);
@@ -1351,13 +1469,15 @@ malloc_size_of_is_stylo_malloc_size_of!(style::selector_parser::RestyleDamage);
 malloc_size_of_is_stylo_malloc_size_of!(style::selector_parser::Snapshot);
 malloc_size_of_is_stylo_malloc_size_of!(style::shared_lock::SharedRwLock);
 malloc_size_of_is_stylo_malloc_size_of!(style::stylesheets::DocumentStyleSheet);
+malloc_size_of_is_stylo_malloc_size_of!(style::stylesheets::Origin);
 malloc_size_of_is_stylo_malloc_size_of!(style::stylist::Stylist);
 malloc_size_of_is_stylo_malloc_size_of!(style::values::computed::BorderStyle);
 malloc_size_of_is_stylo_malloc_size_of!(style::values::computed::ContentDistribution);
 malloc_size_of_is_stylo_malloc_size_of!(style::values::computed::FontFeatureSettings);
-malloc_size_of_is_stylo_malloc_size_of!(style::values::computed::FontStretch);
 malloc_size_of_is_stylo_malloc_size_of!(style::values::computed::FontStyle);
 malloc_size_of_is_stylo_malloc_size_of!(style::values::computed::FontWeight);
+malloc_size_of_is_stylo_malloc_size_of!(style::values::computed::FontWidth);
+malloc_size_of_is_stylo_malloc_size_of!(style::values::computed::FontVariantAlternates);
 malloc_size_of_is_stylo_malloc_size_of!(style::values::computed::FontVariantLigatures);
 malloc_size_of_is_stylo_malloc_size_of!(style::values::computed::FontVariantNumeric);
 malloc_size_of_is_stylo_malloc_size_of!(style::values::computed::FontVariantEastAsian);
@@ -1370,6 +1490,12 @@ malloc_size_of_is_stylo_malloc_size_of!(style::values::specified::TextDecoration
 malloc_size_of_is_stylo_malloc_size_of!(stylo_dom::ElementState);
 malloc_size_of_is_stylo_malloc_size_of!(style::computed_values::font_optical_sizing::T);
 malloc_size_of_is_stylo_malloc_size_of!(style::computed_values::font_kerning::T);
+malloc_size_of_is_stylo_malloc_size_of!(style::stylesheets::font_feature_values_rule::SingleValue);
+malloc_size_of_is_stylo_malloc_size_of!(style::stylesheets::font_feature_values_rule::PairValues);
+malloc_size_of_is_stylo_malloc_size_of!(style::stylesheets::font_feature_values_rule::VectorValues);
+malloc_size_of_is_stylo_malloc_size_of!(
+    style::stylesheets::font_feature_values_rule::FontFeatureValuesRule
+);
 
 impl<T> MallocSizeOf for GenericLengthPercentageOrAuto<T>
 where
