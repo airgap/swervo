@@ -3,7 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // https://w3c.github.io/ServiceWorker/#cachestorage
-[Pref="dom_serviceworker_enabled", SecureContext, Exposed=(Window,Worker)]
+[Pref="dom_cache_api_enabled", SecureContext, Exposed=(Window,Worker)]
 interface CacheStorage {
   [NewObject] Promise<(Response or undefined)> match(RequestInfo request, optional MultiCacheQueryOptions options = {});
   [NewObject] Promise<boolean> has(DOMString cacheName);

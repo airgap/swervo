@@ -148,6 +148,8 @@ pub struct Preferences {
     /// See <https://github.com/servo/servo/pull/45301> for measurements.
     pub dom_canvas_msg_buffer_size: u64,
     pub dom_composition_event_enabled: bool,
+    // Exposes the Cache API: `Cache`, `CacheStorage` and `caches`.
+    pub dom_cache_api_enabled: bool,
     // feature: CookieStore | #37674 | Web/API/CookieStore
     pub dom_cookiestore_enabled: bool,
     // feature: Credential Management API | #38788 | Web/API/Credential_Management_API
@@ -445,6 +447,7 @@ impl Preferences {
             dom_canvas_backend: String::new(),
             dom_canvas_msg_buffer_size: 16,
             dom_composition_event_enabled: false,
+            dom_cache_api_enabled: false,
             dom_cookiestore_enabled: false,
             dom_credential_management_enabled: false,
             dom_crypto_subtle_enabled: true,
