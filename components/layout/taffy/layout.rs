@@ -161,6 +161,7 @@ impl taffy::LayoutPartialTree for TaffyContainerContext<'_> {
                         block: inputs.parent_size.height.map(Au::from_f32_px),
                     },
                     style: containing_block.style,
+                    replaced_percentage_block_size: None,
                 };
 
                 // Adjust known_dimensions from border box to content box
@@ -210,8 +211,8 @@ impl taffy::LayoutPartialTree for TaffyContainerContext<'_> {
                 });
 
                 // Return early if only inline content sizes are requested
-                if inputs.run_mode == RunMode::ComputeSize &&
-                    inputs.axis == RequestedAxis::Horizontal
+                if inputs.run_mode == RunMode::ComputeSize
+                    && inputs.axis == RequestedAxis::Horizontal
                 {
                     return taffy::LayoutOutput::from_outer_size(taffy::Size {
                         width: inline_size + pb_sum.inline,
@@ -524,24 +525,24 @@ impl TaffyContainer {
                     taffy::Point {
                         x: Au::from_f32_px(
                             layout.location.x + layout.padding.left + layout.border.left,
-                        ) - pbm.padding.inline_start -
-                            pbm.border.inline_start,
+                        ) - pbm.padding.inline_start
+                            - pbm.border.inline_start,
                         y: Au::from_f32_px(
                             layout.location.y + layout.padding.top + layout.border.top,
-                        ) - pbm.padding.block_start -
-                            pbm.border.block_start,
+                        ) - pbm.padding.block_start
+                            - pbm.border.block_start,
                     },
                     taffy::Size {
-                        width: layout.size.width -
-                            layout.padding.left -
-                            layout.padding.right -
-                            layout.border.left -
-                            layout.border.right,
-                        height: layout.size.height -
-                            layout.padding.top -
-                            layout.padding.bottom -
-                            layout.border.top -
-                            layout.border.bottom,
+                        width: layout.size.width
+                            - layout.padding.left
+                            - layout.padding.right
+                            - layout.border.left
+                            - layout.border.right,
+                        height: layout.size.height
+                            - layout.padding.top
+                            - layout.padding.bottom
+                            - layout.border.top
+                            - layout.border.bottom,
                     }
                     .map(Au::from_f32_px),
                 );

@@ -245,9 +245,9 @@ impl TextRunSegment {
             return false;
         }
 
-        !script_is_specific(self.info.script) ||
-            !script_is_specific(new_script) ||
-            self.info.script == new_script
+        !script_is_specific(self.info.script)
+            || !script_is_specific(new_script)
+            || self.info.script == new_script
     }
 
     /// Update this segment to end at the given byte and character index. The update will only ever
@@ -282,8 +282,8 @@ impl TextRunSegment {
         let overflow_wrap_breaks_words = {
             let style = text_run.inline_styles().style.borrow();
             let text_style = style.get_inherited_text();
-            text_style.word_break != WordBreak::BreakAll &&
-                matches!(
+            text_style.word_break != WordBreak::BreakAll
+                && matches!(
                     text_style.overflow_wrap,
                     OverflowWrap::Anywhere | OverflowWrap::BreakWord
                 )
@@ -301,9 +301,9 @@ impl TextRunSegment {
             // `overflow-wrap` only breaks inside a word that does not fit on a line of its own,
             // so the word is split into clusters only when it would overflow.
             let run_start = text_run.run_data.character_range_in_ifc_text.start;
-            if overflow_wrap_breaks_words &&
-                !run.all_white_space() &&
-                ifc.unbreakable_segment_would_overflow(run.total_advance())
+            if overflow_wrap_breaks_words
+                && !run.all_white_space()
+                && ifc.unbreakable_segment_would_overflow(run.total_advance())
             {
                 let mut cluster_character_start = character_range_start;
                 for cluster in run.split_into_clusters() {
@@ -332,9 +332,9 @@ impl TextRunSegment {
 
     pub(crate) fn is_compatible_with_old_shaping_result(&self, old_segment: &Self) -> bool {
         // Which punctuation is trimmed also depends on the text around the segment.
-        old_segment.info == self.info &&
-            self.byte_range == old_segment.byte_range &&
-            self.trimmed_punctuation == old_segment.trimmed_punctuation
+        old_segment.info == self.info
+            && self.byte_range == old_segment.byte_range
+            && self.trimmed_punctuation == old_segment.trimmed_punctuation
     }
 }
 
@@ -608,8 +608,8 @@ impl TextRun {
         let mut next_byte_index = self.text_range.start;
         for (relative_character_index, (character, next_character)) in char_iterator.enumerate() {
             // The current character index within the entire inline formatting context's text.
-            let current_character_index = self.run_data.character_range_in_ifc_text.start +
-                Utf32CodeUnits(relative_character_index as u32);
+            let current_character_index = self.run_data.character_range_in_ifc_text.start
+                + Utf32CodeUnits(relative_character_index as u32);
 
             let current_byte_index = next_byte_index;
             next_byte_index += Utf8CodeUnits::length_of_char(character);
@@ -634,9 +634,9 @@ impl TextRun {
 
                 // There is a soft wrap opportunity between a preceding space and a tab
                 // under `break-spaces`.
-                let break_at_start = *parent_style.get_white_space_collapse() ==
-                    WhiteSpaceCollapse::BreakSpaces &&
-                    formatting_context_text[0..current_byte_index.0 as usize]
+                let break_at_start = *parent_style.get_white_space_collapse()
+                    == WhiteSpaceCollapse::BreakSpaces
+                    && formatting_context_text[0..current_byte_index.0 as usize]
                         .chars()
                         .next_back()
                         .is_some_and(breaks_for_break_spaces);
@@ -668,8 +668,8 @@ impl TextRun {
             };
 
             // If the existing segment is compatible with the character, just merge the character into it.
-            if let Some(current) = current.as_mut() &&
-                current.is_compatible(&font, script, bidi_level)
+            if let Some(current) = current.as_mut()
+                && current.is_compatible(&font, script, bidi_level)
             {
                 current.update(
                     next_byte_index,
@@ -792,8 +792,8 @@ impl TextRun {
             (SegmentContentFlags::Contentful, advance)
         } else {
             (
-                SegmentContentFlags::Contentful |
-                    SegmentContentFlags::IncorporateTrailingWhiteSpace,
+                SegmentContentFlags::Contentful
+                    | SegmentContentFlags::IncorporateTrailingWhiteSpace,
                 Au::zero(),
             )
         };
@@ -815,8 +815,8 @@ impl TextRun {
         if *ifc_layout
             .current_inline_container_state()
             .style
-            .get_white_space_collapse() ==
-            WhiteSpaceCollapse::BreakSpaces
+            .get_white_space_collapse()
+            == WhiteSpaceCollapse::BreakSpaces
         {
             ifc_layout.process_soft_wrap_opportunity();
         }
@@ -830,13 +830,13 @@ impl TextRun {
 fn is_cursive_script(script: Script) -> bool {
     matches!(
         script,
-        Script::Arabic |
-            Script::Hanifi_Rohingya |
-            Script::Mandaic |
-            Script::Mongolian |
-            Script::Nko |
-            Script::Phags_Pa |
-            Script::Syriac
+        Script::Arabic
+            | Script::Hanifi_Rohingya
+            | Script::Mandaic
+            | Script::Mongolian
+            | Script::Nko
+            | Script::Phags_Pa
+            | Script::Syriac
     )
 }
 
@@ -856,11 +856,11 @@ fn character_cannot_change_font(character: char) -> bool {
 
     matches!(
         LineBreak::for_char(character),
-        LineBreak::CombiningMark |
-            LineBreak::Glue |
-            LineBreak::ZWSpace |
-            LineBreak::WordJoiner |
-            LineBreak::ZWJ
+        LineBreak::CombiningMark
+            | LineBreak::Glue
+            | LineBreak::ZWSpace
+            | LineBreak::WordJoiner
+            | LineBreak::ZWJ
     )
 }
 

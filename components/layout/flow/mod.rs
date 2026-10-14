@@ -225,8 +225,8 @@ impl BlockLevelBox {
             BlockLevelBox::SameFormattingContextBlock(same_formatting_context_block) => {
                 same_formatting_context_block.layout_style()
             },
-            BlockLevelBox::OutOfFlowAbsolutelyPositionedBox(_) |
-            BlockLevelBox::OutOfFlowFloatBox(_) => return true,
+            BlockLevelBox::OutOfFlowAbsolutelyPositionedBox(_)
+            | BlockLevelBox::OutOfFlowFloatBox(_) => return true,
             BlockLevelBox::OutsideMarker(_) => return false,
             BlockLevelBox::Independent(context) => {
                 // FIXME: If the element doesn't fit next to floats, it will get clearance.
@@ -307,8 +307,8 @@ impl BlockLevelBox {
             return false;
         }
 
-        if !tentative_block_size.definite_or_min().is_zero() ||
-            !pbm.padding_border_sums.block.is_zero()
+        if !tentative_block_size.definite_or_min().is_zero()
+            || !pbm.padding_border_sums.block.is_zero()
         {
             return false;
         }
@@ -399,13 +399,13 @@ impl OutsideMarker {
                     .first(font_context)
             })
             .map_or(max_inline_size, |font| {
-                SymbolMarker::inline_offset(font.metrics.ascent)
+                SymbolMarker::inline_offset(font.metrics().ascent)
             });
         let content_rect = LogicalRect {
             start_corner: LogicalVec2 {
-                inline: -marker_inline_offset -
-                    (pbm_of_list_item.border.inline_start +
-                        pbm_of_list_item.padding.inline_start),
+                inline: -marker_inline_offset
+                    - (pbm_of_list_item.border.inline_start
+                        + pbm_of_list_item.padding.inline_start),
                 block: Zero::zero(),
             },
             size: LogicalVec2 {
@@ -489,15 +489,16 @@ impl BlockFormattingContext {
             sequential_layout_state.calculate_clearance(Clear::Both, &CollapsedMargin::zero())
         });
 
-        let content_block_size = flow_layout.content_block_size +
-            flow_layout.collapsible_margins_in_children.end.solve() +
-            clearance.unwrap_or_default();
+        let content_block_size = flow_layout.content_block_size
+            + flow_layout.collapsible_margins_in_children.end.solve()
+            + clearance.unwrap_or_default();
 
         // Buttons center their contents in the block axis. Therefore, create an `AnonymousFragment`
         // that contains the fragments of the contents, and place it as desired.
         // TODO: Use `align-content` instead, see https://github.com/w3c/csswg-drafts/issues/14190
-        if let Some(base) = base &&
-            base.base_fragment_info
+        if let Some(base) = base
+            && base
+                .base_fragment_info
                 .flags
                 .contains(FragmentFlags::IS_BUTTON)
         {
@@ -573,8 +574,8 @@ fn compute_inline_content_sizes_for_block_level_boxes(
 ) -> InlineContentSizesResult {
     let get_box_info = |box_: &ArcRefCell<BlockLevelBox>| {
         match &*box_.borrow() {
-            BlockLevelBox::OutOfFlowAbsolutelyPositionedBox(_) |
-            BlockLevelBox::OutsideMarker { .. } => None,
+            BlockLevelBox::OutOfFlowAbsolutelyPositionedBox(_)
+            | BlockLevelBox::OutsideMarker { .. } => None,
             BlockLevelBox::OutOfFlowFloatBox(float_box) => {
                 let inline_content_sizes_result = float_box.contents.outer_inline_content_sizes(
                     layout_context,
@@ -1149,9 +1150,9 @@ impl IndependentFormattingContext {
         let content_rect = LogicalRect {
             start_corner: LogicalVec2 {
                 block: pbm.padding.block_start + pbm.border.block_start,
-                inline: pbm.padding.inline_start +
-                    pbm.border.inline_start +
-                    effective_margin_inline_start,
+                inline: pbm.padding.inline_start
+                    + pbm.border.inline_start
+                    + effective_margin_inline_start,
             },
             size: LogicalVec2 {
                 block: block_size,
@@ -1498,8 +1499,8 @@ impl IndependentFormattingContext {
         // prevent margin collapse.
         let has_clearance = clear_position.is_some() || placement_rect.start_corner.block > ceiling;
         let clearance = has_clearance.then(|| {
-            placement_rect.start_corner.block -
-                sequential_layout_state
+            placement_rect.start_corner.block
+                - sequential_layout_state
                     .position_with_zero_clearance(&collapsed_margin_block_start)
         });
 
@@ -1536,12 +1537,12 @@ impl IndependentFormattingContext {
 
         let content_rect = LogicalRect {
             start_corner: LogicalVec2 {
-                block: pbm.padding.block_start +
-                    pbm.border.block_start +
-                    clearance.unwrap_or_else(Au::zero),
-                inline: pbm.padding.inline_start +
-                    pbm.border.inline_start +
-                    effective_margin_inline_start,
+                block: pbm.padding.block_start
+                    + pbm.border.block_start
+                    + clearance.unwrap_or_else(Au::zero),
+                inline: pbm.padding.inline_start
+                    + pbm.border.inline_start
+                    + effective_margin_inline_start,
             },
             size: content_size,
         };
@@ -1851,11 +1852,11 @@ fn automatic_inline_size<T>(
                 // A block-level `<button>` shrinks to fit like a widget
                 // (<https://html.spec.whatwg.org/multipage/#button-layout>).
                 .intersects(
-                    FragmentFlags::IS_REPLACED |
-                        FragmentFlags::IS_WIDGET |
-                        FragmentFlags::IS_BUTTON,
-                ) ||
-                context.is_table()
+                    FragmentFlags::IS_REPLACED
+                        | FragmentFlags::IS_WIDGET
+                        | FragmentFlags::IS_BUTTON,
+                )
+                || context.is_table()
         })
     };
     match justify_self {
@@ -2179,8 +2180,8 @@ impl<'container> PlacementState<'container> {
                 // the static position rectangle does not matter.
                 fragment.borrow_mut().original_static_position_rect = LogicalRect {
                     start_corner: LogicalVec2 {
-                        block: (self.current_margin.solve() +
-                            self.current_block_direction_position),
+                        block: (self.current_margin.solve()
+                            + self.current_block_direction_position),
                         inline: Au::zero(),
                     },
                     size: LogicalVec2::zero(),

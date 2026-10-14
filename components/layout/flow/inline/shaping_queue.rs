@@ -118,8 +118,8 @@ impl BatchSlicer<'_> {
 
         let mut last_slice_end = segment.byte_range.start;
         for break_index in linebreak_iter {
-            if *break_index == segment.byte_range.start &&
-                !line_break_ignored_for_keep_all(self.text, text_style, *break_index)
+            if *break_index == segment.byte_range.start
+                && !line_break_ignored_for_keep_all(self.text, text_style, *break_index)
             {
                 break_at_start = true;
                 continue;
@@ -130,8 +130,8 @@ impl BatchSlicer<'_> {
             // `keep-all` might suppress line breaks between certain characters and that check
             // is done here, but not in the case that the line break is the last one for this
             // segment (in order to push the rest of the text).
-            if *break_index != segment.byte_range.end &&
-                line_break_ignored_for_keep_all(self.text, text_style, *break_index)
+            if *break_index != segment.byte_range.end
+                && line_break_ignored_for_keep_all(self.text, text_style, *break_index)
             {
                 continue;
             }
@@ -151,8 +151,8 @@ impl BatchSlicer<'_> {
             }
         }
 
-        if text_style.white_space_collapse == WhiteSpaceCollapse::BreakSpaces &&
-            self.text[Utf8CodeUnits::to_usize_range(&segment.byte_range)]
+        if text_style.white_space_collapse == WhiteSpaceCollapse::BreakSpaces
+            && self.text[Utf8CodeUnits::to_usize_range(&segment.byte_range)]
                 .chars()
                 .last()
                 .is_some_and(breaks_for_break_spaces)
@@ -258,8 +258,8 @@ fn trailing_white_space_of(
 ) -> (TrailingWhiteSpace<Utf32CodeUnits>, bool) {
     let (anything_hangable, anything_removable) =
         match (style.get_white_space_collapse(), style.get_text_wrap_mode()) {
-            (WhiteSpaceCollapse::BreakSpaces, _) |
-            (WhiteSpaceCollapse::Preserve, TextWrapMode::Nowrap) => (false, false),
+            (WhiteSpaceCollapse::BreakSpaces, _)
+            | (WhiteSpaceCollapse::Preserve, TextWrapMode::Nowrap) => (false, false),
             (WhiteSpaceCollapse::Preserve, TextWrapMode::Wrap) => (true, false),
             _ => (true, true),
         };
@@ -385,8 +385,8 @@ impl<'a> ShapingQueue<'a> {
             .get_inherited_text()
             .text_spacing_trim;
         if text_spacing_trim == TextSpacingTrim::Normal {
-            options.trimmed_punctuation =
-                font.trimmed_punctuation(self.text, Utf8CodeUnits::to_usize_range(&self.byte_range));
+            options.trimmed_punctuation = font
+                .trimmed_punctuation(self.text, Utf8CodeUnits::to_usize_range(&self.byte_range));
         }
         let trimmed_punctuation = options.trimmed_punctuation.clone();
         Some((
@@ -438,23 +438,24 @@ impl<'a> ShapingQueue<'a> {
 
         // The new text is only compatible with the current batch if their character and
         // text byte boundaries are contiguous.
-        if last.character_range.end != text.character_range.start ||
-            last.byte_range.end != text.byte_range.start
+        if last.character_range.end != text.character_range.start
+            || last.byte_range.end != text.byte_range.start
         {
             return false;
         }
 
         // The `FontInfo`s of the batch and the new text need to match exactly to shape
         // together.
-        if !Arc::ptr_eq(&last.info.font_info, &text.info.font_info) &&
-            *last.info.font_info != *text.info.font_info
+        if !Arc::ptr_eq(&last.info.font_info, &text.info.font_info)
+            && *last.info.font_info != *text.info.font_info
         {
             return false;
         }
 
         // Any resolved `Script` has to be compatible with any new specific `Script`.
-        !script_is_specific(text.info.script) ||
-            self.resolved_script
+        !script_is_specific(text.info.script)
+            || self
+                .resolved_script
                 .is_none_or(|resolved_script| resolved_script == text.info.script)
     }
 
@@ -515,8 +516,8 @@ impl From<char> for CssTextType {
             // > are collectively referred to as other space separators.
             //
             // Note: ' ' (space) is handled above.
-            _ if GeneralCategory::for_char(character) == GeneralCategory::SpaceSeparator &&
-                character != '\u{00a0}' =>
+            _ if GeneralCategory::for_char(character) == GeneralCategory::SpaceSeparator
+                && character != '\u{00a0}' =>
             {
                 Self::OtherSpaceSeparator
             },
