@@ -15,17 +15,17 @@ use js::jsapi::{
     CallArgs, CheckedUnwrapStatic, Compartment, CompartmentSpecifier, GetNonCCWObjectGlobal,
     GetRealmGlobalOrNull, HandleObject as RawHandleObject, IsSharableCompartment,
     IsSystemCompartment, JS_GetFunctionObject, JS_NewObject, JS_NewStringCopyN, JS_SetReservedSlot,
-    JSClass, JSClassOps, JSContext, JSFUN_CONSTRUCTOR, JSFunctionSpec, JSObject, JSPROP_ENUMERATE,
-    JSPROP_PERMANENT, JSPROP_READONLY, JSPROP_RESOLVING, JSPropertySpec, JSString, JSTracer,
-    ObjectOps, OnNewGlobalHookOption, SymbolCode, TrueHandleValue, Value, jsid,
+    JSClass, JSClassOps, JSContext, JSFUN_CONSTRUCTOR, JSFunctionSpec, JSObject, JSPROP_PERMANENT,
+    JSPROP_READONLY, JSPROP_RESOLVING, JSPropertySpec, JSString, JSTracer, ObjectOps,
+    OnNewGlobalHookOption, SymbolCode, TrueHandleValue, Value, jsid,
 };
 use js::jsval::{JSVal, NullValue, PrivateValue};
 use js::realm::AutoRealm;
 use js::rust::wrappers2::{
-    GetWellKnownSymbol, JS_AtomizeAndPinString, JS_DefineProperty, JS_DefineProperty3,
-    JS_DefineProperty4, JS_DefineProperty5, JS_DefinePropertyById5, JS_FireOnNewGlobalObject,
-    JS_IterateCompartments, JS_LinkConstructorAndPrototype, JS_NewFunction, JS_NewGlobalObject,
-    JS_NewObjectWithGivenProto, JS_SetTrustedPrincipals, RUST_SYMBOL_TO_JSID,
+    GetWellKnownSymbol, JS_AtomizeAndPinString, JS_DefineProperty3, JS_DefineProperty4,
+    JS_DefineProperty5, JS_DefinePropertyById5, JS_FireOnNewGlobalObject, JS_IterateCompartments,
+    JS_LinkConstructorAndPrototype, JS_NewFunction, JS_NewGlobalObject, JS_NewObjectWithGivenProto,
+    JS_SetTrustedPrincipals, RUST_SYMBOL_TO_JSID,
 };
 use js::rust::{
     HandleObject, HandleValue, MutableHandleObject, RealmOptions, define_methods,
@@ -39,6 +39,7 @@ use crate::codegen::PrototypeList;
 use crate::constant::{ConstantSpec, define_constants};
 use crate::conversions::{DOM_OBJECT_SLOT, get_dom_class};
 use crate::guard::Guard;
+use crate::js::{JS_DefineProperty, PropertyFlags};
 use crate::principals::ServoJSPrincipals;
 use crate::utils::{
     DOM_PROTOTYPE_SLOT, DOMJSClass, JSCLASS_DOM_GLOBAL, ProtoOrIfaceArray, get_proto_or_iface_array,
@@ -165,31 +166,33 @@ pub(crate) unsafe fn create_global_object<D: DomTypes>(
         // in select_compartment() below [1], preventing compartment reuse in either direction between this global
         // and any globals created with `use_system_compartment` set to false.
         // [1] IsSystemCompartment() → Realm::isSystem() → Realm::isSystem_ → principals == trustedPrincipals()
-        JS_SetTrustedPrincipals(cx, principal.as_raw());
+        unsafe { JS_SetTrustedPrincipals(cx, principal.as_raw()) };
     }
 
-    rval.set(JS_NewGlobalObject(
-        cx,
-        class,
-        principal.as_raw(),
-        OnNewGlobalHookOption::DontFireOnNewGlobalHook,
-        &*options,
-    ));
+    rval.set(unsafe {
+        JS_NewGlobalObject(
+            cx,
+            class,
+            principal.as_raw(),
+            OnNewGlobalHookOption::DontFireOnNewGlobalHook,
+            &*options,
+        )
+    });
     assert!(!rval.is_null());
 
     // Initialize the reserved slots before doing anything that can GC, to
     // avoid getting trace hooks called on a partially initialized object.
     let private_val = PrivateValue(private);
-    JS_SetReservedSlot(rval.get(), DOM_OBJECT_SLOT, &private_val);
+    unsafe { JS_SetReservedSlot(rval.get(), DOM_OBJECT_SLOT, &private_val) };
     let proto_array: Box<ProtoOrIfaceArray> =
         Box::new([ptr::null_mut::<JSObject>(); PrototypeList::PROTO_OR_IFACE_LENGTH]);
     let val = PrivateValue(Box::into_raw(proto_array) as *const libc::c_void);
-    JS_SetReservedSlot(rval.get(), DOM_PROTOTYPE_SLOT, &val);
+    unsafe { JS_SetReservedSlot(rval.get(), DOM_PROTOTYPE_SLOT, &val) };
 
     let mut cx = AutoRealm::new_from_handle(cx, rval.handle());
     let cx = &mut cx;
 
-    JS_FireOnNewGlobalObject(cx, rval.handle());
+    unsafe { JS_FireOnNewGlobalObject(cx, rval.handle()) };
 }
 
 /// Choose the compartment to create a new global object in.
@@ -202,13 +205,16 @@ fn select_compartment(cx: &mut js::context::JSContext, options: &mut RealmOption
     ) -> CompartmentIterResult {
         let data = data as *mut Data;
 
-        if !IsSharableCompartment(compartment) || IsSystemCompartment(compartment) {
-            return CompartmentIterResult::KeepGoing;
+        unsafe {
+            if !IsSharableCompartment(compartment) || IsSystemCompartment(compartment) {
+                return CompartmentIterResult::KeepGoing;
+            }
+
+            // Choose any sharable, non-system compartment in this context to allow
+            // same-agent documents to share JS and DOM objects.
+            *data = compartment;
         }
 
-        // Choose any sharable, non-system compartment in this context to allow
-        // same-agent documents to share JS and DOM objects.
-        *data = compartment;
         CompartmentIterResult::Stop
     }
 
@@ -410,7 +416,7 @@ pub(crate) fn define_guarded_methods<D: DomTypes>(
     for guard in methods {
         if let Some(specs) = guard.expose::<D>(cx, obj, global) {
             unsafe {
-                define_methods(cx.raw_cx(), obj, specs).unwrap();
+                define_methods(cx, obj, specs).unwrap();
             }
         }
     }
@@ -426,7 +432,7 @@ pub(crate) fn define_guarded_properties<D: DomTypes>(
     for guard in properties {
         if let Some(specs) = guard.expose::<D>(cx, obj, global) {
             unsafe {
-                define_properties(cx.raw_cx(), obj, specs).unwrap();
+                define_properties(cx, obj, specs).unwrap();
             }
         }
     }
@@ -478,13 +484,15 @@ unsafe extern "C" fn fun_to_string_hook(
     obj: RawHandleObject,
     _is_to_source: bool,
 ) -> *mut JSString {
-    let js_class = get_object_class(obj.get());
-    assert!(!js_class.is_null());
-    let repr = (*(js_class as *const NonCallbackInterfaceObjectClass)).representation;
-    assert!(!repr.is_empty());
-    let ret = JS_NewStringCopyN(cx, repr.as_ptr() as *const libc::c_char, repr.len());
-    assert!(!ret.is_null());
-    ret
+    unsafe {
+        let js_class = get_object_class(obj.get());
+        assert!(!js_class.is_null());
+        let repr = (*(js_class as *const NonCallbackInterfaceObjectClass)).representation;
+        assert!(!repr.is_empty());
+        let ret = JS_NewStringCopyN(cx, repr.as_ptr() as *const libc::c_char, repr.len());
+        assert!(!ret.is_null());
+        ret
+    }
 }
 
 fn create_unscopable_object(
@@ -505,9 +513,9 @@ fn create_unscopable_object(
             assert!(JS_DefineProperty(
                 cx,
                 rval.handle(),
-                name.as_ptr(),
+                name,
                 HandleValue::from_raw(TrueHandleValue),
-                JSPROP_ENUMERATE as u32,
+                PropertyFlags::ENUMERABLE | PropertyFlags::WRITABLE | PropertyFlags::CONFIGURABLE,
             ));
         }
     }
@@ -544,7 +552,9 @@ unsafe extern "C" fn invalid_constructor(
     _argc: libc::c_uint,
     _vp: *mut JSVal,
 ) -> bool {
-    throw_type_error(cx, c"Illegal constructor.");
+    // SAFETY: it is safe to construct a JSContext from engine hook.
+    let mut cx = unsafe { js::context::JSContext::from_ptr(NonNull::new(cx).unwrap()) };
+    throw_type_error(&mut cx, c"Illegal constructor.");
     false
 }
 
@@ -553,7 +563,9 @@ unsafe extern "C" fn non_new_constructor(
     _argc: libc::c_uint,
     _vp: *mut JSVal,
 ) -> bool {
-    throw_type_error(cx, c"This constructor needs to be called with `new`.");
+    // SAFETY: it is safe to construct a JSContext from engine hook.
+    let mut cx = unsafe { js::context::JSContext::from_ptr(NonNull::new(cx).unwrap()) };
+    throw_type_error(&mut cx, c"This constructor needs to be called with `new`.");
     false
 }
 
@@ -719,7 +731,7 @@ pub fn get_desired_proto(
             }
         }
 
-        maybe_wrap_object(cx.raw_cx(), desired_proto);
+        maybe_wrap_object(cx, desired_proto);
         Ok(())
     }
 }

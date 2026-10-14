@@ -14,7 +14,6 @@
 #![expect(unsafe_code)]
 
 use std::cell::RefCell;
-use std::marker::PhantomData;
 
 use html5ever::{LocalName, Namespace, local_name, ns};
 use js::context::NoGC;
@@ -35,7 +34,7 @@ use stylo_dom::ElementState;
 
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::root::{DomRoot, LayoutDom, LayoutFromRaw};
+use crate::dom::bindings::root::{Dom, DomRoot, ToLayout};
 use crate::dom::element::Element;
 use crate::dom::node::{ChildrenMutation, Node, NodeTraits};
 use crate::layout_dom::ServoDangerousStyleElement;
@@ -74,10 +73,9 @@ fn invalidator<'a, 'b, 'dom: 'a>(
     RelativeSelectorInvalidator {
         element,
         quirks_mode,
-        snapshot_table: None,
+        snapshots: None,
         invalidated: note_invalidated_anchor,
         sibling_traversal_map,
-        _marker: PhantomData,
     }
 }
 
@@ -129,9 +127,11 @@ impl Element {
         let window = self.owner_window();
         {
             let layout = window.layout();
+            // `Dom::from_ref` must run in script state; only the layout view is taken inside.
+            let dom = Dom::from_ref(self);
             with_layout_state(|| {
                 // Borrow the live element for the layout-only traversal; no script runs here.
-                let element = LayoutDom::from_raw(self);
+                let element = unsafe { dom.to_layout() };
                 invalidate(layout.stylist(), ServoDangerousStyleElement::from(element))
             });
         }
@@ -140,6 +140,8 @@ impl Element {
             return;
         }
         let document = self.owner_document();
+        // SAFETY: Only the dirty-root bookkeeping runs below; it does not run script or GC.
+        let no_gc = unsafe { NoGC::new() };
         for (anchor, siblings) in anchors {
             // SAFETY: The anchors are ancestors of this element or their earlier siblings, so
             // the tree keeps them alive, and no script has run since they were noted.
@@ -148,9 +150,9 @@ impl Element {
                 let parent = anchor
                     .GetParentNode()
                     .expect("Restyled the later siblings of an element without a parent");
-                document.note_node_with_invalidated_descendants(&parent);
+                document.note_node_with_invalidated_descendants(&no_gc, &parent);
             } else {
-                document.note_node_with_invalidated_descendants(anchor);
+                document.note_node_with_invalidated_descendants(&no_gc, anchor);
             }
         }
     }

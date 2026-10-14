@@ -14,6 +14,7 @@ use std::time::SystemTime;
 use cookie::{Cookie, SameSite};
 use itertools::Itertools;
 use log::info;
+use malloc_size_of_derive::MallocSizeOf;
 use net_traits::pub_domains::reg_suffix;
 use net_traits::{CookieSource, SiteDescriptor};
 use serde::{Deserialize, Serialize};
@@ -37,7 +38,7 @@ pub enum SameSiteContext {
     CrossSite,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, MallocSizeOf)]
 pub struct CookieStorage {
     version: u32,
     cookies_map: HashMap<String, Vec<ServoCookie>>,
@@ -273,7 +274,7 @@ impl CookieStorage {
         };
 
         // Serialize the cookie-list into a cookie-string by processing each cookie in the cookie-list in order
-        let result = cookie_list.fold("".to_owned(), reducer);
+        let result = cookie_list.fold(String::new(), reducer);
 
         info!(" === COOKIES SENT: {}", result);
         match result.len() {
@@ -340,7 +341,8 @@ fn reg_host(url: &str) -> String {
         .and_then(|url| url.strip_suffix(']'))
         .unwrap_or(url);
     if let Ok(address) = host_for_ip_parse.parse::<IpAddr>() {
-        return address.to_string().to_lowercase();
+        debug_assert!(address.to_string() == address.to_string().to_lowercase());
+        return address.to_string();
     }
 
     reg_suffix(url).to_lowercase()

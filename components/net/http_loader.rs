@@ -5,11 +5,11 @@
 use std::collections::HashSet;
 use std::iter::FromIterator;
 use std::sync::Arc as StdArc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use async_recursion::async_recursion;
 use content_security_policy::percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
-use devtools_traits::ChromeToDevtoolsControlMsg;
 use embedder_traits::{AuthenticationResponse, GenericEmbedderProxy};
 use futures::{TryFutureExt, TryStreamExt, future};
 use headers::authorization::Basic;
@@ -51,9 +51,9 @@ use net_traits::request::{
 use net_traits::response::{CacheState, RedirectTaint, Response, ResponseBody, ResponseType};
 use net_traits::{
     CookieSource, CustomResponse, CustomResponseMediator, DOCUMENT_ACCEPT_HEADER_VALUE,
-    NetworkError, RedirectEndValue, RedirectStartValue, ReferrerPolicy, ResourceAttribute,
-    ResourceFetchTiming, ResourceFetchTimingContainer, ResourceTimeValue, TlsSecurityInfo,
-    TlsSecurityState,
+    DiscardFetch, NetworkError, RedirectEndValue, RedirectStartValue, ReferrerPolicy,
+    ResourceAttribute, ResourceFetchTiming, ResourceFetchTimingContainer, ResourceTimeValue,
+    ServoCipherSuite, ServoNamedGroup, ServoProtocolVersion, TlsSecurityInfo, TlsSecurityState,
 };
 use parking_lot::{Mutex, RwLock};
 use profile_traits::mem::{Report, ReportKind};
@@ -62,8 +62,9 @@ use profile_traits::path;
 use profile_traits::trace_span;
 use rustc_hash::FxHashMap;
 use servo_base::cross_process_instant::CrossProcessInstant;
-use servo_base::generic_channel::GenericSharedMemory;
+use servo_base::generic_channel::{GenericCallback, GenericSharedMemory};
 use servo_base::id::{BrowsingContextId, HistoryStateId, PipelineId};
+use servo_config::pref;
 use servo_url::{ImmutableOrigin, ServoUrl};
 use tokio::sync::mpsc::{
     Receiver as TokioReceiver, Sender as TokioSender, UnboundedReceiver, UnboundedSender, channel,
@@ -72,6 +73,7 @@ use tokio::sync::mpsc::{
 use tokio_stream::wrappers::ReceiverStream;
 #[cfg(feature = "tracing")]
 use tracing::Instrument;
+use uuid::Uuid;
 
 use crate::async_runtime::spawn_task;
 use crate::connector::{
@@ -81,6 +83,7 @@ use crate::connector::{
 use crate::cookie::ServoCookie;
 use crate::cookie_storage::{CookieStorage, SameSiteContext};
 use crate::decoder::Decoder;
+#[cfg(feature = "devtools")]
 use crate::devtools::{
     prepare_devtools_request, send_request_to_devtools, send_response_values_to_devtools,
 };
@@ -88,14 +91,20 @@ use crate::embedder::NetToEmbedderMsg;
 use crate::fetch::cors_cache::CorsCache;
 use crate::fetch::fetch_params::FetchParams;
 use crate::fetch::headers::{SecFetchDest, SecFetchMode, SecFetchSite, SecFetchUser};
-use crate::fetch::methods::{Data, DoneChannel, FetchContext, Target, main_fetch};
+use crate::fetch::methods::{Data, DoneChannel, FetchContext, Target, fetch, main_fetch};
 use crate::hsts::HstsList;
 use crate::http_cache::{
-    CacheKey, CachedResourcesOrGuard, HttpCache, construct_response, invalidate_cached_resources,
-    refresh,
+    CacheKey, CachedResourcesOrGuard, HttpCache, ValidationStatus, construct_response,
+    invalidate_cached_resources, refresh,
 };
 use crate::resource_thread::{AuthCache, AuthCacheEntry};
 use crate::websocket_loader::start_websocket;
+
+#[cfg(feature = "devtools")]
+type DevtoolsResponse = Option<devtools_traits::ChromeToDevtoolsControlMsg>;
+
+#[cfg(not(feature = "devtools"))]
+type DevtoolsResponse = Option<()>;
 
 /// The various states an entry of the HttpCache can be in.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -132,6 +141,16 @@ impl HttpState {
                 path: path!["hsts-list", suffix],
                 kind: ReportKind::ExplicitJemallocHeapSize,
                 size: self.hsts_list.read().size_of(ops),
+            },
+            Report {
+                path: path!["auth cache", suffix],
+                kind: ReportKind::ExplicitJemallocHeapSize,
+                size: self.auth_cache.read().size_of(ops),
+            },
+            Report {
+                path: path!["cookie storage", suffix],
+                kind: ReportKind::ExplicitJemallocHeapSize,
+                size: self.cookie_jar.read().size_of(ops),
             },
         ]
     }
@@ -184,6 +203,7 @@ pub(crate) fn set_default_accept(request: &mut Request) {
             },
             Destination::Json => HeaderValue::from_static("application/json,*/*;q=0.5"),
             Destination::Style => HeaderValue::from_static("text/css,*/*;q=0.1"),
+            Destination::Text => HeaderValue::from_static("text/plain,*/*;q=0.5"),
             // Step 11.1. Let value be `*/*`.
             _ => HeaderValue::from_static("*/*"),
         }
@@ -385,12 +405,10 @@ fn set_request_cookies(
     let mut cookie_jar = cookie_jar.write();
     cookie_jar.remove_expired_cookies_for_url(url);
     if let Some(cookie_list) =
-        cookie_jar.cookies_for_url_with_same_site(url, CookieSource::HTTP, same_site_context)
+        cookie_jar.cookies_for_url_with_same_site(url, CookieSource::HTTP, same_site_context) &&
+        let Ok(cookie_list_header_value) = HeaderValue::from_bytes(cookie_list.as_bytes())
     {
-        headers.insert(
-            header::COOKIE,
-            HeaderValue::from_bytes(cookie_list.as_bytes()).unwrap(),
-        );
+        headers.insert(header::COOKIE, cookie_list_header_value);
     }
 }
 
@@ -438,9 +456,9 @@ fn build_tls_security_info(handshake: &TlsHandshakeInfo, hsts_enabled: bool) -> 
     TlsSecurityInfo {
         state,
         weakness_reasons: Vec::new(), // rustls never negotiates weak crypto
-        protocol_version: handshake.protocol_version.clone(),
-        cipher_suite: handshake.cipher_suite.clone(),
-        kea_group_name: handshake.kea_group_name.clone(),
+        protocol_version: handshake.protocol_version.map(ServoProtocolVersion),
+        cipher_suite: handshake.cipher_suite.map(ServoCipherSuite),
+        kea_group_name: handshake.kea_group_name.map(ServoNamedGroup),
         signature_scheme_name: handshake.signature_scheme_name.clone(),
         alpn_protocol: handshake.alpn_protocol.clone(),
         certificate_chain_der: handshake.certificate_chain_der.clone(),
@@ -458,7 +476,11 @@ fn auth_from_cache(
     auth_cache: &RwLock<AuthCache>,
     origin: &ImmutableOrigin,
 ) -> Option<Authorization<Basic>> {
-    if let Some(auth_entry) = auth_cache.read().entries.get(&origin.ascii_serialization()) {
+    if let Some(auth_entry) = auth_cache
+        .read()
+        .entries
+        .get(origin.ascii_serialization().as_ref())
+    {
         let user_name = &auth_entry.user_name;
         let password = &auth_entry.password;
         Some(Authorization::basic(user_name, password))
@@ -514,9 +536,9 @@ impl BodySink {
         }
     }
 
-    fn close(&self) {
+    fn close(self) {
         match self {
-            BodySink::Chunked(_) => { /* no need to close sender */ },
+            BodySink::Chunked(_) => {},
             BodySink::Buffered(sender) => {
                 let _ = sender.send(BodyChunk::Done);
             },
@@ -547,7 +569,7 @@ fn log_fetch_terminated_send_failure(terminated_with_error: bool, context: &str)
 
 const FRAGMENT: &AsciiSet = &CONTROLS.add(b'|').add(b'{').add(b'}');
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 #[servo_tracing::instrument(skip_all, fields(url=url.as_str()))]
 /// This sets up the callback infrastructure to send body frames to `body_sender` and fires the client request.
 async fn obtain_response(
@@ -558,15 +580,19 @@ async fn obtain_response(
     body_sender: Option<StdArc<Mutex<Option<IpcSender<BodyChunkRequest>>>>>,
     source_is_null: bool,
     pipeline_id: &Option<PipelineId>,
-    request_id: Option<&str>,
+    request_id: Option<&Uuid>,
     destination: Destination,
     is_xhr: bool,
     context: &FetchContext,
     fetch_terminated: UnboundedSender<bool>,
     browsing_context_id: Option<BrowsingContextId>,
-) -> Result<(HyperResponse<Decoder>, Option<ChromeToDevtoolsControlMsg>), NetworkError> {
+) -> Result<(HyperResponse<Decoder>, DevtoolsResponse), NetworkError> {
+    #[cfg(not(feature = "devtools"))]
+    let _ = (destination, is_xhr, browsing_context_id);
+
     let mut headers = request_headers.clone();
 
+    #[cfg(feature = "devtools")]
     let devtools_bytes = StdArc::new(Mutex::new(vec![]));
 
     // https://url.spec.whatwg.org/#percent-encoded-bytes
@@ -591,12 +617,16 @@ async fn obtain_response(
             (BodySink::Buffered(sender), BodyStream::Buffered(receiver))
         };
 
+        #[cfg(feature = "devtools")]
         obtain_response_setup_router_callback(
-            devtools_bytes.clone(),
+            Some(devtools_bytes.clone()),
             chunk_requester,
             sink,
             fetch_terminated,
         )?;
+
+        #[cfg(not(feature = "devtools"))]
+        obtain_response_setup_router_callback(None, chunk_requester, sink, fetch_terminated)?;
 
         let body = match stream {
             BodyStream::Chunked(receiver) => {
@@ -661,15 +691,17 @@ async fn obtain_response(
         .timing
         .set_attribute(ResourceAttribute::ConnectEnd(connect_end));
 
-    let request_id = request_id.map(|v| v.to_owned());
-    let pipeline_id = *pipeline_id;
-    let closure_url = url.clone();
-    let method = method.clone();
-    let send_start = CrossProcessInstant::now();
-
     let host = request.uri().host().unwrap_or("").to_owned();
     let override_manager = context.state.override_manager.clone();
-    let headers = headers.clone();
+    #[cfg(feature = "devtools")]
+    let (request_id, pipeline_id, closure_url, method, send_start, headers) = (
+        request_id.map(|value| value.to_owned()),
+        *pipeline_id,
+        url.clone(),
+        method.clone(),
+        CrossProcessInstant::now(),
+        headers.clone(),
+    );
     let is_secure_scheme = url.is_secure_scheme();
 
     let uri = request.uri().clone();
@@ -686,8 +718,6 @@ async fn obtain_response(
     let client_future = client
         .request(request)
         .and_then(move |res| {
-            let send_end = CrossProcessInstant::now();
-
             let permit = if res.version() == Version::HTTP_2 {
                 state.connection_limiter.note_multiplexed(&uri);
                 None
@@ -695,7 +725,10 @@ async fn obtain_response(
                 permit
             };
 
+            // TODO(#21271) response_start: immediately after receiving first byte of response
+            #[cfg(feature = "devtools")]
             let msg = if let Some(request_id) = request_id {
+                let send_end = CrossProcessInstant::now();
                 if let Some(pipeline_id) = pipeline_id {
                     if let Some(browsing_context_id) = browsing_context_id {
                         Some(prepare_devtools_request(
@@ -733,7 +766,10 @@ async fn obtain_response(
                     res.map(|r| LimitedBody::new(r, permit).boxed()),
                     is_secure_scheme,
                 ),
+                #[cfg(feature = "devtools")]
                 msg,
+                #[cfg(not(feature = "devtools"))]
+                None,
             )))
         })
         .map_err(move |error| {
@@ -757,7 +793,7 @@ async fn obtain_response(
 
 /// Setup the callback mechanism to forward chunks from the request received to the `chunk_requester`.
 fn obtain_response_setup_router_callback(
-    devtools_bytes: StdArc<Mutex<Vec<u8>>>,
+    devtools_bytes: Option<StdArc<Mutex<Vec<u8>>>>,
     chunk_requester: StdArc<Mutex<Option<IpcSender<BodyChunkRequest>>>>,
     sink: BodySink,
     fetch_terminated: UnboundedSender<bool>,
@@ -793,6 +829,8 @@ fn obtain_response_setup_router_callback(
         }
     }
 
+    let mut sink = Some(sink);
+
     ROUTER.add_typed_route(
         body_port,
         Box::new(move |message| {
@@ -800,14 +838,17 @@ fn obtain_response_setup_router_callback(
             let bytes = match message.unwrap() {
                 BodyChunkResponse::Chunk(bytes) => bytes,
                 BodyChunkResponse::Done => {
-                    // Step 3, abort these parallel steps.
+                    // Step 2.2.2. If fetchParams’s process request end-of-body is non-null,
+                    // then run fetchParams’s process request end-of-body.
                     if fetch_terminated.send(false).is_err() {
                         log_fetch_terminated_send_failure(
                             false,
                             "handling request body completion",
                         );
                     }
-                    sink.close();
+                    if let Some(sink) = sink.take() {
+                        sink.close();
+                    }
 
                     return;
                 },
@@ -821,17 +862,27 @@ fn obtain_response_setup_router_callback(
                             "handling request body stream error",
                         );
                     }
-                    sink.close();
+                    if let Some(sink) = sink.take() {
+                        sink.close();
+                    }
 
                     return;
                 },
             };
 
-            devtools_bytes.lock().extend_from_slice(&bytes);
+            #[cfg(feature = "devtools")]
+            if let Some(devtools_bytes) = &devtools_bytes {
+                devtools_bytes.lock().extend_from_slice(&bytes);
+            }
 
             // Step 5.1.2.2, transmit chunk over the network,
             // currently implemented by sending the bytes to the fetch worker.
-            sink.transmit_bytes(bytes);
+            {
+                let Some(sink) = sink.as_ref() else {
+                    return;
+                };
+                sink.transmit_bytes(bytes);
+            }
 
             // Step 5.1.2.3
             // Request the next chunk.
@@ -848,7 +899,9 @@ fn obtain_response_setup_router_callback(
                             "handling failure to request the next request body chunk",
                         );
                     }
-                    sink.close();
+                    if let Some(sink) = sink.take() {
+                        sink.close();
+                    }
                 }
             } else {
                 log_request_body_stream_closed("request the next request body chunk", None);
@@ -858,7 +911,9 @@ fn obtain_response_setup_router_callback(
                         "handling a closed request body stream while requesting the next chunk",
                     );
                 }
-                sink.close();
+                if let Some(sink) = sink.take() {
+                    sink.close();
+                }
             }
         }),
     );
@@ -886,7 +941,17 @@ async fn intercept_with_service_worker(
         .lock()
         .get(&load_url.origin())
         .cloned()?;
-    let (response_chan, response_port) = ipc::channel().ok()?;
+    // Bridge the worker's reply into this async context.
+    let (reply_sender, reply_receiver) = tokio::sync::oneshot::channel();
+    let reply_sender = std::sync::Mutex::new(Some(reply_sender));
+    let response_chan = GenericCallback::new(move |message: Result<Option<CustomResponse>, _>| {
+        if let Ok(mut reply_sender) = reply_sender.lock() &&
+            let Some(reply_sender) = reply_sender.take()
+        {
+            let _ = reply_sender.send(message.ok().flatten());
+        }
+    })
+    .ok()?;
     sender
         .send(CustomResponseMediator {
             response_chan,
@@ -894,17 +959,6 @@ async fn intercept_with_service_worker(
         })
         .ok()?;
 
-    // Bridge the ipc reply into this async context.
-    let (reply_sender, reply_receiver) = tokio::sync::oneshot::channel();
-    let reply_sender = std::sync::Mutex::new(Some(reply_sender));
-    ROUTER.add_typed_route(
-        response_port,
-        Box::new(move |message: Result<Option<CustomResponse>, _>| {
-            if let Some(reply_sender) = reply_sender.lock().unwrap().take() {
-                let _ = reply_sender.send(message.ok().flatten());
-            }
-        }),
-    );
     let custom = tokio::time::timeout(Duration::from_secs(5), reply_receiver)
         .await
         .ok()?
@@ -919,7 +973,7 @@ async fn intercept_with_service_worker(
 
 /// [HTTP fetch](https://fetch.spec.whatwg.org/#concept-http-fetch)
 #[async_recursion]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn http_fetch(
     fetch_params: &mut FetchParams,
     cache: &mut CorsCache,
@@ -1164,7 +1218,7 @@ fn tao_check(request: &Request, response: &Response) -> Result<(), ()> {
     // return success.
     if values
         .iter()
-        .any(|header_str| *header_str == request_origin.ascii_serialization())
+        .any(|header_str| *header_str == request_origin.ascii_serialization().as_ref())
     {
         return Ok(());
     }
@@ -1774,8 +1828,13 @@ async fn http_network_or_cache_fetch(
         let request = &mut fetch_params.request;
 
         // Step 14.2 If request’s body is non-null, then:
-        if request.body.is_some() {
-            // TODO Implement body source
+        // “If request’s body’s source is null, then return a network error.”
+        if request
+            .body
+            .as_ref()
+            .is_some_and(|body| body.source_is_null())
+        {
+            return Response::network_error(NetworkError::ConnectionFailure);
         }
 
         // Step 14.3 If request’s use-URL-credentials flag is unset or isAuthenticationFetch is true, then:
@@ -1853,7 +1912,11 @@ async fn http_network_or_cache_fetch(
         };
         {
             let mut auth_cache = context.state.auth_cache.write();
-            let key = request.current_url().origin().ascii_serialization();
+            let key = request
+                .current_url()
+                .origin()
+                .ascii_serialization()
+                .into_owned();
             auth_cache.entries.insert(key, entry);
         }
 
@@ -1918,9 +1981,11 @@ async fn block_for_cache_ready<'a>(
             let stored_response = construct_response(http_request, done_chan, cached_resources);
             // Step 8.25.2 If storedResponse is non-null, then:
             if let Some(response_from_cache) = stored_response {
-                let response_headers = response_from_cache.response.headers.clone();
+                let validation_status = &response_from_cache.validation_status;
+                let revalidation_guard = &response_from_cache.revalidation_guard;
+
                 // Substep 1, 2, 3, 4
-                let (cached_response, needs_revalidation) =
+                let (cached_response, needs_synchronous_revalidation) =
                     match (http_request.cache_mode, &http_request.mode) {
                         (CacheMode::ForceCache, _) => (Some(response_from_cache.response), false),
                         (CacheMode::OnlyIfCached, &RequestMode::SameOrigin) => {
@@ -1931,12 +1996,19 @@ async fn block_for_cache_ready<'a>(
                         (CacheMode::Reload, _) => (None, false),
                         (_, _) => (
                             Some(response_from_cache.response),
-                            response_from_cache.needs_validation,
+                            *validation_status ==
+                                (ValidationStatus::Stale {
+                                    revalidate_in_background: false,
+                                }),
                         ),
                     };
 
-                if needs_revalidation {
+                if needs_synchronous_revalidation {
                     *revalidating_flag = true;
+                    let response_headers = &cached_response
+                        .as_ref()
+                        .expect("needs_synchronous_revalidation implies a cached response")
+                        .headers;
                     // Substep 5
                     if let Some(http_date) = response_headers.typed_get::<LastModified>() {
                         let http_date: SystemTime = http_date.into();
@@ -1951,6 +2023,18 @@ async fn block_for_cache_ready<'a>(
                     }
                 } else {
                     // Substep 6
+                    // If it's a stale-while-revalidate response, also refresh it in the background.
+                    let revalidate_in_background = *validation_status ==
+                        (ValidationStatus::Stale {
+                            revalidate_in_background: true,
+                        });
+                    if revalidate_in_background && cached_response.is_some() {
+                        spawn_stale_while_revalidate(
+                            context,
+                            http_request,
+                            revalidation_guard.clone(),
+                        );
+                    }
                     *response = cached_response;
                     if let Some(response) = response {
                         response.cache_state = CacheState::Local;
@@ -1967,6 +2051,42 @@ async fn block_for_cache_ready<'a>(
     guard_result
 }
 
+/// The cached (stale) response has already been returned to the caller; here we
+/// fire off an independent fetch whose only purpose is to refresh the stored response.
+fn spawn_stale_while_revalidate(
+    context: &FetchContext,
+    http_request: &Request,
+    revalidation_guard: StdArc<AtomicBool>,
+) {
+    // Only proceed if we are the one who flips the guard from `false` to `true`.
+    if revalidation_guard
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    // By setting `CacheMode::NoCache` to the cloned request,
+    // we ensure that the background revalidation fetch will always go to the network, and preventing an inifinite loop.
+    let mut revalidation_request = http_request.clone();
+    revalidation_request.cache_mode = CacheMode::NoCache;
+
+    // A background revalidation must not itself spin up service workers
+    revalidation_request.service_workers_mode = ServiceWorkersMode::None;
+
+    let context = context.clone();
+    debug!(
+        "spawning stale-while-revalidate background revalidation for {:?}",
+        revalidation_request.current_url()
+    );
+    spawn_task(async move {
+        let mut target = DiscardFetch;
+
+        let _ = fetch(revalidation_request, &mut target, &context).await;
+        revalidation_guard.store(false, Ordering::Release);
+    });
+}
+
 /// Wait for a cached response from channel.
 /// Happens when a fetch gets a cache hit, and the resource is pending completion from the network.
 async fn wait_for_inflight_requests(done_chan: &mut DoneChannel, response: &mut Option<Response>) {
@@ -1978,13 +2098,13 @@ async fn wait_for_inflight_requests(done_chan: &mut DoneChannel, response: &mut 
 
         loop {
             match ch.1.recv().await {
-                Some(Data::Payload(_)) => {},
+                Some(Data::ContentLength(_)) | Some(Data::Payload(_)) | Some(Data::Error(_)) => {},
                 Some(Data::Done) => break, // Return the full response as if it was initially cached as such.
                 Some(Data::Cancelled) => {
                     // The response was cancelled while the fetch was ongoing.
                     break;
                 },
-                _ => panic!("HTTP cache should always send Done or Cancelled"),
+                None => panic!("HTTP cache should always send Done or Cancelled"),
             }
         }
     }
@@ -2167,7 +2287,7 @@ async fn http_network_fetch(
     // given request.
 
     let url = request.current_url();
-    let request_id = request.id.0.to_string();
+    let request_id = request.id.0;
     if log_enabled!(log::Level::Info) {
         info!("{:?} request for {}", request.method, url);
         for header in request.headers.iter() {
@@ -2198,7 +2318,7 @@ async fn http_network_fetch(
     // Step 6. Let newConnection be "yes" if forceNewConnection is true; otherwise "no".
 
     // Step 7. Switch on request’s mode:
-    let (res, msg) = match &request.mode {
+    let (response_stream, msg) = match &request.mode {
         // Let connection be the result of obtaining a WebSocket connection, given request’s current URL.
         RequestMode::WebSocket {
             protocols,
@@ -2219,7 +2339,7 @@ async fn http_network_fetch(
                 context.ignore_certificate_errors,
                 context.state.override_manager.clone(),
             );
-            tls_config.alpn_protocols = vec!["http/1.1".to_string().into()];
+            tls_config.alpn_protocols = vec!["http/1.1".into()];
 
             let response = match start_websocket(
                 context.state.clone(),
@@ -2270,11 +2390,11 @@ async fn http_network_fetch(
             );
 
             // This will only get the headers, the body is read later
-            let (res, msg) = match response_future.await {
+            let (response_stream, msg) = match response_future.await {
                 Ok(wrapped_response) => wrapped_response,
                 Err(error) => return Response::network_error(error),
             };
-            (res, msg)
+            (response_stream, msg)
         },
     };
     context
@@ -2282,8 +2402,8 @@ async fn http_network_fetch(
         .set_attribute(ResourceAttribute::ResponseStart);
 
     if log_enabled!(log::Level::Info) {
-        debug!("{:?} response for {}", res.version(), url);
-        for header in res.headers().iter() {
+        debug!("{:?} response for {}", response_stream.version(), url);
+        for header in response_stream.headers().iter() {
             debug!(" - {:?}", header);
         }
     }
@@ -2299,98 +2419,140 @@ async fn http_network_fetch(
     let timing = context.timing.inner().clone();
     let mut response = Response::new(url.clone(), timing);
 
-    if let Some(handshake_info) = res.extensions().get::<TlsHandshakeInfo>() {
+    if let Some(handshake_info) = response_stream.extensions().get::<TlsHandshakeInfo>() {
         let mut hsts_enabled = url
             .host_str()
             .is_some_and(|host| context.state.hsts_list.read().is_host_secure(host));
 
         if url.scheme() == "https" &&
-            let Some(sts) = res.headers().typed_get::<StrictTransportSecurity>()
+            let Some(strict_transport_security) = response_stream
+                .headers()
+                .typed_get::<StrictTransportSecurity>()
         {
             // max-age > 0 enables HSTS, max-age = 0 disables it (RFC 6797 Section 6.1.1)
-            hsts_enabled = sts.max_age().as_secs() > 0;
+            hsts_enabled = strict_transport_security.max_age().as_secs() > 0;
         }
         response.tls_security_info = Some(build_tls_security_info(handshake_info, hsts_enabled));
     }
 
-    let status_text = res
+    let status_text = response_stream
         .extensions()
         .get::<ReasonPhrase>()
         .map(ReasonPhrase::as_bytes)
-        .or_else(|| res.status().canonical_reason().map(str::as_bytes))
+        .or_else(|| {
+            response_stream
+                .status()
+                .canonical_reason()
+                .map(str::as_bytes)
+        })
         .map(Vec::from)
         .unwrap_or_default();
-    response.status = HttpStatus::new(res.status(), status_text);
+    response.status = HttpStatus::new(response_stream.status(), status_text);
 
-    info!("got {:?} response for {:?}", res.status(), request.url());
-    response.headers = res.headers().clone();
+    info!(
+        "got {:?} response for {:?}",
+        response_stream.status(),
+        request.url()
+    );
+    response.headers = response_stream.headers().clone();
     response.referrer = request.referrer.to_url().cloned();
     response.referrer_policy = request.referrer_policy;
 
-    let res_body = response.body.clone();
+    let response_body = response.body.clone();
 
     // We're about to spawn a future to be waited on here
     let (done_sender, done_receiver) = unbounded_channel();
     *done_chan = Some((done_sender.clone(), done_receiver));
 
-    let devtools_sender = context.devtools_chan.clone();
     let cancellation_listener = context.cancellation_listener.clone();
     if cancellation_listener.cancelled() {
         return Response::network_error(NetworkError::LoadCancelled);
     }
 
-    *res_body.lock() = ResponseBody::Receiving(vec![]);
-    let res_body2 = res_body.clone();
-
-    if let Some(ref sender) = devtools_sender &&
-        let Some(m) = msg
-    {
-        send_request_to_devtools(m, sender);
-    }
+    #[cfg(feature = "devtools")]
+    let (devtools_request, status, headers, devtools_chan) = {
+        if let Some(ref sender) = context.devtools_chan &&
+            let Some(msg) = msg
+        {
+            send_request_to_devtools(msg, sender);
+        }
+        (
+            request.clone(),
+            response.status.clone(),
+            response.headers.clone(),
+            context.devtools_chan.clone(),
+        )
+    };
 
     let done_sender2 = done_sender.clone();
     let done_sender3 = done_sender.clone();
     let timing_ptr2 = context.timing.clone();
     let timing_ptr3 = context.timing.clone();
-    let devtools_request = request.clone();
-    let url1 = devtools_request.url();
+    let url1 = request.url();
     let url2 = url1.clone();
 
-    let status = response.status.clone();
-    let headers = response.headers.clone();
-    let devtools_chan = context.devtools_chan.clone();
+    let prealloc_size: usize = if let Some(possible_length) = response_stream
+        .headers()
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|header_value| header_value.to_str().ok())
+        .and_then(|s| s.parse::<usize>().ok())
+    {
+        // For compressed content, we pre-allocate a multiple of the
+        // compressed size, assuming typical content will be highly compressed.
+        let multiplier: usize = if response_stream.body().is_encoded() {
+            5
+        } else {
+            1
+        };
+        possible_length.saturating_mul(multiplier)
+    } else {
+        // We don't know the length, so we fallback to something to still
+        // avoid some reallocs.
+        4096
+    }
+    .min(pref!(network_max_content_length) as usize);
+    let _ = done_sender.send(Data::ContentLength(prealloc_size));
+    *response_body.lock() = ResponseBody::Receiving(Vec::with_capacity(prealloc_size));
+    let response_body2 = response_body.clone();
 
     spawn_task(
-        res.into_body()
-            .try_fold(res_body, move |res_body, chunk| {
+        response_stream
+            .into_body()
+            .try_fold(response_body, move |response_body_accumulator, chunk| {
                 if cancellation_listener.cancelled() {
-                    *res_body.lock() = ResponseBody::Done(vec![]);
+                    *response_body_accumulator.lock() = ResponseBody::Done(vec![]);
                     let _ = done_sender.send(Data::Cancelled);
                     return future::ready(Err(std::io::Error::new(
                         std::io::ErrorKind::Interrupted,
                         "Fetch aborted",
                     )));
                 }
-                if let ResponseBody::Receiving(ref mut body) = *res_body.lock() {
-                    let bytes = chunk;
-                    body.extend_from_slice(&bytes);
-                    let _ = done_sender.send(Data::Payload(bytes.to_vec()));
+                if let ResponseBody::Receiving(ref mut body) = *response_body_accumulator.lock() {
+                    body.extend_from_slice(&chunk);
+                    let _ = done_sender.send(Data::Payload(chunk));
                 }
-                future::ready(Ok(res_body))
+                future::ready(Ok(response_body_accumulator))
             })
-            .and_then(move |res_body| {
+            .and_then(move |complete_response_body| {
                 debug!("successfully finished response for {:?}", url1);
-                let mut body = res_body.lock();
-                let completed_body = match *body {
+                let mut body = complete_response_body.lock();
+                let mut completed_body = match *body {
                     ResponseBody::Receiving(ref mut body) => std::mem::take(body),
                     _ => vec![],
                 };
-                let devtools_response_body = completed_body.clone();
+                // This allocation may be retained by the http-cache.
+                completed_body.shrink_to_fit();
+                // If devtools is disabled avoid cloning, since the result would
+                // be unused anyway.
+                #[cfg(feature = "devtools")]
+                let devtools_response_body =
+                    devtools_chan.is_some().then(|| completed_body.clone());
                 *body = ResponseBody::Done(completed_body);
+                #[cfg(feature = "devtools")]
                 send_response_values_to_devtools(
                     Some(headers),
                     status,
-                    Some(devtools_response_body),
+                    devtools_response_body,
                     CacheState::None,
                     &devtools_request,
                     devtools_chan,
@@ -2403,12 +2565,12 @@ async fn http_network_fetch(
                 if let std::io::ErrorKind::InvalidData = error.kind() {
                     debug!("Content decompression error for {:?}", url2);
                     let _ = done_sender3.send(Data::Error(NetworkError::DecompressionError));
-                    let mut body = res_body2.lock();
+                    let mut body = response_body2.lock();
 
                     *body = ResponseBody::Done(vec![]);
                 }
                 debug!("finished response for {:?}", url2);
-                let mut body = res_body2.lock();
+                let mut body = response_body2.lock();
                 let completed_body = match *body {
                     ResponseBody::Receiving(ref mut body) => std::mem::take(body),
                     _ => vec![],
@@ -2603,9 +2765,14 @@ async fn cors_preflight_fetch(
 
         // Step 7.6 If one of request’s header list’s names is a CORS non-wildcard request-header name
         // and is not a byte-case-insensitive match for an item in headerNames, then return a network error.
+        //
+        // Note: This check deviates from the spec. Other browsers (Chrome, Firefox, Safari) all treat a
+        // `*` in headerNames as covering CORS non-wildcard request-header names.
+        let header_names_set: HashSet<&HeaderName> = HashSet::from_iter(header_names.iter());
         if request.headers.iter().any(|(name, _)| {
             is_cors_non_wildcard_request_header_name(name) &&
-                header_names.iter().all(|header_name| header_name != name)
+                !header_names_set.contains(name) &&
+                !header_names_set.contains(&HeaderName::from_static("*"))
         }) {
             return Response::network_error(NetworkError::CorsAuthorization);
         }
@@ -2614,14 +2781,10 @@ async fn cors_preflight_fetch(
         // if unsafeName is not a byte-case-insensitive match for an item in headerNames and request’s credentials
         // mode is "include" or headerNames does not contain `*`, return a network error.
         let unsafe_names = get_cors_unsafe_header_names(&request.headers);
-        let header_names_set: HashSet<&HeaderName> = HashSet::from_iter(header_names.iter());
-        let header_names_contains_star = header_names
-            .iter()
-            .any(|header_name| header_name.as_str() == "*");
         for unsafe_name in unsafe_names.iter() {
             if !header_names_set.contains(unsafe_name) &&
                 (request.credentials_mode == CredentialsMode::Include ||
-                    !header_names_contains_star)
+                    !header_names_set.contains(&HeaderName::from_static("*")))
             {
                 return Response::network_error(NetworkError::CorsHeaders);
             }
@@ -2676,7 +2839,7 @@ fn cors_check(request: &Request, response: &Response) -> Result<(), ()> {
         // Step 2. If origin is null, then return failure.
         return Err(());
     };
-    let origin = origins.into_iter().map(char::from).collect::<String>();
+    let origin = String::from_utf8(origins).map_err(|_| ())?;
 
     // Step 3. If request’s credentials mode is not "include" and origin is `*`, then return success.
     if request.credentials_mode != CredentialsMode::Include && origin == "*" {
@@ -2828,8 +2991,8 @@ fn append_a_request_origin_header(request: &mut Request) {
 
 /// <https://w3c.github.io/webappsec-fetch-metadata/#abstract-opdef-append-the-fetch-metadata-headers-for-a-request>
 fn append_the_fetch_metadata_headers(r: &mut Request) {
-    // Step 1. If r’s url is not an potentially trustworthy URL, return.
-    if !r.url().is_potentially_trustworthy() {
+    // Step 1. If r’s current url is not an potentially trustworthy URL, return.
+    if !r.current_url().is_potentially_trustworthy() {
         return;
     }
 
@@ -2894,8 +3057,8 @@ fn append_cache_data_to_headers(http_request: &mut Request) {
 
 /// <https://w3c.github.io/webappsec-fetch-metadata/#abstract-opdef-set-dest>
 fn set_the_sec_fetch_dest_header(r: &mut Request) {
-    // Step 1. Assert: r’s url is a potentially trustworthy URL.
-    debug_assert!(r.url().is_potentially_trustworthy());
+    // Step 1. Assert: r’s current url is a potentially trustworthy URL.
+    debug_assert!(r.current_url().is_potentially_trustworthy());
 
     // Step 2. Let header be a Structured Header whose value is a token.
     // Step 3. If r’s destination is the empty string, set header’s value to the string "empty".
@@ -2908,8 +3071,8 @@ fn set_the_sec_fetch_dest_header(r: &mut Request) {
 
 /// <https://w3c.github.io/webappsec-fetch-metadata/#abstract-opdef-set-mode>
 fn set_the_sec_fetch_mode_header(r: &mut Request) {
-    // Step 1. Assert: r’s url is a potentially trustworthy URL.
-    debug_assert!(r.url().is_potentially_trustworthy());
+    // Step 1. Assert: r’s current url is a potentially trustworthy URL.
+    debug_assert!(r.current_url().is_potentially_trustworthy());
 
     // Step 2. Let header be a Structured Header whose value is a token.
     // Step 3. Set header’s value to r’s mode.
@@ -2927,8 +3090,8 @@ fn set_the_sec_fetch_site_header(r: &mut Request) {
         panic!("request origin cannot be \"client\" at this point")
     };
 
-    // Step 1. Assert: r’s url is a potentially trustworthy URL.
-    debug_assert!(r.url().is_potentially_trustworthy());
+    // Step 1. Assert: r’s current url is a potentially trustworthy URL.
+    debug_assert!(r.current_url().is_potentially_trustworthy());
 
     // Step 2. Let header be a Structured Header whose value is a token.
     // Step 3. Set header’s value to same-origin.
@@ -2964,8 +3127,8 @@ fn set_the_sec_fetch_site_header(r: &mut Request) {
 
 /// <https://w3c.github.io/webappsec-fetch-metadata/#abstract-opdef-set-user>
 fn set_the_sec_fetch_user_header(r: &mut Request) {
-    // Step 1. Assert: r’s url is a potentially trustworthy URL.
-    debug_assert!(r.url().is_potentially_trustworthy());
+    // Step 1. Assert: r’s current url is a potentially trustworthy URL.
+    debug_assert!(r.current_url().is_potentially_trustworthy());
 
     // Step 2. If r is not a navigation request, or if r’s user-activation is false, return.
     // TODO user activation

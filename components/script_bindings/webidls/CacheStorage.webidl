@@ -2,9 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// https://w3c.github.io/ServiceWorker/#cachestorage-interface
-
-[SecureContext, Exposed=(Window,Worker), Pref="dom_cache_api_enabled"]
+// https://w3c.github.io/ServiceWorker/#cachestorage
+[Pref="dom_cache_api_enabled", SecureContext, Exposed=(Window,Worker)]
 interface CacheStorage {
   [NewObject] Promise<(Response or undefined)> match(RequestInfo request, optional MultiCacheQueryOptions options = {});
   [NewObject] Promise<boolean> has(DOMString cacheName);
@@ -15,9 +14,4 @@ interface CacheStorage {
 
 dictionary MultiCacheQueryOptions : CacheQueryOptions {
   DOMString cacheName;
-};
-
-// https://w3c.github.io/ServiceWorker/#self-caches
-partial interface mixin WindowOrWorkerGlobalScope {
-  [SecureContext, SameObject, Pref="dom_cache_api_enabled"] readonly attribute CacheStorage caches;
 };

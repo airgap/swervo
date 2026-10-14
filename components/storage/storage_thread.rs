@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use profile_traits::mem::ProfilerChan as MemProfilerChan;
 use servo_base::generic_channel::GenericSender;
 use storage_traits::StorageThreads;
-use storage_traits::cache_storage::CacheStorageThreadMsg;
+use storage_traits::cache_storage::CacheStorageThreadHandle;
 use storage_traits::client_storage::ClientStorageThreadHandle;
 use storage_traits::indexeddb::IndexedDBThreadMsg;
 use storage_traits::webstorage_thread::WebStorageThreadMsg;
@@ -34,11 +34,16 @@ fn new_storage_thread_group(
         mem_profiler_chan,
         format!("storage-reporter-{label}"),
     );
-    // The private group keeps the Cache API entirely in memory; nothing incognito touches disk.
-    let cache_storage: GenericSender<CacheStorageThreadMsg> =
-        CacheStorageThreadFactory::new(config_dir, label == "private");
+    // The private group keeps the Cache API in memory, so nothing private touches disk.
+    let cache_storage: CacheStorageThreadHandle =
+        CacheStorageThreadFactory::new(config_dir, temporary_storage || label == "private");
 
-    StorageThreads::new(cache_storage, client_storage.into(), idb, web_storage)
+    StorageThreads::new(
+        client_storage.into(),
+        idb,
+        web_storage,
+        cache_storage.into(),
+    )
 }
 
 pub fn new_storage_threads(

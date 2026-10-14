@@ -5,6 +5,7 @@
 use std::ffi::CStr;
 use std::ptr;
 
+use ::js::rust::GCMethods;
 use js::gc::{MutableHandle, RootedGuard};
 use js::jsapi::{CallArgs, JSClass, JSFunctionSpec, JSObject, JSPropertySpec};
 use js::rooted;
@@ -21,7 +22,6 @@ use crate::guard::Guard;
 use crate::interface::{
     create_callback_interface_object, create_interface_prototype_object, get_desired_proto,
 };
-use crate::js::rust::GCMethods;
 use crate::namespace::{NamespaceObjectClass, create_namespace_object};
 use crate::utils::ProtoOrIfaceArray;
 
@@ -54,7 +54,7 @@ pub(crate) unsafe fn call_default_constructor<D: crate::DomTypes>(
 }
 
 /// SAFETY: cache is a non-null pointer to a valid ProtoOrIfaceArray object.
-unsafe fn post_barrier(
+unsafe fn init_cached_constructor(
     constructor: usize,
     cache: *mut ProtoOrIfaceArray,
     object: RootedGuard<'_, *mut JSObject>,
@@ -142,7 +142,7 @@ pub(crate) unsafe fn create_namespace_interface_objects<D: DomTypes>(
     assert!(!namespace.is_null());
 
     unsafe {
-        post_barrier(init.constructor_name as usize, cache, namespace);
+        init_cached_constructor(init.constructor_name as usize, cache, namespace);
     }
 }
 
@@ -162,7 +162,7 @@ pub(crate) unsafe fn create_callback_interface_objects<D: DomTypes>(
         interface.handle_mut(),
     );
     unsafe {
-        post_barrier(init.constructor_name as usize, cache, interface);
+        init_cached_constructor(init.constructor_name as usize, cache, interface);
     }
 }
 
@@ -212,5 +212,5 @@ pub(crate) unsafe fn create_interface<D: DomTypes>(
         prototype.handle_mut(),
     );
     assert!(!prototype.is_null());
-    unsafe { *post_barrier(init.prototype_id as usize, cache, prototype) }
+    unsafe { *init_cached_constructor(init.prototype_id as usize, cache, prototype) }
 }

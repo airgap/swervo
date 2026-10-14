@@ -23,7 +23,7 @@ use crate::fragment_tree::Fragment;
 use crate::geom::PhysicalSize;
 use crate::layout_box_base::IndependentFormattingContextLayoutResult;
 use crate::positioned::PositioningContext;
-use crate::sizing::SizeConstraint;
+use crate::sizing::{LazySize, SizeConstraint};
 use crate::{ContainingBlock, ContainingBlockSize};
 
 struct ColumnGeometry {
@@ -35,7 +35,7 @@ struct ColumnGeometry {
 impl ColumnGeometry {
     /// <https://drafts.csswg.org/css-multicol/#pseudo-algorithm>
     fn new(style: &ComputedValues, available_inline_size: Au) -> Self {
-        let gap = match style.clone_column_gap() {
+        let gap = match style.slow_clone_column_gap() {
             // `normal` is 1em in multi-column containers.
             // <https://drafts.csswg.org/css-align/#column-row-gap>
             LengthPercentageOrNormal::Normal => style.get_font().font_size.computed_size().into(),
@@ -131,6 +131,8 @@ impl BlockFormattingContext {
             layout_context,
             positioning_context,
             &column_containing_block,
+            &LazySize::intrinsic(),
+            None,
         );
 
         let units: Vec<(Au, Au)> = result.fragments.iter().filter_map(block_range).collect();

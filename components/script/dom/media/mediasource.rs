@@ -32,7 +32,6 @@ use crate::dom::html::htmlmediaelement::HTMLMediaElement;
 use crate::dom::media::sourcebuffer::SourceBuffer;
 use crate::dom::media::sourcebufferlist::SourceBufferList;
 use crate::dom::window::Window;
-use crate::script_runtime::CanGc;
 
 #[dom_struct]
 pub(crate) struct MediaSource {
@@ -62,20 +61,20 @@ impl MediaSource {
     }
 
     fn new_with_proto(
+        cx: &mut JSContext,
         global: &GlobalScope,
         proto: Option<HandleObject>,
-        can_gc: CanGc,
     ) -> DomRoot<MediaSource> {
-        let source_buffers = SourceBufferList::new(global, can_gc);
-        let active_source_buffers = SourceBufferList::new(global, can_gc);
+        let source_buffers = SourceBufferList::new(cx, global);
+        let active_source_buffers = SourceBufferList::new(cx, global);
         reflect_dom_object_with_proto(
+            cx,
             Box::new(MediaSource::new_inherited(
                 &source_buffers,
                 &active_source_buffers,
             )),
             global,
             proto,
-            can_gc,
         )
     }
 
@@ -128,11 +127,7 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         window: &Window,
         proto: Option<HandleObject>,
     ) -> Fallible<DomRoot<MediaSource>> {
-        Ok(MediaSource::new_with_proto(
-            &window.global(),
-            proto,
-            CanGc::from_cx(cx),
-        ))
+        Ok(MediaSource::new_with_proto(cx, &window.global(), proto))
     }
 
     fn SourceBuffers(&self) -> DomRoot<SourceBufferList> {
@@ -153,7 +148,11 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
     }
 
     /// <https://w3c.github.io/media-source/#dom-mediasource-addsourcebuffer>
-    fn AddSourceBuffer(&self, type_: DOMString) -> Fallible<DomRoot<SourceBuffer>> {
+    fn AddSourceBuffer(
+        &self,
+        cx: &mut JSContext,
+        type_: DOMString,
+    ) -> Fallible<DomRoot<SourceBuffer>> {
         // Step 1. If type is an empty string, throw a TypeError.
         if type_.is_empty() {
             return Err(Error::Type(
@@ -162,11 +161,15 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         }
         // Step 2. If type is not supported, throw a NotSupportedError.
         if ServoMedia::get().can_play_type(&type_.str()) == SupportsMediaType::No {
-            return Err(Error::NotSupported(None));
+            return Err(Error::NotSupported(Some(
+                "The provided MIME type is not supported".to_owned(),
+            )));
         }
         // Step 4. If readyState is not "open", throw an InvalidStateError.
         if self.ready_state.get() != ReadyState::Open {
-            return Err(Error::InvalidState(None));
+            return Err(Error::InvalidState(Some(
+                "MediaSource is not open".to_owned(),
+            )));
         }
         // Steps 5-7. Create the SourceBuffer with its own input stream in the player, and add it
         // to sourceBuffers (which queues the `addsourcebuffer` event at the list). An open
@@ -181,21 +184,26 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
             .add_source_buffer()
             .map_err(|error| {
                 warn!("MSE addSourceBuffer: {error:?}");
-                Error::NotSupported(None)
+                Error::NotSupported(Some(
+                    "The media player could not create a source buffer".to_owned(),
+                ))
             })?;
-        let source_buffer =
-            SourceBuffer::new(&self.global(), self, stream, CanGc::deprecated_note());
+        let source_buffer = SourceBuffer::new(cx, &self.global(), self, stream);
         self.source_buffers.add(&source_buffer);
         Ok(source_buffer)
     }
     fn RemoveSourceBuffer(&self, _buffer: &SourceBuffer) -> ErrorResult {
-        Err(Error::NotSupported(None))
+        Err(Error::NotSupported(Some(
+            "removeSourceBuffer() is not supported yet".to_owned(),
+        )))
     }
     /// <https://w3c.github.io/media-source/#dom-mediasource-endofstream>
     fn EndOfStream(&self, _error: Option<EndOfStreamError>) -> ErrorResult {
         // Step 1. If readyState is not "open", throw an InvalidStateError.
         if !self.is_open() {
-            return Err(Error::InvalidState(None));
+            return Err(Error::InvalidState(Some(
+                "MediaSource is not open".to_owned(),
+            )));
         }
         // Steps 2-4. Transition to "ended" and signal end-of-stream to the player.
         self.ready_state.set(ReadyState::Ended);

@@ -5,7 +5,7 @@
 use dom_struct::dom_struct;
 use html5ever::{LocalName, local_name, ns};
 use js::context::JSContext;
-use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
+use script_bindings::reflector::{Reflector, reflect_dom_object};
 
 use crate::dom::bindings::codegen::Bindings::SVGAnimatedStringBinding::SVGAnimatedStringMethods;
 use crate::dom::bindings::root::{Dom, DomRoot};
@@ -38,10 +38,10 @@ impl SVGAnimatedString {
         element: &Element,
         local_name: LocalName,
     ) -> DomRoot<SVGAnimatedString> {
-        reflect_dom_object_with_cx(
+        reflect_dom_object(
+            cx,
             Box::new(SVGAnimatedString::new_inherited(element, local_name)),
             &*element.owner_window(),
-            cx,
         )
     }
 }

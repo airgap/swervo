@@ -13,6 +13,7 @@ use html5ever::tokenizer::{
 use html5ever::{Attribute, LocalName, local_name};
 use js::jsapi::JSTracer;
 use markup5ever::TokenizerResult;
+use net_traits::blob_url_store::UrlWithBlobClaim;
 use net_traits::request::{
     CorsSettings, CredentialsMode, Destination, ParserMetadata, Referrer, RequestClient,
 };
@@ -27,8 +28,8 @@ use crate::dom::bindings::trace::{CustomTraceable, JSTraceable};
 use crate::dom::document::Document;
 use crate::dom::html::htmlscriptelement::{SCRIPT_JS_MIMES, script_fetch_request};
 use crate::dom::processingoptions::determine_cors_settings_for_token;
-use crate::fetch::create_a_potential_cors_request;
-use crate::script_module::ScriptFetchOptions;
+use crate::fetch::fetch::create_a_potential_cors_request;
+use crate::scripting::fetching_options::ScriptFetchOptions;
 
 #[derive(JSTraceable, MallocSizeOf)]
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
@@ -137,7 +138,7 @@ impl TokenSink for PrefetchSink {
                         .unwrap_or_default();
                     let request = script_fetch_request(
                         self.webview_id,
-                        url,
+                        UrlWithBlobClaim::from_url_without_having_claimed_blob(url),
                         cors_setting,
                         ScriptFetchOptions {
                             referrer_policy: self.referrer_policy,

@@ -293,7 +293,7 @@ void prepareUnix(Map opts = [:]) {
     if (opts.lint) {
         unix '''
             command -v taplo >/dev/null || cargo install taplo-cli --locked
-            cargo deny --version 2>/dev/null | grep -q '0.19.0' || cargo install cargo-deny --version 0.19.0 --locked
+            cargo deny --version 2>/dev/null | grep -q '0.20.2' || cargo install cargo-deny --version 0.20.2 --locked
         '''
     }
     unix "python3 jenkins/ci_setup.py --target ${target} --env-file .ci-env"

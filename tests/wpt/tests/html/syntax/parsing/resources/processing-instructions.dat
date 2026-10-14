@@ -1,22 +1,25 @@
 #data
 <body><?something>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?something?>
+|     <?something ?>
 
 #data
 <body><?something><span>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?something?>
+|     <?something ?>
 |     <span>
 
 #data
 <body><?something good>
+#errors
 #document
 | <html>
 |   <head>
@@ -25,6 +28,7 @@
 
 #data
 <body><?something else is good>
+#errors
 #document
 | <html>
 |   <head>
@@ -33,25 +37,28 @@
 
 #data
 <body><?one><?two>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?one?>
-|     <?two?>
+|     <?one ?>
+|     <?two ?>
 
 #data
 <body><?a$><?b$><?good?>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
 |     <!-- ?a$ -->
 |     <!-- ?b$ -->
-|     <?good?>
+|     <?good ?>
 
 #data
 <body><?hey there?>
+#errors
 #document
 | <html>
 |   <head>
@@ -60,6 +67,7 @@
 
 #data
 <body><?hey   there?>
+#errors
 #document
 | <html>
 |   <head>
@@ -68,6 +76,7 @@
 
 #data
 <body><?hey?there>
+#errors
 #document
 | <html>
 |   <head>
@@ -75,7 +84,8 @@
 |     <?hey ?there?>
 
 #data
-<body><?hey\tthere=1?>
+<body><?hey	there=1?>
+#errors
 #document
 | <html>
 |   <head>
@@ -83,7 +93,9 @@
 |     <?hey there=1?>
 
 #data
-<body><?hey\nthere=1?>
+<body><?hey
+there=1?>
+#errors
 #document
 | <html>
 |   <head>
@@ -91,7 +103,8 @@
 |     <?hey there=1?>
 
 #data
-<body><?hey\rthere=1?>
+<body><?heythere=1?>
+#errors
 #document
 | <html>
 |   <head>
@@ -99,7 +112,8 @@
 |     <?hey there=1?>
 
 #data
-<body><?hey\fthere=1?>
+<body><?heythere=1?>
+#errors
 #document
 | <html>
 |   <head>
@@ -108,6 +122,7 @@
 
 #data
 <body><?something ? >
+#errors
 #document
 | <html>
 |   <head>
@@ -116,6 +131,7 @@
 
 #data
 <body><?something x >
+#errors
 #document
 | <html>
 |   <head>
@@ -124,6 +140,7 @@
 
 #data
 <body><?something ?\t   ??>
+#errors
 #document
 | <html>
 |   <head>
@@ -132,6 +149,7 @@
 
 #data
 <body><?t d > ?>
+#errors
 #document
 | <html>
 |   <head>
@@ -141,14 +159,16 @@
 
 #data
 <body><?module-handler>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?module-handler?>
+|     <?module-handler ?>
 
 #data
 <body><?module-handler data>
+#errors
 #document
 | <html>
 |   <head>
@@ -157,14 +177,16 @@
 
 #data
 <body><?view-port>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?view-port?>
+|     <?view-port ?>
 
 #data
 <body><?view-port data>
+#errors
 #document
 | <html>
 |   <head>
@@ -173,14 +195,16 @@
 
 #data
 <body><?config-v2>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?config-v2?>
+|     <?config-v2 ?>
 
 #data
 <body><?config-v2 data>
+#errors
 #document
 | <html>
 |   <head>
@@ -189,14 +213,16 @@
 
 #data
 <body><?x>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?x?>
+|     <?x ?>
 
 #data
 <body><?x data>
+#errors
 #document
 | <html>
 |   <head>
@@ -205,14 +231,16 @@
 
 #data
 <body><?zz2op>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?zz2op?>
+|     <?zz2op ?>
 
 #data
 <body><?zz2op data>
+#errors
 #document
 | <html>
 |   <head>
@@ -221,14 +249,16 @@
 
 #data
 <body><?xla->
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?xla-?>
+|     <?xla- ?>
 
 #data
 <body><?xla- data>
+#errors
 #document
 | <html>
 |   <head>
@@ -237,14 +267,16 @@
 
 #data
 <body><?a-b-c>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?a-b-c?>
+|     <?a-b-c ?>
 
 #data
 <body><?a-b-c data>
+#errors
 #document
 | <html>
 |   <head>
@@ -253,14 +285,16 @@
 
 #data
 <body><?v-123>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?v-123?>
+|     <?v-123 ?>
 
 #data
 <body><?v-123 data>
+#errors
 #document
 | <html>
 |   <head>
@@ -269,14 +303,16 @@
 
 #data
 <body><?a0-b1-c2>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?a0-b1-c2?>
+|     <?a0-b1-c2 ?>
 
 #data
 <body><?a0-b1-c2 data>
+#errors
 #document
 | <html>
 |   <head>
@@ -285,14 +321,16 @@
 
 #data
 <body><?page-404>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?page-404?>
+|     <?page-404 ?>
 
 #data
 <body><?page-404 data>
+#errors
 #document
 | <html>
 |   <head>
@@ -301,14 +339,16 @@
 
 #data
 <body><?r2-d2>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?r2-d2?>
+|     <?r2-d2 ?>
 
 #data
 <body><?r2-d2 data>
+#errors
 #document
 | <html>
 |   <head>
@@ -317,14 +357,16 @@
 
 #data
 <body><?level-99>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?level-99?>
+|     <?level-99 ?>
 
 #data
 <body><?level-99 data>
+#errors
 #document
 | <html>
 |   <head>
@@ -333,14 +375,16 @@
 
 #data
 <body><?UPPERCASE>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?UPPERCASE?>
+|     <?UPPERCASE ?>
 
 #data
 <body><?UPPERCASE data>
+#errors
 #document
 | <html>
 |   <head>
@@ -349,14 +393,16 @@
 
 #data
 <body><?all-KINDS-of-CaSeS>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?all-KINDS-of-CaSeS?>
+|     <?all-KINDS-of-CaSeS ?>
 
 #data
 <body><?all-KINDS-of-CaSeS data>
+#errors
 #document
 | <html>
 |   <head>
@@ -365,14 +411,16 @@
 
 #data
 <body><?user_name>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?user_name?>
+|     <?user_name ?>
 
 #data
 <body><?user_name data>
+#errors
 #document
 | <html>
 |   <head>
@@ -381,14 +429,16 @@
 
 #data
 <body><?S_S-S_S>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?S_S-S_S?>
+|     <?S_S-S_S ?>
 
 #data
 <body><?S_S-S_S data>
+#errors
 #document
 | <html>
 |   <head>
@@ -397,14 +447,16 @@
 
 #data
 <body><?b_>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?b_?>
+|     <?b_ ?>
 
 #data
 <body><?b_ data>
+#errors
 #document
 | <html>
 |   <head>
@@ -413,14 +465,16 @@
 
 #data
 <body><?_prefix>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?_prefix?>
+|     <?_prefix ?>
 
 #data
 <body><?_prefix data>
+#errors
 #document
 | <html>
 |   <head>
@@ -429,14 +483,16 @@
 
 #data
 <body><?_x132>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?_x132?>
+|     <?_x132 ?>
 
 #data
 <body><?_x132 data>
+#errors
 #document
 | <html>
 |   <head>
@@ -445,14 +501,16 @@
 
 #data
 <body><?_-_>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?_-_?>
+|     <?_-_ ?>
 
 #data
 <body><?_-_ data>
+#errors
 #document
 | <html>
 |   <head>
@@ -461,14 +519,16 @@
 
 #data
 <body><?_>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?_?>
+|     <?_ ?>
 
 #data
 <body><?_ data>
+#errors
 #document
 | <html>
 |   <head>
@@ -477,14 +537,16 @@
 
 #data
 <body><?A---------------->
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?A----------------?>
+|     <?A---------------- ?>
 
 #data
 <body><?A---------------- data>
+#errors
 #document
 | <html>
 |   <head>
@@ -493,14 +555,16 @@
 
 #data
 <body><?z0123456789>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?z0123456789?>
+|     <?z0123456789 ?>
 
 #data
 <body><?z0123456789 data>
+#errors
 #document
 | <html>
 |   <head>
@@ -509,14 +573,16 @@
 
 #data
 <body><?m-0>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|     <?m-0?>
+|     <?m-0 ?>
 
 #data
 <body><?m-0 data>
+#errors
 #document
 | <html>
 |   <head>
@@ -525,6 +591,7 @@
 
 #data
 <body><?xml>
+#errors
 #document
 | <html>
 |   <head>
@@ -533,6 +600,7 @@
 
 #data
 <body><?xml-stylesheet>
+#errors
 #document
 | <html>
 |   <head>
@@ -541,6 +609,7 @@
 
 #data
 <body><?XML>
+#errors
 #document
 | <html>
 |   <head>
@@ -549,6 +618,7 @@
 
 #data
 <body><?XML-stylesheet>
+#errors
 #document
 | <html>
 |   <head>
@@ -557,6 +627,7 @@
 
 #data
 <body><?xML>
+#errors
 #document
 | <html>
 |   <head>
@@ -565,6 +636,7 @@
 
 #data
 <body><?xml-STYLesheet>
+#errors
 #document
 | <html>
 |   <head>
@@ -573,6 +645,7 @@
 
 #data
 <body><?1st-place>
+#errors
 #document
 | <html>
 |   <head>
@@ -581,6 +654,7 @@
 
 #data
 <body><?2-factor>
+#errors
 #document
 | <html>
 |   <head>
@@ -589,6 +663,7 @@
 
 #data
 <body><?99-problems>
+#errors
 #document
 | <html>
 |   <head>
@@ -596,7 +671,8 @@
 |     <!-- ?99-problems -->
 
 #data
-<body><?\u0665-star>
+<body><?٥-star>
+#errors
 #document
 | <html>
 |   <head>
@@ -605,6 +681,7 @@
 
 #data
 <body><?-prefix>
+#errors
 #document
 | <html>
 |   <head>
@@ -613,6 +690,7 @@
 
 #data
 <body><?--internal>
+#errors
 #document
 | <html>
 |   <head>
@@ -621,6 +699,7 @@
 
 #data
 <body><?-data->
+#errors
 #document
 | <html>
 |   <head>
@@ -629,6 +708,7 @@
 
 #data
 <body><?-100>
+#errors
 #document
 | <html>
 |   <head>
@@ -636,7 +716,8 @@
 |     <!-- ?-100 -->
 
 #data
-<body><?\u00B7middle-dot>
+<body><?·middle-dot>
+#errors
 #document
 | <html>
 |   <head>
@@ -644,7 +725,8 @@
 |     <!-- ?·middle-dot -->
 
 #data
-<body><?\u0375greek-numeral>
+<body><?͵greek-numeral>
+#errors
 #document
 | <html>
 |   <head>
@@ -652,7 +734,8 @@
 |     <!-- ?͵greek-numeral -->
 
 #data
-<body><?\u0301accent-start>
+<body><?́accent-start>
+#errors
 #document
 | <html>
 |   <head>
@@ -661,6 +744,7 @@
 
 #data
 <body><?price$value>
+#errors
 #document
 | <html>
 |   <head>
@@ -669,6 +753,7 @@
 
 #data
 <body><?user@domain>
+#errors
 #document
 | <html>
 |   <head>
@@ -677,6 +762,7 @@
 
 #data
 <body><?tag#id>
+#errors
 #document
 | <html>
 |   <head>
@@ -685,6 +771,7 @@
 
 #data
 <body><?a+b>
+#errors
 #document
 | <html>
 |   <head>
@@ -693,6 +780,7 @@
 
 #data
 <body><?100%>
+#errors
 #document
 | <html>
 |   <head>
@@ -701,6 +789,7 @@
 
 #data
 <body><?data.v1>
+#errors
 #document
 | <html>
 |   <head>
@@ -709,6 +798,7 @@
 
 #data
 <body><?namespace:tag>
+#errors
 #document
 | <html>
 |   <head>
@@ -717,6 +807,7 @@
 
 #data
 <body><?error!code>
+#errors
 #document
 | <html>
 |   <head>
@@ -725,6 +816,7 @@
 
 #data
 <body><?x=y>
+#errors
 #document
 | <html>
 |   <head>
@@ -733,6 +825,7 @@
 
 #data
 <body><?a<b>
+#errors
 #document
 | <html>
 |   <head>
@@ -741,6 +834,7 @@
 
 #data
 <body><?true&false>
+#errors
 #document
 | <html>
 |   <head>
@@ -749,6 +843,7 @@
 
 #data
 <body><?not|or>
+#errors
 #document
 | <html>
 |   <head>
@@ -757,6 +852,7 @@
 
 #data
 <body><?lit$123456789>
+#errors
 #document
 | <html>
 |   <head>
@@ -765,6 +861,7 @@
 
 #data
 <body><?lit$$4x>
+#errors
 #document
 | <html>
 |   <head>
@@ -772,7 +869,8 @@
 |     <!-- ?lit$$4x -->
 
 #data
-<body><?\uD83D\uDE80-launch>
+<body><?🚀-launch>
+#errors
 #document
 | <html>
 |   <head>
@@ -780,7 +878,8 @@
 |     <!-- ?🚀-launch -->
 
 #data
-<body><?error-\u26A0\uFE0F>
+<body><?error-⚠️>
+#errors
 #document
 | <html>
 |   <head>
@@ -788,7 +887,8 @@
 |     <!-- ?error-⚠️ -->
 
 #data
-<body><?fire-\uD83D\uDD25>
+<body><?fire-🔥>
+#errors
 #document
 | <html>
 |   <head>
@@ -796,7 +896,8 @@
 |     <!-- ?fire-🔥 -->
 
 #data
-<body><?v1-\u2705>
+<body><?v1-✅>
+#errors
 #document
 | <html>
 |   <head>
@@ -805,6 +906,7 @@
 
 #data
 <body><?start
+#errors
 #document
 | <html>
 |   <head>
@@ -812,6 +914,7 @@
 
 #data
 <body><?start?
+#errors
 #document
 | <html>
 |   <head>
@@ -819,6 +922,7 @@
 
 #data
 <body><?start 
+#errors
 #document
 | <html>
 |   <head>
@@ -826,6 +930,7 @@
 
 #data
 <body><?start data
+#errors
 #document
 | <html>
 |   <head>
@@ -833,6 +938,7 @@
 
 #data
 <body><?start ? ?
+#errors
 #document
 | <html>
 |   <head>
@@ -840,6 +946,7 @@
 
 #data
 <body><?
+#errors
 #document
 | <html>
 |   <head>
@@ -847,6 +954,7 @@
 
 #data
 <body><? 
+#errors
 #document
 | <html>
 |   <head>
@@ -855,15 +963,17 @@
 
 #data
 <div><?something></div>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
 |     <div>
-|       <?something?>
+|       <?something ?>
 
 #data
 <div><?something good></div>
+#errors
 #document
 | <html>
 |   <head>
@@ -873,15 +983,17 @@
 
 #data
 <table><?something></table>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
 |     <table>
-|       <?something?>
+|       <?something ?>
 
 #data
 <table><tr><?something></tr></table>
+#errors
 #document
 | <html>
 |   <head>
@@ -889,10 +1001,11 @@
 |     <table>
 |       <tbody>
 |         <tr>
-|           <?something?>
+|           <?something ?>
 
 #data
 <script><?something></script>
+#errors
 #document
 | <html>
 |   <head>
@@ -902,6 +1015,7 @@
 
 #data
 <style><?something></style>
+#errors
 #document
 | <html>
 |   <head>
@@ -911,64 +1025,72 @@
 
 #data
 <?something>
+#errors
 #document
-| <?something?>
+| <?something ?>
 | <html>
 |   <head>
 |   <body>
 
 #data
 <head><?something>
+#errors
 #document
 | <html>
 |   <head>
-|     <?something?>
+|     <?something ?>
 |   <body>
 
 #data
 <html><?something><head>
+#errors
 #document
 | <html>
-|   <?something?>
+|   <?something ?>
 |   <head>
 |   <body>
 
 #data
 <html><head></head><?something><body>
+#errors
 #document
 | <html>
 |   <head>
-|   <?something?>
+|   <?something ?>
 |   <body>
 
 #data
 <html><body></body><?something>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-|   <?something?>
+|   <?something ?>
 
 #data
 <html><body></body></html><?something>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
-| <?something?>
+| <?something ?>
 
 #data
 <body><template><?something></template>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
 |     <template>
 |       content
-|         <?something?>
+|         <?something ?>
 
 #data
 <body><textarea><?something></textarea>
+#errors
 #document
 | <html>
 |   <head>
@@ -978,10 +1100,33 @@
 
 #data
 <body><title><?something></title>
+#errors
 #document
 | <html>
 |   <head>
 |   <body>
 |     <title>
 |       "<?something>"
+
+#data
+<noscript><?pi>
+#errors
+#script-off
+#document
+| <html>
+|   <head>
+|     <noscript>
+|       <?pi ?>
+|   <body>
+
+#data
+<template><?pi>
+#errors
+#document
+| <html>
+|   <head>
+|     <template>
+|       content
+|         <?pi ?>
+|   <body>
 

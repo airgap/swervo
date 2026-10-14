@@ -4,6 +4,7 @@
 
 use std::collections::HashSet;
 
+use bytes::Bytes;
 use dom_struct::dom_struct;
 use html5ever::{LocalName, Prefix, local_name};
 use js::context::JSContext;
@@ -13,7 +14,6 @@ use net_traits::{FetchMetadata, NetworkError, ResourceFetchTiming};
 use script_traits::DocumentActivity;
 use servo_url::ServoUrl;
 
-use crate::document_loader::DocumentLoader;
 use crate::dom::bindings::codegen::Bindings::DocumentBinding::DocumentReadyState;
 use crate::dom::bindings::codegen::Bindings::SVGUseElementBinding::SVGUseElementMethods;
 use crate::dom::bindings::inheritance::Castable;
@@ -22,17 +22,19 @@ use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::csp::{GlobalCspReporting, Violation};
-use crate::dom::document::{Document, DocumentSource, HasBrowsingContext, IsHTMLDocument};
+use crate::dom::document::{Document, HasBrowsingContext, IsHTMLDocument};
 use crate::dom::element::Element;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::node::Node;
+use crate::dom::node::virtualmethods::VirtualMethods;
 use crate::dom::performance::performanceresourcetiming::InitiatorType;
 use crate::dom::servoparser::ServoParser;
 use crate::dom::svg::svganimatedstring::SVGAnimatedString;
 use crate::dom::svg::svggraphicselement::SVGGraphicsElement;
 use crate::dom::svg::svgsvgelement::SVGSVGElement;
-use crate::fetch::RequestWithGlobalScope;
-use crate::network_listener::{self, FetchResponseListener, ResourceTimingListener};
+use crate::event_loop::document_loader::DocumentLoader;
+use crate::fetch::fetch::RequestWithGlobalScope;
+use crate::fetch::network_listener::{self, FetchResponseListener, ResourceTimingListener};
 use crate::url::ensure_blob_referenced_by_url_is_kept_alive;
 
 #[dom_struct]
@@ -66,6 +68,12 @@ impl SVGUseElement {
             document,
             proto,
         )
+    }
+}
+
+impl VirtualMethods for SVGUseElement {
+    fn super_type(&self) -> Option<&dyn VirtualMethods> {
+        Some(self.upcast::<SVGGraphicsElement>() as &dyn VirtualMethods)
     }
 }
 
@@ -138,11 +146,9 @@ impl ExternalSvgDocumentFetchContext {
             ),
             None,
             DocumentActivity::Inactive,
-            DocumentSource::FromParser,
             DocumentLoader::new(&owner.loader()),
             None,
             None,
-            Default::default(),
             false,
             false,
             Some(owner.insecure_requests_policy()),
@@ -154,7 +160,7 @@ impl ExternalSvgDocumentFetchContext {
         );
         let source = DOMString::from(String::from_utf8_lossy(&self.body).into_owned());
         ServoParser::parse_xml_document(cx, &resource, Some(source), self.url.clone(), None);
-        resource.set_ready_state(cx, DocumentReadyState::Complete);
+        resource.update_the_current_document_readiness(cx, DocumentReadyState::Complete);
         resource
     }
 }
@@ -177,7 +183,7 @@ impl FetchResponseListener for ExternalSvgDocumentFetchContext {
         });
     }
 
-    fn process_response_chunk(&mut self, _: &mut JSContext, _: RequestId, chunk: Vec<u8>) {
+    fn process_response_chunk(&mut self, _: &mut JSContext, _: RequestId, chunk: Bytes) {
         if self.ok {
             self.body.extend_from_slice(&chunk);
         }
@@ -193,7 +199,7 @@ impl FetchResponseListener for ExternalSvgDocumentFetchContext {
         network_listener::submit_timing(cx, &self, &response, &timing);
         let owner = self.document.root();
         let resource = (self.ok && response.is_ok()).then(|| self.parse(cx, &owner));
-        owner.finish_external_svg_document(self.url, resource);
+        owner.finish_external_svg_document(cx.no_gc(), self.url, resource);
     }
 
     fn process_csp_violations(

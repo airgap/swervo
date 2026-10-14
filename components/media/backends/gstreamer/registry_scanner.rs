@@ -32,14 +32,11 @@ impl GStreamerRegistryScanner {
     }
 
     fn is_codec_supported(&self, codec: &str) -> bool {
-        // Entries ending in '*' are prefixes (e.g. "avc*" matches "avc1.42E01E", "mp4a*" matches
-        // "mp4a.40.2"); everything else matches exactly. The plain `contains` check made the
-        // wildcard entries unreachable, so h264/aac/av1 codec strings never matched.
         self.supported_codecs
             .iter()
-            .any(|supported| match supported.strip_suffix('*') {
+            .any(|entry| match entry.strip_suffix('*') {
                 Some(prefix) => codec.starts_with(prefix),
-                None => *supported == codec,
+                None => codec == *entry,
             })
     }
 

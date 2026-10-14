@@ -8,7 +8,7 @@ use js::jsapi::Heap;
 use js::jsval::{JSVal, NullValue};
 use js::rust::{HandleObject, MutableHandleValue};
 use script_bindings::codegen::GenericBindings::PerformanceBinding::PerformanceMarkOptions;
-use script_bindings::reflector::reflect_dom_object_with_proto_and_cx;
+use script_bindings::reflector::reflect_dom_object_with_proto;
 use servo_base::cross_process_instant::CrossProcessInstant;
 use time::Duration;
 
@@ -16,10 +16,9 @@ use crate::dom::PERFORMANCE_TIMING_ATTRIBUTES;
 use crate::dom::bindings::codegen::Bindings::PerformanceMarkBinding::PerformanceMarkMethods;
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::root::DomRoot;
+use crate::dom::bindings::root::{AsHandleValue, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::bindings::structuredclone;
-use crate::dom::bindings::trace::RootedTraceableBox;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::performance::performanceentry::{EntryType, PerformanceEntry};
 use crate::dom::window::Window;
@@ -60,11 +59,11 @@ impl PerformanceMark {
         start_time: CrossProcessInstant,
         duration: Duration,
     ) -> DomRoot<PerformanceMark> {
-        reflect_dom_object_with_proto_and_cx(
+        reflect_dom_object_with_proto(
+            cx,
             Box::new(PerformanceMark::new_inherited(name, start_time, duration)),
             global,
             proto,
-            cx,
         )
     }
 }
@@ -81,7 +80,7 @@ impl PerformanceMarkMethods<crate::DomTypeHolder> for PerformanceMark {
         global: &GlobalScope,
         proto: Option<HandleObject>,
         mark_name: DOMString,
-        mark_options: RootedTraceableBox<PerformanceMarkOptions>,
+        mark_options: &PerformanceMarkOptions,
     ) -> Fallible<DomRoot<PerformanceMark>> {
         // The PerformanceMark constructor must run the following steps:
         // Step 1. If the current global object is a Window object and markName uses the same name
@@ -103,7 +102,7 @@ impl PerformanceMarkMethods<crate::DomTypeHolder> for PerformanceMark {
                     return Err(Error::Type(c"startTime must not be negative".to_owned()));
                 }
                 // Step 5.1.2. Otherwise, set entry’s startTime to the value of markOptions’s startTime.
-                global.performance().time_origin() +
+                global.performance(cx).time_origin() +
                     Duration::microseconds(start_time.mul_add(1000.0, 0.0) as i64)
             },
             // Step 5.2. Otherwise, set it to the value that would be returned by the Performance object’s now() method.
@@ -126,7 +125,7 @@ impl PerformanceMarkMethods<crate::DomTypeHolder> for PerformanceMark {
         // Step 8 Otherwise:
         if !mark_options.detail.get().is_null_or_undefined() {
             // Step 8.1. Let record be the result of calling the StructuredSerialize algorithm on markOptions’s detail.
-            let record = structuredclone::write(cx, mark_options.detail.handle(), None)?;
+            let record = structuredclone::write(cx, mark_options.detail.as_handle_value(), None)?;
 
             // Step 8.2. Set entry’s detail to the result of calling the StructuredDeserialize algorithm on record and the current realm.
             structuredclone::read(cx, global, record, detail.handle_mut())?;

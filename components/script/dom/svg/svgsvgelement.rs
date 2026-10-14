@@ -4,11 +4,12 @@
 
 use std::collections::HashSet;
 
+use atomic_refcell::AtomicRefCell;
 use base64::Engine as _;
-use cssparser::{Parser, ParserInput};
+use cssparser::Parser;
 use dom_struct::dom_struct;
 use html5ever::{LocalName, Prefix, QualName, local_name, ns};
-use js::context::JSContext;
+use js::context::{JSContext, NoGC};
 use js::rust::HandleObject;
 use layout_api::{SVG_PAINT_PROPERTIES, SVGElementData, parse_view_box, svg_paint_signature};
 use net_traits::image_cache::Image;
@@ -50,15 +51,17 @@ use crate::dom::text::Text;
 #[dom_struct]
 pub(crate) struct SVGSVGElement {
     svggraphicselement: SVGGraphicsElement,
-    uuid: String,
+    #[no_trace]
+    uuid: Uuid,
     // The XML source of subtree rooted at this SVG element, serialized into
     // a base64 encoded `data:` url. This is cached to avoid recomputation
     // on each layout and must be invalidated when the subtree changes.
     #[no_trace]
-    cached_serialized_data_url: DomRefCell<Option<Result<ServoUrl, ()>>>,
+    cached_serialized_data_url: AtomicRefCell<Option<Result<ServoUrl, ()>>>,
     /// The `svg_paint_signature` of this element's style that the cached serialization was
     /// built with; layout re-requests serialization when the current style no longer matches.
-    cached_paint_signature: DomRefCell<Option<String>>,
+    #[no_trace]
+    cached_paint_signature: AtomicRefCell<Option<String>>,
     /// The IDs the cached serialization looked up in the document to inline targets defined
     /// outside this subtree, found or not; registered with the document so that the
     /// serialization is invalidated when any of them appears, disappears or changes.
@@ -77,7 +80,7 @@ impl SVGSVGElement {
     ) -> SVGSVGElement {
         SVGSVGElement {
             svggraphicselement: SVGGraphicsElement::new_inherited(local_name, prefix, document),
-            uuid: Uuid::new_v4().to_string(),
+            uuid: Uuid::new_v4(),
             cached_serialized_data_url: Default::default(),
             cached_paint_signature: Default::default(),
             referenced_ids: Default::default(),
@@ -127,9 +130,10 @@ impl SVGSVGElement {
         cloned_nodes.extend(self.process_foreign_objects(cx));
         cloned_nodes.extend(self.process_external_references(cx, &mut referenced_ids));
 
+        let no_gc = cx.no_gc();
         let rewrite_attributes =
             |element: &Element, attributes: &mut Vec<(QualName, AttrValue)>| {
-                self.rewrite_serialized_attributes(element, attributes, &href_rewrites)
+                self.rewrite_serialized_attributes(no_gc, element, attributes, &href_rewrites)
             };
         let serialize_result = self
             .upcast::<Node>()
@@ -356,9 +360,12 @@ impl SVGSVGElement {
                 if let Some(style) = element.style_from_last_restyle() {
                     let inherited_svg = style.get_inherited_svg();
                     referenced_ids.extend(
-                        [inherited_svg.clone_fill(), inherited_svg.clone_stroke()]
-                            .iter()
-                            .filter_map(paint_server_id),
+                        [
+                            inherited_svg.slow_clone_fill(),
+                            inherited_svg.slow_clone_stroke(),
+                        ]
+                        .iter()
+                        .filter_map(paint_server_id),
                     );
                 }
                 // A gradient or pattern takes its unspecified attributes and its stops or
@@ -604,7 +611,7 @@ impl SVGSVGElement {
                 );
                 ServoUrl::parse(&data_url).ok()
             })();
-            svg_element.set_native_mask_document(mask_document_url);
+            svg_element.set_native_mask_document(cx.no_gc(), mask_document_url);
         }
     }
 
@@ -674,7 +681,6 @@ impl SVGSVGElement {
                     cx,
                     QualName::new(None, ns!(), attr_name),
                     value,
-                    None,
                 );
             }
         }
@@ -684,13 +690,11 @@ impl SVGSVGElement {
             cx,
             QualName::new(None, ns!(), LocalName::from("preserveAspectRatio")),
             DOMString::from("none"),
-            None,
         );
         image_svg_element.set_attribute_from_parser(
             cx,
             QualName::new(None, ns!(), LocalName::from("href")),
             DOMString::from(data_url),
-            None,
         );
 
         // Insert in the foreignObject's paint-order slot (the foreignObject itself renders
@@ -720,6 +724,7 @@ impl SVGSVGElement {
     /// Adjust `element`'s attributes for the standalone serialization the rasterizer reads.
     fn rewrite_serialized_attributes(
         &self,
+        no_gc: &NoGC,
         element: &Element,
         attributes: &mut Vec<(QualName, AttrValue)>,
         href_rewrites: &HrefRewrites,
@@ -809,7 +814,7 @@ impl SVGSVGElement {
             }
         }
 
-        let Some(declarations) = self.paint_declarations(element) else {
+        let Some(declarations) = self.paint_declarations(no_gc, element) else {
             return;
         };
         let style_name = QualName::new(None, ns!(), local_name!("style"));
@@ -849,18 +854,19 @@ impl SVGSVGElement {
     /// no ancestors. Unstyled elements (inside `display: none` subtrees, clones made for
     /// serialization) inherit from the serialized parent like the cascade would, with the
     /// custom properties in their `var()` presentation attributes substituted.
-    fn paint_declarations(&self, element: &Element) -> Option<String> {
+    fn paint_declarations(&self, no_gc: &NoGC, element: &Element) -> Option<String> {
         let style = element.style_from_last_restyle();
         let parent_style = element
             .upcast::<Node>()
-            .parent_in_flat_tree()
-            .and_then(DomRoot::downcast::<Element>)
+            .parent_in_flat_tree(no_gc)
+            .into_parent()
+            .and_then(|parent| parent.downcast::<Element>().map(DomRoot::from_ref))
             .and_then(|parent| parent.style_from_last_restyle());
         let custom_property_style = style.clone().or_else(|| {
             element
                 .upcast::<Node>()
-                .inclusive_ancestors_in_flat_tree()
-                .filter_map(DomRoot::downcast::<Element>)
+                .inclusive_ancestors_in_flat_tree_unrooted(no_gc)
+                .filter_map(|ancestor| ancestor.downcast::<Element>().map(DomRoot::from_ref))
                 .find_map(|ancestor| ancestor.style_from_last_restyle())
         });
         let is_root = std::ptr::eq(element, self.upcast::<Element>());
@@ -925,15 +931,14 @@ impl SVGSVGElement {
             None,
             /* attr_taint = */ Default::default(),
         );
-        let mut input = ParserInput::new(text);
-        let mut parser = Parser::new(&mut input);
+        let mut parser = Parser::new(text);
         let color = parser.parse_entirely(|parser| SpecifiedColor::parse(&context, parser));
         match color
             .ok()
             .and_then(|color| color.to_computed_color(None).ok())
         {
             Some(color) => {
-                rasterizer_paint_color(&color, &style.get_inherited_text().clone_color())
+                rasterizer_paint_color(&color, &style.get_inherited_text().slow_clone_color())
             },
             None => text.to_owned(),
         }
@@ -954,11 +959,14 @@ impl SVGSVGElement {
         }
     }
 
-    pub(crate) fn invalidate_cached_serialized_subtree_and_rasterization_result(&self) {
+    pub(crate) fn invalidate_cached_serialized_subtree_and_rasterization_result(
+        &self,
+        no_gc: &NoGC,
+    ) {
         self.evict_cached_images();
         *self.cached_serialized_data_url.borrow_mut() = None;
         *self.cached_paint_signature.borrow_mut() = None;
-        self.upcast::<Node>().dirty(NodeDamage::Other);
+        self.upcast::<Node>().dirty(no_gc, NodeDamage::Other);
     }
 }
 
@@ -1065,21 +1073,22 @@ fn serialize_reference_closure(cx: &mut JSContext, subtree: &Node) -> String {
 /// `currentcolor` keeps the `currentColor` spelling resvg requires, so it keeps tracking `color`,
 /// and paint-server urls become in-document `url(#id)` references.
 fn rasterizer_value(style: &ComputedValues, property: LonghandId) -> String {
-    let current_color = style.get_inherited_text().clone_color();
+    let current_color = style.get_inherited_text().slow_clone_color();
     match property {
         LonghandId::Color => rasterizer_color(&current_color),
         LonghandId::StopColor => rasterizer_color(
             &style
                 .get_svg()
-                .clone_stop_color()
+                .slow_clone_stop_color()
                 .resolve_to_absolute(&current_color),
         ),
         LonghandId::Fill => {
-            rasterizer_paint(&style.get_inherited_svg().clone_fill(), &current_color)
+            rasterizer_paint(&style.get_inherited_svg().slow_clone_fill(), &current_color)
         },
-        LonghandId::Stroke => {
-            rasterizer_paint(&style.get_inherited_svg().clone_stroke(), &current_color)
-        },
+        LonghandId::Stroke => rasterizer_paint(
+            &style.get_inherited_svg().slow_clone_stroke(),
+            &current_color,
+        ),
         _ => {
             let mut value = String::new();
             style
@@ -1195,26 +1204,19 @@ fn parse_url_fragment_reference(value: &str) -> Option<String> {
 }
 
 impl<'dom> LayoutDom<'dom, SVGSVGElement> {
-    #[expect(unsafe_code)]
     pub(crate) fn data(self) -> SVGElementData<'dom> {
-        let svg_id = self.unsafe_get().uuid.clone();
+        let svg_id = self.unsafe_get().uuid;
         let element = self.upcast::<Element>();
         let width = element.get_attr_for_layout(&ns!(), &local_name!("width"));
         let height = element.get_attr_for_layout(&ns!(), &local_name!("height"));
         let view_box = element.get_attr_for_layout(&ns!(), &local_name!("viewBox"));
         SVGElementData {
-            source: unsafe {
-                self.unsafe_get()
-                    .cached_serialized_data_url
-                    .borrow_for_layout()
-                    .clone()
-            },
-            source_paint_signature: unsafe {
-                self.unsafe_get()
-                    .cached_paint_signature
-                    .borrow_for_layout()
-                    .clone()
-            },
+            source: self
+                .unsafe_get()
+                .cached_serialized_data_url
+                .borrow()
+                .clone(),
+            source_paint_signature: self.unsafe_get().cached_paint_signature.borrow().clone(),
             width,
             height,
             view_box,
@@ -1238,7 +1240,7 @@ impl VirtualMethods for SVGSVGElement {
             .unwrap()
             .attribute_mutated(cx, attr, mutation);
 
-        self.invalidate_cached_serialized_subtree_and_rasterization_result();
+        self.invalidate_cached_serialized_subtree_and_rasterization_result(cx.no_gc());
     }
 
     fn attribute_affects_presentational_hints(&self, attr: AttrRef<'_>) -> bool {
@@ -1255,8 +1257,7 @@ impl VirtualMethods for SVGSVGElement {
         match *name {
             local_name!("width") | local_name!("height") => {
                 let value = &value.str();
-                let parser_input = &mut ParserInput::new(value);
-                let parser = &mut Parser::new(parser_input);
+                let parser = &mut Parser::new(value);
                 let doc = self.owner_document();
                 let url = doc.url().into_url().into();
                 let context = ParserContext::new(
@@ -1289,7 +1290,7 @@ impl VirtualMethods for SVGSVGElement {
             super_type.children_changed(cx, mutation);
         }
 
-        self.invalidate_cached_serialized_subtree_and_rasterization_result();
+        self.invalidate_cached_serialized_subtree_and_rasterization_result(cx.no_gc());
     }
 
     fn unbind_from_tree(&self, cx: &mut js::context::JSContext, context: &UnbindContext<'_>) {
@@ -1299,6 +1300,6 @@ impl VirtualMethods for SVGSVGElement {
 
         self.unregister_referenced_ids();
 
-        self.invalidate_cached_serialized_subtree_and_rasterization_result();
+        self.invalidate_cached_serialized_subtree_and_rasterization_result(cx.no_gc());
     }
 }

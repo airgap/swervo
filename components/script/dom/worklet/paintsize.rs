@@ -4,6 +4,7 @@
 
 use dom_struct::dom_struct;
 use euclid::Size2D;
+use js::context::JSContext;
 use script_bindings::reflector::{Reflector, reflect_dom_object};
 use style_traits::CSSPixel;
 
@@ -11,7 +12,6 @@ use crate::dom::bindings::codegen::Bindings::PaintSizeBinding::PaintSizeMethods;
 use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::paintworkletglobalscope::PaintWorkletGlobalScope;
-use crate::script_runtime::CanGc;
 
 #[dom_struct]
 pub(crate) struct PaintSize {
@@ -30,11 +30,11 @@ impl PaintSize {
     }
 
     pub(crate) fn new(
+        cx: &mut JSContext,
         global: &PaintWorkletGlobalScope,
         size: Size2D<f32, CSSPixel>,
-        can_gc: CanGc,
     ) -> DomRoot<PaintSize> {
-        reflect_dom_object(Box::new(PaintSize::new_inherited(size)), global, can_gc)
+        reflect_dom_object(cx, Box::new(PaintSize::new_inherited(size)), global)
     }
 }
 

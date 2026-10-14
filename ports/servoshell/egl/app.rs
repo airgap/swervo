@@ -23,7 +23,9 @@ use url::Url;
 use crate::egl::host_trait::HostTrait;
 use crate::prefs::ServoShellPreferences;
 use crate::running_app_state::{RunningAppState, UserInterfaceCommand};
-use crate::window::{PlatformWindow, ServoShellWindow, ServoShellWindowId};
+use crate::window::{
+    PlatformWindow, ServoShellWindow, ServoShellWindowId, TopLevelWebViewCreationRequest,
+};
 
 pub(crate) struct EmbeddedPlatformWindow {
     host: Rc<dyn HostTrait>,
@@ -128,31 +130,33 @@ impl PlatformWindow for EmbeddedPlatformWindow {
         let load_status_changed = Some(new_load_status) != self.current_load_status.get();
         if load_status_changed {
             self.host.notify_load_status_changed(new_load_status);
-
-            #[cfg(all(feature = "tracing", feature = "tracing-hitrace"))]
-            if new_load_status == LoadStatus::Complete {
-                let (callback, receiver) =
-                    servo_base::generic_channel::GenericCallback::new_blocking()
-                        .expect("Could not create channel");
-                state.servo().create_memory_report(callback);
-                std::thread::spawn(move || {
-                    let result = receiver.recv().expect("Could not get memory report");
-                    let reports = result
-                        .results
-                        .first()
-                        .expect("We should have some memory report");
-                    let search_string = String::from("resident-according-to-smaps");
-                    let sum = reports
-                        .reports
-                        .iter()
-                        .filter(|report| report.path.contains(&search_string))
-                        .map(|report| report.size)
-                        .sum::<usize>();
-                    hitrace::trace_metric_str(
-                        "servo_memory_profiling:resident-according-to-smaps/sum",
-                        sum as i64,
-                    );
-                });
+            if state.servoshell_preferences.memory_output && new_load_status == LoadStatus::Complete
+            {
+                #[cfg(all(feature = "tracing", feature = "tracing-hitrace"))]
+                {
+                    let (callback, receiver) =
+                        servo_base::generic_channel::GenericCallback::new_blocking()
+                            .expect("Could not create channel");
+                    state.servo().create_memory_report(callback);
+                    std::thread::spawn(move || {
+                        let result = receiver.recv().expect("Could not get memory report");
+                        let reports = result
+                            .results
+                            .first()
+                            .expect("We should have some memory report");
+                        let search_string = String::from("resident-according-to-smaps");
+                        let sum = reports
+                            .reports
+                            .iter()
+                            .filter(|report| report.path.contains(&search_string))
+                            .map(|report| report.size)
+                            .sum::<usize>();
+                        hitrace::trace_metric_str(
+                            "servo_memory_profiling:resident-according-to-smaps/sum",
+                            sum as i64,
+                        );
+                    });
+                }
             }
         }
 
@@ -310,10 +314,9 @@ impl App {
             .opts(init.opts)
             .preferences(init.preferences.clone())
             .event_loop_waker(init.event_loop_waker.clone());
-        #[cfg(feature = "webxr")]
-        let servo_builder = servo_builder
-            .webxr_registry(Box::new(XrDiscoveryWebXrRegistry::new(init.xr_discovery)));
         let servo = servo_builder.build();
+        #[cfg(feature = "webxr")]
+        servo.register_webxr_registry(Box::new(XrDiscoveryWebXrRegistry::new(init.xr_discovery)));
 
         let initial_url = init.initial_url.and_then(|string| Url::parse(&string).ok());
         let initial_url = initial_url
@@ -371,8 +374,10 @@ impl App {
             current_can_go_forward: Default::default(),
             current_load_status: Default::default(),
         });
-        self.state
-            .open_window(platform_window, self.initial_url.clone());
+        self.state.open_window(
+            platform_window,
+            TopLevelWebViewCreationRequest::WithUrl(self.initial_url.clone()),
+        );
     }
 
     pub(crate) fn servo(&self) -> &Servo {
@@ -398,8 +403,10 @@ impl App {
     }
 
     pub(crate) fn create_and_activate_toplevel_webview(self: &Rc<Self>, url: Url) -> WebView {
-        self.window()
-            .create_and_activate_toplevel_webview(self.state.clone(), url)
+        self.window().create_and_activate_toplevel_webview(
+            self.state.clone(),
+            TopLevelWebViewCreationRequest::WithUrl(url),
+        )
     }
 
     /// The active webview will be immediately valid via `active_or_newest_webview()`
@@ -614,6 +621,13 @@ impl App {
         }
     }
 
+    pub fn key_event(&self, event: keyboard_types::KeyboardEvent) {
+        if let Some(webview) = self.active_or_newest_webview() {
+            webview.notify_input_event(InputEvent::Keyboard(KeyboardEvent::new(event)));
+            self.spin_event_loop();
+        }
+    }
+
     pub fn ime_insert_text(&self, text: String) {
         // In OHOS, we get empty text after the intended text.
         if text.is_empty() {
@@ -646,18 +660,12 @@ impl App {
         }
     }
 
-    pub fn set_throttled(&self, throttled: bool) {
-        if let Some(webview) = self.active_or_newest_webview() {
-            webview.set_throttled(throttled);
-            self.spin_event_loop();
-        }
-    }
-
     pub fn ime_dismissed(&self) {
         if let Some(webview) = self.active_or_newest_webview() {
             webview.notify_input_event(InputEvent::Ime(ImeEvent::Dismissed));
-            self.spin_event_loop();
         }
+        self.host.on_ime_hide();
+        self.spin_event_loop();
     }
 
     pub fn notify_vsync(&self) {

@@ -5,4 +5,10 @@
 // https://svgwg.org/svg2-draft/pservers.html#InterfaceSVGRadialGradientElement
 [Exposed=Window]
 interface SVGRadialGradientElement : SVGGradientElement {
+  //[SameObject] readonly attribute SVGAnimatedLength cx;
+  //[SameObject] readonly attribute SVGAnimatedLength cy;
+  //[SameObject] readonly attribute SVGAnimatedLength r;
+  //[SameObject] readonly attribute SVGAnimatedLength fx;
+  //[SameObject] readonly attribute SVGAnimatedLength fy;
+  //[SameObject] readonly attribute SVGAnimatedLength fr;
 };

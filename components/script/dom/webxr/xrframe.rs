@@ -8,7 +8,7 @@ use dom_struct::dom_struct;
 use js::context::JSContext;
 use js::gc::CustomAutoRooterGuard;
 use js::typedarray::Float32Array;
-use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
+use script_bindings::reflector::{Reflector, reflect_dom_object};
 use webxr_api::{Frame, LayerId, SubImages};
 
 use crate::dom::bindings::codegen::Bindings::XRFrameBinding::XRFrameMethods;
@@ -55,7 +55,7 @@ impl XRFrame {
         session: &XRSession,
         data: Frame,
     ) -> DomRoot<XRFrame> {
-        reflect_dom_object_with_cx(Box::new(XRFrame::new_inherited(session, data)), window, cx)
+        reflect_dom_object(cx, Box::new(XRFrame::new_inherited(session, data)), window)
     }
 
     /// <https://immersive-web.github.io/webxr/#xrframe-active>
@@ -224,7 +224,7 @@ impl XRFrameMethods<crate::DomTypeHolder> for XRFrame {
             ));
         }
 
-        let mut radii_vec = radii.to_vec();
+        let mut radii_vec = radii.to_vec().unwrap_or_default();
         let mut all_valid = true;
         radii_vec.iter_mut().enumerate().for_each(|(i, radius)| {
             if let Some(joint_frame) = joint_spaces
@@ -273,7 +273,7 @@ impl XRFrameMethods<crate::DomTypeHolder> for XRFrame {
             ));
         }
 
-        let mut transforms_vec = transforms.to_vec();
+        let mut transforms_vec = transforms.to_vec().unwrap_or_default();
         let mut all_valid = true;
         spaces.iter().enumerate().for_each(|(i, space)| {
             let Some(joint_pose) = self.get_pose(space) else {

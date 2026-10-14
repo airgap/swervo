@@ -3,34 +3,35 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::borrow::Cow;
-use std::char::{ToLowercase, ToUppercase};
+use std::cell::LazyCell;
 use std::ops::Range;
+use std::sync::{Arc, OnceLock};
 
-use icu_properties::BidiClass;
-use icu_segmenter::WordSegmenter;
-use layout_api::{LayoutElement, LayoutNode, SharedSelection};
-use style::computed_values::_webkit_text_security::T as WebKitTextSecurity;
+use atomic_refcell::AtomicRefCell;
+use icu_properties::CodePointMapData;
+use icu_properties::props::BidiClass;
+use layout_api::LayoutNode;
+use servo_base::text::{AssumeUnder4GB, RangeAny, Utf8CodeUnits, Utf32CodeUnits};
 use style::computed_values::direction::T as Direction;
 use style::computed_values::white_space_collapse::T as WhiteSpaceCollapse;
-use style::dom::{NodeInfo, OpaqueNode};
-use style::properties::ComputedValues;
+use style::dom::NodeInfo;
 use style::selector_parser::PseudoElement;
-use style::values::specified::text::TextTransformCase;
 use unicode_bidi::Level;
 use unicode_categories::UnicodeCategories;
-use web_atoms::local_name;
 
 use super::text_run::TextRun;
 use super::{
     InlineBox, InlineBoxIdentifier, InlineBoxes, InlineFormattingContext, InlineItem,
-    SharedInlineStyles, TextOrigin, TextOriginKind, TextOrigins,
+    SharedInlineStyles,
 };
 use crate::cell::ArcRefCell;
 use crate::context::LayoutContext;
 use crate::dom::{LayoutBox, NodeExt};
-use crate::dom_traversal::NodeAndStyleInfo;
+use crate::dom_traversal::{BoxTreeString, NodeAndStyleInfo};
 use crate::flow::BlockLevelBox;
 use crate::flow::float::FloatBox;
+use crate::flow::inline::text_run::SharedTextRunData;
+use crate::flow::inline::text_transform::{OffsetMap, TextTransformationIterator};
 use crate::formatting_contexts::IndependentFormattingContext;
 use crate::positioned::AbsolutelyPositionedBox;
 use crate::style_ext::ComputedValuesExt;
@@ -47,26 +48,18 @@ pub(crate) struct InlineFormattingContextBuilder {
     /// construction.
     pub text_segments: Vec<String>,
 
+    /// A slot used to share the full text string of the [`InlineFormattingContext`] this
+    /// builder will ultimately build.
+    pub text_content_slot: Arc<OnceLock<String>>,
+
     /// The current offset in the final text string of this [`InlineFormattingContext`],
     /// used to properly set the text range of new [`InlineItem::TextRun`]s.
-    current_text_offset: usize,
+    current_text_offset: Utf8CodeUnits,
 
     /// The current character offset in the final text string of this [`InlineFormattingContext`],
     /// used to properly set the text range of new [`InlineItem::TextRun`]s. Note that this is
     /// different from the UTF-8 code point offset.
-    current_character_offset: usize,
-
-    /// If the [`InlineFormattingContext`] that we are building has a selection shared with its
-    /// originating node in the DOM, this will not be `None`.
-    pub shared_selection: Option<SharedSelection>,
-
-    /// The DOM origin of the text pushed so far, which maps between character offsets in the
-    /// laid out text and DOM positions for selections and carets.
-    pub text_origins: TextOrigins,
-
-    /// The text node whose text is being pushed in pieces (around a `::first-letter`) and the
-    /// UTF-16 length of the pieces already pushed.
-    text_node_progress: Option<(OpaqueNode, u32)>,
+    current_character_offset: Utf32CodeUnits,
 
     /// Whether the last processed node ended with whitespace. This is used to
     /// implement rule 4 of <https://www.w3.org/TR/css-text-3/#collapse>:
@@ -107,14 +100,20 @@ pub(crate) struct InlineFormattingContextBuilder {
     /// completely collapsible whitespace. When that happens it can be ignored completely.
     pub is_empty: bool,
 
-    /// Whether or not the `::first-letter` pseudo-element of this inline formatting context
-    /// has been processed yet.
-    has_processed_first_letter: bool,
+    /// Whether this inline formatting context should process the `::first-letter` pseudo-element.
+    /// This typically starts as true, and then is set to false after processing `::first-letter`
+    /// or encountering an atomic. But it can also be false from the very beginning if this inline
+    /// formatting context doesn't contain the first formatted line.
+    should_process_first_letter: bool,
 
     /// Whether or not the inline formatting context under construction has any kind of
     /// right-to-left content such as a character with an RTL character class or a `dir`
     /// attribute specifying right-to-left content.
-    pub(crate) has_right_to_left_content: bool,
+    pub has_right_to_left_content: bool,
+
+    /// An [`OffsetMap`] used to map selections from their offset before inline formatting
+    /// context text transformation to their offsets after transformation.
+    pub offset_map: ArcRefCell<OffsetMap>,
 }
 
 impl InlineFormattingContextBuilder {
@@ -134,7 +133,11 @@ impl InlineFormattingContextBuilder {
         character.is_ascii_whitespace()
     }
 
-    pub(crate) fn new(info: &NodeAndStyleInfo, context: &LayoutContext) -> Self {
+    pub(crate) fn new(
+        info: &NodeAndStyleInfo,
+        context: &LayoutContext,
+        should_process_first_letter: bool,
+    ) -> Self {
         let has_right_to_left_content = info.style.get_inherited_box().direction == Direction::Rtl;
         Self {
             // For the purposes of `text-transform: capitalize` the start of the IFC is a word boundary.
@@ -143,8 +146,8 @@ impl InlineFormattingContextBuilder {
             shared_inline_styles_stack: vec![SharedInlineStyles::from_info_and_context(
                 info, context,
             )],
-            shared_selection: info.node.selection(),
             has_right_to_left_content,
+            should_process_first_letter,
             ..Default::default()
         }
     }
@@ -155,8 +158,14 @@ impl InlineFormattingContextBuilder {
 
     fn push_control_character_string(&mut self, string_to_push: &str) {
         self.text_segments.push(string_to_push.to_owned());
-        self.current_text_offset += string_to_push.len();
-        self.current_character_offset += string_to_push.chars().count();
+        // string_to_push is always small
+        self.current_text_offset += Utf8CodeUnits::length_of(AssumeUnder4GB, string_to_push);
+
+        let new_characters = Utf32CodeUnits::length_of(AssumeUnder4GB, string_to_push);
+        self.current_character_offset += new_characters;
+        self.offset_map
+            .borrow_mut()
+            .push_range(new_characters, new_characters);
     }
 
     fn shared_inline_styles(&self) -> SharedInlineStyles {
@@ -196,7 +205,7 @@ impl InlineFormattingContextBuilder {
         self.on_word_boundary = true;
 
         // Atomics such as images should prevent any following text as being interpreted as the first letter.
-        self.has_processed_first_letter = true;
+        self.should_process_first_letter = false;
 
         inline_level_box
     }
@@ -293,14 +302,16 @@ impl InlineFormattingContextBuilder {
     /// a single box tree items may be produced for a single inline box when that inline
     /// box is split around a block-level element.
     pub(crate) fn end_inline_box(&mut self) {
-        self.shared_inline_styles_stack.pop();
-        self.inline_items.push(InlineItem::EndInlineBox);
         let identifier = self
             .inline_box_stack
             .pop()
             .expect("Ended non-existent inline box");
-        self.inline_boxes.end_inline_box(identifier);
         let inline_level_box = self.inline_boxes.get(&identifier);
+
+        self.shared_inline_styles_stack.pop();
+        self.inline_items
+            .push(InlineItem::EndInlineBox(inline_level_box.clone()));
+        self.inline_boxes.end_inline_box(identifier);
         let bidi_control_chars = inline_level_box.borrow().base.style.bidi_control_chars();
         self.push_control_character_string(bidi_control_chars.1);
     }
@@ -314,20 +325,21 @@ impl InlineFormattingContextBuilder {
     /// Note that this should only be used when processing text in block containers.
     pub(crate) fn push_text_with_possible_first_letter<'dom>(
         &mut self,
-        text: Cow<'dom, str>,
+        text: BoxTreeString<'dom>,
         info: &NodeAndStyleInfo<'dom>,
         container_info: &NodeAndStyleInfo<'dom>,
         layout_context: &LayoutContext,
     ) -> bool {
-        if self.has_processed_first_letter || !container_info.pseudo_element_chain().is_empty() {
-            self.push_text(text, info);
+        let selection = info.node.text_node_selection();
+        if !self.should_process_first_letter || !container_info.pseudo_element_chain().is_empty() {
+            self.push_text(text, info, selection);
             return false;
         }
 
         let Some(first_letter_info) =
             container_info.with_pseudo_element(layout_context, PseudoElement::FirstLetter)
         else {
-            self.push_text(text, info);
+            self.push_text(text, info, selection);
             return false;
         };
 
@@ -337,8 +349,24 @@ impl InlineFormattingContextBuilder {
         }
 
         // Push any leading white space first.
+        let first_letter_range_u32 = LazyCell::new(|| {
+            // TODO: ensure layout doesn’t handle more than 4 GiB at a time?
+            Utf32CodeUnits::length_of(AssumeUnder4GB, &text[..first_letter_range.start])..
+                Utf32CodeUnits::length_of(AssumeUnder4GB, &text[..first_letter_range.end])
+        });
         if first_letter_range.start != 0 {
-            self.push_text(Cow::Borrowed(&text[0..first_letter_range.start]), info);
+            let leading_whitespace_range = 0..first_letter_range.start;
+            let leading_whitespace_selection_range = selection.and_then(|range| {
+                let leading_whitespace_range_u32 =
+                    RangeAny::from_start_to(first_letter_range_u32.start);
+                range.intersect(leading_whitespace_range_u32)
+            });
+
+            self.push_text(
+                Cow::Borrowed(&text[leading_whitespace_range]).into(),
+                info,
+                leading_whitespace_selection_range,
+            );
         }
 
         // Push the first-letter text into an anonymous box with the `::first-letter` style.
@@ -350,43 +378,58 @@ impl InlineFormattingContextBuilder {
         box_slot.set(LayoutBox::InlineLevel(inline_item));
 
         let first_letter_text = Cow::Borrowed(&text[first_letter_range.clone()]);
-        // The first letter is pushed for its pseudo-element, but the text after it still
-        // continues at a later DOM offset of the text node.
-        let node = info.node.opaque();
-        let pushed_length = match self.text_node_progress {
-            Some((progress_node, length)) if progress_node == node => length,
-            _ => 0,
-        };
-        self.text_node_progress = Some((
-            node,
-            pushed_length + first_letter_text.encode_utf16().count() as u32,
-        ));
-        self.push_text(first_letter_text, &first_letter_info);
+        let first_letter_selection_range = selection.and_then(|range| {
+            range
+                .intersect((*first_letter_range_u32).clone().into())
+                .map(|range| range.map(|offset| offset - first_letter_range_u32.start))
+        });
+        self.push_text(
+            first_letter_text.into(),
+            &first_letter_info,
+            first_letter_selection_range,
+        );
         self.end_inline_box();
-        self.has_processed_first_letter = true;
+        self.should_process_first_letter = false;
 
         // Now push the non-first-letter text.
-        self.push_text(Cow::Borrowed(&text[first_letter_range.end..]), info);
+        let remaining_selection_range = selection.and_then(|range| {
+            let remaining_text_range_u32 =
+                RangeAny::new(Some(first_letter_range_u32.end), range.end());
+            range
+                .intersect(remaining_text_range_u32)
+                .map(|range| range.map(|offset| offset - first_letter_range_u32.end))
+        });
+        self.push_text(
+            Cow::Borrowed(&text[first_letter_range.end..]).into(),
+            info,
+            remaining_selection_range,
+        );
 
         true
     }
 
-    pub(crate) fn push_text<'dom>(&mut self, text: Cow<'dom, str>, info: &NodeAndStyleInfo<'dom>) {
-        let trim_beginning_white_space = self.last_inline_box_ended_with_collapsible_white_space;
-        let starts_on_word_boundary = self.on_word_boundary;
-        let char_iterator = rendered_characters(
+    pub(crate) fn push_text<'dom>(
+        &mut self,
+        text: BoxTreeString<'dom>,
+        info: &NodeAndStyleInfo<'dom>,
+        selection: Option<RangeAny<Utf32CodeUnits>>,
+    ) {
+        let mut offset_map = self.offset_map.borrow_mut();
+        let original_size_before = offset_map.total_original_size();
+
+        let bidi_class_map = CodePointMapData::<BidiClass>::new();
+        let white_space_collapse = info.style.get_white_space_collapse();
+        let mut character_count = Utf32CodeUnits(0);
+        let mut new_text = String::with_capacity(text.len());
+        for iteration in TextTransformationIterator::new(
             &text,
             &info.style,
-            trim_beginning_white_space,
-            starts_on_word_boundary,
-        );
-
-        let bidi_class_map = icu_properties::maps::bidi_class();
-        let white_space_collapse = info.style.clone_white_space_collapse();
-        let mut character_count = 0;
-        let new_text: String = char_iterator
-            .inspect(|&character| {
-                character_count += 1;
+            self.last_inline_box_ended_with_collapsible_white_space,
+            self.on_word_boundary,
+        ) {
+            offset_map.push_iteration(&iteration);
+            for &character in iteration.characters() {
+                character_count.0 += 1;
 
                 // If this character has a strong right-to-left class the new inline formatting context will
                 // need to be BiDi-aware. This match is derived from the list of strong right-to-left classes
@@ -409,76 +452,50 @@ impl InlineFormattingContextBuilder {
                         },
                         WhiteSpaceCollapse::Preserve | WhiteSpaceCollapse::BreakSpaces => false,
                     };
-            })
-            .collect();
 
-        if new_text.is_empty() {
+                new_text.push(character)
+            }
+        }
+
+        let needs_caret_placeholder = info.node.text_node_needs_caret_placeholder();
+        self.is_empty &= !needs_caret_placeholder;
+        if new_text.is_empty() && !needs_caret_placeholder {
             return;
         }
 
         if let Some(last_character) = new_text.chars().next_back() {
             self.on_word_boundary = last_character.is_whitespace();
             self.last_inline_box_ended_with_collapsible_white_space =
-                self.on_word_boundary && white_space_collapse != WhiteSpaceCollapse::Preserve;
+                self.on_word_boundary && white_space_collapse != &WhiteSpaceCollapse::Preserve;
         }
 
-        let new_range = self.current_text_offset..self.current_text_offset + new_text.len();
-        self.current_text_offset = new_range.end;
+        // TODO: ensure layout doesn’t handle more than 4 GiB at a time?
+        let new_text_len = Utf8CodeUnits::length_of(AssumeUnder4GB, &new_text);
+        let new_utf8_range = self.current_text_offset..self.current_text_offset + new_text_len;
+        self.current_text_offset = new_utf8_range.end;
 
         let new_character_range =
             self.current_character_offset..self.current_character_offset + character_count;
         self.current_character_offset = new_character_range.end;
 
-        if let Some((node, dom_offsets, kind)) =
-            self.origin_of_text(&text, &new_text, info, trim_beginning_white_space)
-        {
-            debug_assert_eq!(dom_offsets.len(), character_count + 1);
-            self.text_origins.sources.push(TextOrigin {
-                node,
-                kind,
-                character_start: new_character_range.start,
-                dom_offsets,
-                is_editable: info.node.is_editable(),
-            });
-        }
-
         self.text_segments.push(new_text);
 
         let current_inline_styles = self.shared_inline_styles();
-
-        if let Some(InlineItem::TextRun(text_run)) = self.inline_items.last() &&
-            text_run
-                .borrow()
-                .inline_styles
-                .ptr_eq(&current_inline_styles)
-        {
-            let box_slot = info.node.box_slot();
-            let old_text_run = box_slot.take_layout_box_as_text_run();
-
-            {
-                let mut text_run = text_run.borrow_mut();
-                text_run.text_range.end = new_range.end;
-                text_run.character_range.end = new_character_range.end;
-
-                // If this text node does not have a `TextRun` in the box slot, this means that
-                // it is either new or dirty, which means that the entire `TextRun` just extended
-                // is dirty as well. In this case, never reuse existing shaping results. Clear
-                // all old items to ensure this.
-                if old_text_run.is_none() {
-                    text_run.items.clear();
-                }
-            }
-
-            box_slot.set(LayoutBox::Text(text_run.clone()));
-            return;
-        }
-
         let box_slot = info.node.is_text_node().then(|| info.node.box_slot());
         let text_run = ArcRefCell::new(TextRun::new(
             info.into(),
-            current_inline_styles,
-            new_range,
-            new_character_range,
+            SharedTextRunData {
+                text_content: self.text_content_slot.clone(),
+                inline_styles: current_inline_styles,
+                character_range_in_ifc_text: new_character_range,
+                original_offset: original_size_before,
+                selection: AtomicRefCell::new(selection),
+                paints_caret: info.node.text_node_paints_caret(),
+                needs_caret_placeholder,
+                offset_map: self.offset_map.clone(),
+            }
+            .into(),
+            new_utf8_range,
             box_slot
                 .as_ref()
                 .and_then(|box_slot| box_slot.take_layout_box_as_text_run()),
@@ -489,117 +506,6 @@ impl InlineFormattingContextBuilder {
         if let Some(box_slot) = box_slot {
             box_slot.set(LayoutBox::Text(text_run));
         }
-    }
-
-    /// For text of a DOM text node, or the line feed generated for a `<br>`, returns the node,
-    /// the UTF-16 offset in it of each of the `rendered` characters laid out for `text` followed
-    /// by the offset just past the last one, and which kind of node it is.
-    fn origin_of_text(
-        &mut self,
-        text: &str,
-        rendered: &str,
-        info: &NodeAndStyleInfo,
-        trim_beginning_white_space: bool,
-    ) -> Option<(OpaqueNode, Vec<u32>, TextOriginKind)> {
-        let node = info.node.opaque();
-        if !info.node.is_text_node() {
-            let is_line_break = info
-                .node
-                .as_element()
-                .is_some_and(|element| element.local_name() == &local_name!("br"));
-            if !is_line_break {
-                return None;
-            }
-            self.note_editability(info);
-            // Before the `<br>` is offset 0 in it, after it is offset 1.
-            let mut dom_offsets = vec![0; rendered.chars().count()];
-            dom_offsets.push(1);
-            return Some((node, dom_offsets, TextOriginKind::LineBreak));
-        }
-
-        let piece_start = match self.text_node_progress {
-            Some((progress_node, length)) if progress_node == node => length,
-            _ => 0,
-        };
-        let piece_length = text.encode_utf16().count() as u32;
-        self.text_node_progress = Some((node, piece_start + piece_length));
-        self.note_editability(info);
-
-        let collapsed: Vec<char> = WhitespaceCollapse::new(
-            text.chars(),
-            info.style.clone_white_space_collapse(),
-            trim_beginning_white_space,
-        )
-        .collect();
-        // Collapsing only drops characters and turns white space into spaces, so each remaining
-        // character is the first DOM character from where the previous one was taken that it
-        // can have come from.
-        let mut collapsed_offsets = Vec::with_capacity(collapsed.len());
-        let mut end = piece_start;
-        let mut offset = piece_start;
-        for character in text.chars() {
-            if let Some(&wanted) = collapsed.get(collapsed_offsets.len()) &&
-                (wanted == character ||
-                    (wanted == ' ' && Self::is_document_white_space(character)))
-            {
-                collapsed_offsets.push(offset);
-                end = offset + character.len_utf16() as u32;
-            }
-            offset += character.len_utf16() as u32;
-        }
-        if collapsed_offsets.is_empty() {
-            return None;
-        }
-
-        // `text-transform` can turn one character into several (ß into SS), which all get the
-        // offset of the one they came from. Other transformations replace characters one by one.
-        let rendered: Vec<char> = rendered.chars().collect();
-        let mut dom_offsets = Vec::with_capacity(rendered.len() + 1);
-        for (&character, &offset) in collapsed.iter().zip(&collapsed_offsets) {
-            let rest = &rendered[dom_offsets.len()..];
-            let produced = |expansion: &mut dyn Iterator<Item = char>| {
-                let mut count = 0;
-                for expected in expansion {
-                    if rest.get(count) != Some(&expected) {
-                        return None;
-                    }
-                    count += 1;
-                }
-                Some(count)
-            };
-            let count = if rest.first() == Some(&character) {
-                1
-            } else {
-                produced(&mut character.to_uppercase())
-                    .or_else(|| produced(&mut character.to_lowercase()))
-                    .unwrap_or(1)
-            };
-            let count = count.min(rest.len());
-            dom_offsets.extend(std::iter::repeat_n(offset, count));
-        }
-        dom_offsets.push(end);
-        Some((node, dom_offsets, TextOriginKind::Text))
-    }
-
-    fn note_editability(&mut self, info: &NodeAndStyleInfo) {
-        if !self.text_origins.is_editable && info.node.is_editable() {
-            self.text_origins.is_editable = true;
-        }
-    }
-
-    /// Makes this empty inline formatting context hold a line for the caret of the editing host
-    /// it belongs to, as other browsers lay out an empty editing host with one line.
-    pub(crate) fn hold_line_for_empty_editing_host(&mut self, info: &NodeAndStyleInfo) {
-        debug_assert!(self.is_empty);
-        self.is_empty = false;
-        self.text_origins.is_editable = true;
-        self.text_origins.sources.push(TextOrigin {
-            node: info.node.opaque(),
-            kind: TextOriginKind::EmptyEditingHost,
-            character_start: self.current_character_offset,
-            dom_offsets: vec![0],
-            is_editable: true,
-        });
     }
 
     pub(crate) fn enter_display_contents(&mut self, shared_inline_styles: SharedInlineStyles) {
@@ -623,6 +529,11 @@ impl InlineFormattingContextBuilder {
         }
 
         assert!(self.inline_box_stack.is_empty());
+        debug_assert_eq!(
+            self.offset_map.borrow().total_final_size(),
+            self.current_character_offset
+        );
+
         Some(InlineFormattingContext::new_with_builder(
             self,
             layout_context,
@@ -631,389 +542,12 @@ impl InlineFormattingContextBuilder {
             default_bidi_level,
         ))
     }
-}
 
-fn preserve_segment_break() -> bool {
-    true
-}
-
-/// The characters that layout shapes and renders for `text`, after white space collapsing,
-/// `text-transform` and `-webkit-text-security`. `trim_beginning_white_space` and
-/// `on_word_boundary` describe the inline formatting context just before `text`.
-fn rendered_characters<'text>(
-    text: &'text str,
-    style: &ComputedValues,
-    trim_beginning_white_space: bool,
-    on_word_boundary: bool,
-) -> Box<dyn Iterator<Item = char> + 'text> {
-    let collapsed = WhitespaceCollapse::new(
-        text.chars(),
-        style.clone_white_space_collapse(),
-        trim_beginning_white_space,
-    );
-
-    // TODO: Not all text transforms are about case, this logic should stop ignoring
-    // TextTransform::FULL_WIDTH and TextTransform::FULL_SIZE_KANA.
-    let text_transform = style.clone_text_transform().case();
-    let char_iterator: Box<dyn Iterator<Item = char> + 'text> = match text_transform {
-        TextTransformCase::None => Box::new(collapsed),
-        TextTransformCase::Capitalize => {
-            // `TextTransformation` doesn't support capitalization, so we must capitalize the whole
-            // string at once and make a copy. Here `on_word_boundary` indicates whether or not the
-            // inline formatting context as a whole is on a word boundary. This is different from
-            // `trim_beginning_white_space` because the word boundaries are between atomic inlines
-            // and at the start of the IFC, and because preserved spaces are a word boundary.
-            let collapsed_string: String = collapsed.collect();
-            Box::new(
-                capitalize_string(&collapsed_string, on_word_boundary)
-                    .chars()
-                    .collect::<Vec<_>>()
-                    .into_iter(),
-            )
-        },
-        _ => {
-            // If `text-transform` is active, wrap the `WhitespaceCollapse` iterator in
-            // a `TextTransformation` iterator.
-            Box::new(TextTransformation::new(collapsed, text_transform))
-        },
-    };
-
-    if style.clone__webkit_text_security() != WebKitTextSecurity::None {
-        Box::new(TextSecurityTransform::new(
-            char_iterator,
-            style.clone__webkit_text_security(),
-        ))
-    } else {
-        char_iterator
+    /// Push a soft wrap opportunity to this [`InlineFormattingContextBuilder`] which pushes
+    /// a zero-width space to the text content.
+    pub(crate) fn push_soft_wrap_opportunity(&mut self) {
+        self.push_control_character_string("\u{200B}");
     }
-}
-
-pub struct WhitespaceCollapse<InputIterator> {
-    char_iterator: InputIterator,
-    white_space_collapse: WhiteSpaceCollapse,
-
-    /// Whether or not we should collapse white space completely at the start of the string.
-    /// This is true when the last character handled in our owning [`super::InlineFormattingContext`]
-    /// was collapsible white space.
-    remove_collapsible_white_space_at_start: bool,
-
-    /// Whether or not the last character produced was newline. There is special behavior
-    /// we do after each newline.
-    following_newline: bool,
-
-    /// Whether or not we have seen any non-white space characters, indicating that we are not
-    /// in a collapsible white space section at the beginning of the string.
-    have_seen_non_white_space_characters: bool,
-
-    /// Whether the last character that we processed was a non-newline white space character. When
-    /// collapsing white space we need to wait until the next non-white space character or the end
-    /// of the string to push a single white space.
-    inside_white_space: bool,
-
-    /// When we enter a collapsible white space region, we may need to wait to produce a single
-    /// white space character as soon as we encounter a non-white space character. When that
-    /// happens we queue up the non-white space character for the next iterator call.
-    character_pending_to_return: Option<char>,
-}
-
-impl<InputIterator> WhitespaceCollapse<InputIterator> {
-    pub fn new(
-        char_iterator: InputIterator,
-        white_space_collapse: WhiteSpaceCollapse,
-        trim_beginning_white_space: bool,
-    ) -> Self {
-        Self {
-            char_iterator,
-            white_space_collapse,
-            remove_collapsible_white_space_at_start: trim_beginning_white_space,
-            inside_white_space: false,
-            following_newline: false,
-            have_seen_non_white_space_characters: false,
-            character_pending_to_return: None,
-        }
-    }
-
-    fn is_leading_trimmed_white_space(&self) -> bool {
-        !self.have_seen_non_white_space_characters && self.remove_collapsible_white_space_at_start
-    }
-
-    /// Whether or not we need to produce a space character if the next character is not a newline
-    /// and not white space. This happens when we are exiting a section of white space and we
-    /// waited to produce a single space character for the entire section of white space (but
-    /// not following or preceding a newline).
-    fn need_to_produce_space_character_after_white_space(&self) -> bool {
-        self.inside_white_space && !self.following_newline && !self.is_leading_trimmed_white_space()
-    }
-}
-
-impl<InputIterator> Iterator for WhitespaceCollapse<InputIterator>
-where
-    InputIterator: Iterator<Item = char>,
-{
-    type Item = char;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        // Point 4.1.1 first bullet:
-        // > If white-space is set to normal, nowrap, or pre-line, whitespace
-        // > characters are considered collapsible
-        // If whitespace is not considered collapsible, it is preserved entirely, which
-        // means that we can simply return the input string exactly.
-        if self.white_space_collapse == WhiteSpaceCollapse::Preserve ||
-            self.white_space_collapse == WhiteSpaceCollapse::BreakSpaces
-        {
-            // From <https://drafts.csswg.org/css-text-3/#white-space-processing>:
-            // > Carriage returns (U+000D) are treated identically to spaces (U+0020) in all respects.
-            //
-            // In the non-preserved case these are converted to space below.
-            return match self.char_iterator.next() {
-                Some('\r') => Some(' '),
-                next => next,
-            };
-        }
-
-        if let Some(character) = self.character_pending_to_return.take() {
-            self.inside_white_space = false;
-            self.have_seen_non_white_space_characters = true;
-            self.following_newline = false;
-            return Some(character);
-        }
-
-        while let Some(character) = self.char_iterator.next() {
-            // Don't push non-newline whitespace immediately. Instead wait to push it until we
-            // know that it isn't followed by a newline. See `push_pending_whitespace_if_needed`
-            // above.
-            if InlineFormattingContextBuilder::is_document_white_space(character) &&
-                character != '\n'
-            {
-                self.inside_white_space = true;
-                continue;
-            }
-
-            // Point 4.1.1:
-            // > 2. Collapsible segment breaks are transformed for rendering according to the
-            // >    segment break transformation rules.
-            if character == '\n' {
-                // From <https://drafts.csswg.org/css-text-3/#line-break-transform>
-                // (4.1.3 -- the segment break transformation rules):
-                //
-                // > When white-space is pre, pre-wrap, or pre-line, segment breaks are not
-                // > collapsible and are instead transformed into a preserved line feed"
-                if self.white_space_collapse != WhiteSpaceCollapse::Collapse {
-                    self.inside_white_space = false;
-                    self.following_newline = true;
-                    return Some(character);
-
-                // Point 4.1.3:
-                // > 1. First, any collapsible segment break immediately following another
-                // >    collapsible segment break is removed.
-                // > 2. Then any remaining segment break is either transformed into a space (U+0020)
-                // >    or removed depending on the context before and after the break.
-                } else if !self.following_newline &&
-                    preserve_segment_break() &&
-                    !self.is_leading_trimmed_white_space()
-                {
-                    self.inside_white_space = false;
-                    self.following_newline = true;
-                    return Some(' ');
-                } else {
-                    self.following_newline = true;
-                    continue;
-                }
-            }
-
-            // Point 4.1.1:
-            // > 2. Any sequence of collapsible spaces and tabs immediately preceding or
-            // >    following a segment break is removed.
-            // > 3. Every collapsible tab is converted to a collapsible space (U+0020).
-            // > 4. Any collapsible space immediately following another collapsible space—even
-            // >    one outside the boundary of the inline containing that space, provided both
-            // >    spaces are within the same inline formatting context—is collapsed to have zero
-            // >    advance width.
-            if self.need_to_produce_space_character_after_white_space() {
-                self.inside_white_space = false;
-                self.character_pending_to_return = Some(character);
-                return Some(' ');
-            }
-
-            self.inside_white_space = false;
-            self.have_seen_non_white_space_characters = true;
-            self.following_newline = false;
-            return Some(character);
-        }
-
-        if self.need_to_produce_space_character_after_white_space() {
-            self.inside_white_space = false;
-            return Some(' ');
-        }
-
-        None
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.char_iterator.size_hint()
-    }
-
-    fn count(self) -> usize
-    where
-        Self: Sized,
-    {
-        self.char_iterator.count()
-    }
-}
-
-enum PendingCaseConversionResult {
-    Uppercase(ToUppercase),
-    Lowercase(ToLowercase),
-}
-
-impl PendingCaseConversionResult {
-    fn next(&mut self) -> Option<char> {
-        match self {
-            PendingCaseConversionResult::Uppercase(to_uppercase) => to_uppercase.next(),
-            PendingCaseConversionResult::Lowercase(to_lowercase) => to_lowercase.next(),
-        }
-    }
-}
-
-/// This is an iterator that consumes a char iterator and produces character transformed
-/// by the given CSS `text-transform` value. It currently does not support
-/// `text-transform: capitalize` because Unicode segmentation libraries do not support
-/// streaming input one character at a time.
-pub struct TextTransformation<InputIterator> {
-    /// The input character iterator.
-    char_iterator: InputIterator,
-    /// The `text-transform` value to use.
-    text_transform: TextTransformCase,
-    /// If an uppercasing or lowercasing produces more than one character, this
-    /// caches them so that they can be returned in subsequent iterator calls.
-    pending_case_conversion_result: Option<PendingCaseConversionResult>,
-}
-
-impl<InputIterator> TextTransformation<InputIterator> {
-    pub fn new(char_iterator: InputIterator, text_transform: TextTransformCase) -> Self {
-        Self {
-            char_iterator,
-            text_transform,
-            pending_case_conversion_result: None,
-        }
-    }
-}
-
-impl<InputIterator> Iterator for TextTransformation<InputIterator>
-where
-    InputIterator: Iterator<Item = char>,
-{
-    type Item = char;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(character) = self
-            .pending_case_conversion_result
-            .as_mut()
-            .and_then(|result| result.next())
-        {
-            return Some(character);
-        }
-        self.pending_case_conversion_result = None;
-
-        for character in self.char_iterator.by_ref() {
-            match self.text_transform {
-                TextTransformCase::None => return Some(character),
-                TextTransformCase::Uppercase => {
-                    let mut pending_result =
-                        PendingCaseConversionResult::Uppercase(character.to_uppercase());
-                    if let Some(character) = pending_result.next() {
-                        self.pending_case_conversion_result = Some(pending_result);
-                        return Some(character);
-                    }
-                },
-                TextTransformCase::Lowercase => {
-                    let mut pending_result =
-                        PendingCaseConversionResult::Lowercase(character.to_lowercase());
-                    if let Some(character) = pending_result.next() {
-                        self.pending_case_conversion_result = Some(pending_result);
-                        return Some(character);
-                    }
-                },
-                // `text-transform: capitalize` currently cannot work on a per-character basis,
-                // so must be handled outside of this iterator.
-                TextTransformCase::Capitalize => return Some(character),
-            }
-        }
-        None
-    }
-}
-
-pub struct TextSecurityTransform<InputIterator> {
-    /// The input character iterator.
-    char_iterator: InputIterator,
-    /// The `-webkit-text-security` value to use.
-    text_security: WebKitTextSecurity,
-}
-
-impl<InputIterator> TextSecurityTransform<InputIterator> {
-    pub fn new(char_iterator: InputIterator, text_security: WebKitTextSecurity) -> Self {
-        Self {
-            char_iterator,
-            text_security,
-        }
-    }
-}
-
-impl<InputIterator> Iterator for TextSecurityTransform<InputIterator>
-where
-    InputIterator: Iterator<Item = char>,
-{
-    type Item = char;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        // The behavior of `-webkit-text-security` isn't specified, so we have some
-        // flexibility in the implementation. We just need to maintain a rough
-        // compatability with other browsers.
-        Some(match self.char_iterator.next()? {
-            // This is not ideal, but zero width space is used for some special reasons in
-            // `<input>` fields, so these remain untransformed, otherwise they would show up
-            // in empty text fields.
-            '\u{200B}' => '\u{200B}',
-            // Newlines are preserved, so that `<br>` keeps working as expected.
-            '\n' => '\n',
-            character => match self.text_security {
-                WebKitTextSecurity::None => character,
-                WebKitTextSecurity::Circle => '○',
-                WebKitTextSecurity::Disc => '●',
-                WebKitTextSecurity::Square => '■',
-            },
-        })
-    }
-}
-
-/// Given a string and whether the start of the string represents a word boundary, create a copy of
-/// the string with letters after word boundaries capitalized.
-pub(crate) fn capitalize_string(string: &str, allow_word_at_start: bool) -> String {
-    let mut output_string = String::new();
-    output_string.reserve(string.len());
-
-    let word_segmenter = WordSegmenter::new_auto();
-    let mut bounds = word_segmenter.segment_str(string).peekable();
-    let mut byte_index = 0;
-    for character in string.chars() {
-        let current_byte_index = byte_index;
-        byte_index += character.len_utf8();
-
-        if let Some(next_index) = bounds.peek() &&
-            *next_index == current_byte_index
-        {
-            bounds.next();
-
-            if current_byte_index != 0 || allow_word_at_start {
-                output_string.extend(character.to_uppercase());
-                continue;
-            }
-        }
-
-        output_string.push(character);
-    }
-
-    output_string
 }
 
 /// Computes the range of the first letter.

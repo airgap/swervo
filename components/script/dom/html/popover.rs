@@ -5,7 +5,7 @@
 //! The popover API: <https://html.spec.whatwg.org/multipage/#the-popover-attribute>
 
 use html5ever::{local_name, ns};
-use js::context::JSContext;
+use js::context::{JSContext, NoGC};
 use malloc_size_of_derive::MallocSizeOf;
 use script_bindings::codegen::GenericBindings::DocumentBinding::DocumentMethods;
 use script_bindings::codegen::GenericBindings::DocumentFragmentBinding::DocumentFragmentMethods;
@@ -23,12 +23,13 @@ use crate::dom::documentfragment::DocumentFragment;
 use crate::dom::element::Element;
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
 use crate::dom::eventtarget::EventTarget;
+use crate::dom::html::form_controls::htmlinputelement::HTMLInputElement;
+use crate::dom::html::form_controls::input_type::InputType;
 use crate::dom::html::htmlbuttonelement::HTMLButtonElement;
 use crate::dom::html::htmlelement::HTMLElement;
 use crate::dom::html::htmlformelement::FormControlElementHelpers;
-use crate::dom::html::input_element::HTMLInputElement;
-use crate::dom::input_element::input_type::InputType;
 use crate::dom::iterators::ShadowIncluding;
+use crate::dom::node::focus::FocusTrigger;
 use crate::dom::node::{Node, NodeTraits};
 use crate::dom::toggleevent::ToggleEvent;
 use crate::dom::types::HTMLDialogElement;
@@ -86,9 +87,9 @@ impl HTMLElement {
             .contains(ElementState::POPOVER_OPEN)
     }
 
-    fn opened_in_popover_mode(&self) -> Option<PopoverState> {
+    fn opened_in_popover_mode(&self, no_gc: &NoGC) -> Option<PopoverState> {
         self.upcast::<Element>()
-            .ensure_rare_data()
+            .ensure_rare_data(no_gc)
             .opened_in_popover_mode
     }
 
@@ -169,20 +170,20 @@ impl HTMLElement {
         // > 5. Let nestedShow be element's popover showing or hiding.
         let nested_show = self
             .upcast::<Element>()
-            .ensure_rare_data()
+            .ensure_rare_data(cx.no_gc())
             .popover_showing_or_hiding;
 
         // > 6. Let fireEvents be the boolean negation of nestedShow.
         let fire_events = !nested_show;
 
         // > 7. Set element's popover showing or hiding to true.
-        self.set_popover_showing_or_hiding(true);
+        self.set_popover_showing_or_hiding(cx.no_gc(), true);
 
         // > 8. Let cleanupShowingFlag be the following steps: if nestedShow is false, then set
         // >    element's popover showing or hiding to false.
-        let cleanup_showing_flag = || {
+        let cleanup_showing_flag = |no_gc: &NoGC| {
             if !nested_show {
-                self.set_popover_showing_or_hiding(false);
+                self.set_popover_showing_or_hiding(no_gc, false);
             }
         };
 
@@ -191,7 +192,7 @@ impl HTMLElement {
         // >    "closed", the newState attribute initialized to "open", and the source attribute
         // >    initialized to invoker at element is false, then run cleanupShowingFlag and return.
         if !self.fire_beforetoggle(cx, true, "closed", "open", invoker) {
-            cleanup_showing_flag();
+            cleanup_showing_flag(cx.no_gc());
             return Ok(());
         }
 
@@ -201,7 +202,7 @@ impl HTMLElement {
         match self.check_popover_validity(false, throw_exceptions, Some(&document), false) {
             Ok(true) => {},
             result => {
-                cleanup_showing_flag();
+                cleanup_showing_flag(cx.no_gc());
                 return result.map(|_| ());
             },
         }
@@ -229,7 +230,7 @@ impl HTMLElement {
             // >       effectiveType to the Hint state.
             if effective_type == PopoverState::Auto &&
                 ancestor.as_ref().is_some_and(|ancestor| {
-                    ancestor.opened_in_popover_mode() == Some(PopoverState::Hint)
+                    ancestor.opened_in_popover_mode(cx.no_gc()) == Some(PopoverState::Hint)
                 })
             {
                 effective_type = PopoverState::Hint;
@@ -262,7 +263,7 @@ impl HTMLElement {
             // >       then run cleanupShowingSteps; if throwExceptions is true, then throw an
             // >       "InvalidStateError" DOMException; return.
             if self.popover_state() != Some(original_type) {
-                cleanup_showing_flag();
+                cleanup_showing_flag(cx.no_gc());
                 if throw_exceptions {
                     return Err(Error::InvalidState(Some(
                         "The popover attribute changed while showing the popover.".into(),
@@ -279,7 +280,7 @@ impl HTMLElement {
             match self.check_popover_validity(false, throw_exceptions, Some(&document), false) {
                 Ok(true) => {},
                 result => {
-                    cleanup_showing_flag();
+                    cleanup_showing_flag(cx.no_gc());
                     return result.map(|_| ());
                 },
             }
@@ -314,7 +315,7 @@ impl HTMLElement {
         }
 
         // > 22. Set element's previously focused element to null.
-        self.set_previously_focused_element(None);
+        self.set_previously_focused_element(None, cx.no_gc());
 
         // > 23. Let originallyFocusedElement be document's focused area of the document's DOM
         // >     anchor.
@@ -331,7 +332,7 @@ impl HTMLElement {
         // > document's hint stack parent to ancestor.
         if effective_type == PopoverState::Hint &&
             let Some(ancestor) = ancestor &&
-            ancestor.opened_in_popover_mode() == Some(PopoverState::Auto)
+            ancestor.opened_in_popover_mode(cx.no_gc()) == Some(PopoverState::Auto)
         {
             document.top_layer().set_hint_stack_parent(Some(&ancestor));
         }
@@ -343,7 +344,7 @@ impl HTMLElement {
         // > 26. Set element's popover invoker to invoker.
         // > 27. Set element's opened in popover mode to effectiveType.
         {
-            let mut rare_data = self.upcast::<Element>().ensure_rare_data();
+            let mut rare_data = self.upcast::<Element>().ensure_rare_data(cx.no_gc());
             rare_data.popover_invoker.set(invoker.map(Castable::upcast));
             rare_data.opened_in_popover_mode = Some(effective_type);
         }
@@ -355,14 +356,14 @@ impl HTMLElement {
         // >     Popover state, then set element's previously focused element to
         // >     originallyFocusedElement.
         if should_restore_focus && self.popover_state().is_some() {
-            self.set_previously_focused_element(originally_focused_element.as_deref());
+            self.set_previously_focused_element(originally_focused_element.as_deref(), cx.no_gc());
         }
 
         // > 30. Queue a popover toggle event task given element, "closed", "open", and invoker.
-        self.queue_popover_toggle_event_task("closed", "open", invoker);
+        self.queue_popover_toggle_event_task(cx.no_gc(), "closed", "open", invoker);
 
         // > 31. Run cleanupShowingFlag.
-        cleanup_showing_flag();
+        cleanup_showing_flag(cx.no_gc());
         Ok(())
     }
 
@@ -388,11 +389,11 @@ impl HTMLElement {
         // > 3. Let nestedHide be element's popover showing or hiding.
         let nested_hide = self
             .upcast::<Element>()
-            .ensure_rare_data()
+            .ensure_rare_data(cx.no_gc())
             .popover_showing_or_hiding;
 
         // > 4. Set element's popover showing or hiding to true.
-        self.set_popover_showing_or_hiding(true);
+        self.set_popover_showing_or_hiding(cx.no_gc(), true);
 
         // > 5. If nestedHide is true, then set fireEvents to false.
         if nested_hide {
@@ -401,9 +402,9 @@ impl HTMLElement {
 
         // > 6. Let cleanupSteps be the following steps: if nestedHide is false, then set
         // >    element's popover showing or hiding to false.
-        let cleanup_steps = || {
+        let cleanup_steps = |no_gc: &NoGC| {
             if !nested_hide {
-                self.set_popover_showing_or_hiding(false);
+                self.set_popover_showing_or_hiding(no_gc, false);
             }
         };
 
@@ -420,7 +421,7 @@ impl HTMLElement {
 
         // > 7. If element's opened in popover mode is "auto" or "hint":
         if self
-            .opened_in_popover_mode()
+            .opened_in_popover_mode(cx.no_gc())
             .is_some_and(PopoverState::uses_auto_stack)
         {
             // > 7.1. If hintPopoverListContainsElement is true, then run hide popover stack until
@@ -466,7 +467,7 @@ impl HTMLElement {
             match self.check_popover_validity(true, throw_exceptions, None, ignore_dom_state) {
                 Ok(true) => {},
                 result => {
-                    cleanup_steps();
+                    cleanup_steps(cx.no_gc());
                     return result.map(|_| ());
                 },
             }
@@ -474,7 +475,7 @@ impl HTMLElement {
 
         // > 9. Set element's popover invoker to null.
         self.upcast::<Element>()
-            .ensure_rare_data()
+            .ensure_rare_data(cx.no_gc())
             .popover_invoker
             .set(None);
 
@@ -491,7 +492,7 @@ impl HTMLElement {
             match self.check_popover_validity(true, throw_exceptions, None, ignore_dom_state) {
                 Ok(true) => {},
                 result => {
-                    cleanup_steps();
+                    cleanup_steps(cx.no_gc());
                     return result.map(|_| ());
                 },
             }
@@ -508,7 +509,7 @@ impl HTMLElement {
 
         // > 13. Set element's opened in popover mode to null.
         self.upcast::<Element>()
-            .ensure_rare_data()
+            .ensure_rare_data(cx.no_gc())
             .opened_in_popover_mode = None;
 
         // > 14. Set element's popover visibility state to hidden.
@@ -529,14 +530,14 @@ impl HTMLElement {
         // > 15. If fireEvents is true, then queue a popover toggle event task given element,
         // >     "open", "closed", and source.
         if fire_events {
-            self.queue_popover_toggle_event_task("open", "closed", source);
+            self.queue_popover_toggle_event_task(cx.no_gc(), "open", "closed", source);
         }
 
         // > 16. Let previouslyFocusedElement be element's previously focused element.
         // > 17. If previouslyFocusedElement is not null, then:
-        if let Some(previously_focused_element) = self.previously_focused_element() {
+        if let Some(previously_focused_element) = self.previously_focused_element(cx.no_gc()) {
             // > 17.1. Set element's previously focused element to null.
-            self.set_previously_focused_element(None);
+            self.set_previously_focused_element(None, cx.no_gc());
             // > 17.2. If focusPreviousElement is true and document's focused area of the
             // >       document's DOM anchor is a shadow-including inclusive descendant of
             // >       element, then run the focusing steps for previouslyFocusedElement; the
@@ -551,18 +552,18 @@ impl HTMLElement {
             if focus_previous_element && focus_is_inside {
                 previously_focused_element
                     .upcast::<Node>()
-                    .run_the_focusing_steps(cx, None);
+                    .run_the_focusing_steps(cx, None, FocusTrigger::Other);
             }
         }
 
         // > 18. Run cleanupSteps.
-        cleanup_steps();
+        cleanup_steps(cx.no_gc());
         Ok(())
     }
 
-    fn set_popover_showing_or_hiding(&self, value: bool) {
+    fn set_popover_showing_or_hiding(&self, no_gc: &NoGC, value: bool) {
         self.upcast::<Element>()
-            .ensure_rare_data()
+            .ensure_rare_data(no_gc)
             .popover_showing_or_hiding = value;
     }
 
@@ -588,7 +589,7 @@ impl HTMLElement {
             },
             DOMString::from(old_state),
             DOMString::from(new_state),
-            source.map(|source| DomRoot::from_ref(source.upcast::<Element>())),
+            source.map(|source| source.upcast::<Element>()),
         );
         event
             .upcast::<Event>()
@@ -598,6 +599,7 @@ impl HTMLElement {
     /// <https://html.spec.whatwg.org/multipage/#queue-a-popover-toggle-event-task>
     fn queue_popover_toggle_event_task(
         &self,
+        no_gc: &NoGC,
         old_state: &str,
         new_state: &str,
         source: Option<&HTMLElement>,
@@ -610,7 +612,7 @@ impl HTMLElement {
         // Queued tasks cannot be removed, so a superseded task notices that the generation moved
         // on and does nothing.
         let (old_state, generation) = {
-            let mut rare_data = self.upcast::<Element>().ensure_rare_data();
+            let mut rare_data = self.upcast::<Element>().ensure_rare_data(no_gc);
             let old_state = rare_data
                 .popover_toggle_task_old_state
                 .take()
@@ -637,7 +639,7 @@ impl HTMLElement {
             .queue(task!(fire_popover_toggle_event: move |cx| {
                 let this = this.root();
                 {
-                    let mut rare_data = this.upcast::<Element>().ensure_rare_data();
+                    let mut rare_data = this.upcast::<Element>().ensure_rare_data(cx.no_gc());
                     if rare_data.popover_toggle_task_generation != generation {
                         return;
                     }
@@ -647,6 +649,7 @@ impl HTMLElement {
                 // > 2.1. Fire an event named toggle at element, using ToggleEvent, with the
                 // >      oldState attribute initialized to oldState, the newState attribute
                 // >      initialized to newState, and the source attribute initialized to source.
+                let source = source.map(|source| source.root());
                 let event = ToggleEvent::new(
                     cx,
                     &this.owner_window(),
@@ -655,7 +658,7 @@ impl HTMLElement {
                     EventCancelable::NotCancelable,
                     DOMString::from(old_state),
                     DOMString::from(new_state),
-                    source.map(|source| source.root()),
+                    source.as_deref(),
                 );
                 event.upcast::<Event>().fire(cx, this.upcast::<EventTarget>());
             }));
@@ -685,14 +688,16 @@ impl HTMLElement {
                     descendant
                         .downcast::<Element>()
                         .is_some_and(|element| element.has_attribute(&local_name!("autofocus"))) &&
-                        descendant.get_the_focusable_area().is_some()
+                        descendant
+                            .get_the_focusable_area(cx, FocusTrigger::Other)
+                            .is_some()
                 })
         };
 
         // > 4. If control is null, then return.
         // > 5. Run the focusing steps given control.
         if let Some(control) = control {
-            control.run_the_focusing_steps(cx, None);
+            control.run_the_focusing_steps(cx, None, FocusTrigger::Other);
         }
     }
 
@@ -1056,7 +1061,8 @@ fn popover_target_element(cx: &JSContext, node: &Node) -> Option<DomRoot<HTMLEle
     let element = node.downcast::<Element>()?;
     let is_submit_button = if let Some(button) = node.downcast::<HTMLButtonElement>() {
         button.is_submit_button()
-    } else if let Some(input) = node.downcast::<HTMLInputElement>() {
+    } else {
+        let input = node.downcast::<HTMLInputElement>()?;
         if !matches!(
             *input.input_type(),
             InputType::Submit(_) | InputType::Reset(_) | InputType::Button(_) | InputType::Image(_)
@@ -1064,8 +1070,6 @@ fn popover_target_element(cx: &JSContext, node: &Node) -> Option<DomRoot<HTMLEle
             return None;
         }
         input.is_submit_button()
-    } else {
-        return None;
     };
 
     // > 2. If node is disabled, then return null.
@@ -1102,7 +1106,7 @@ pub(crate) fn popovertarget_associated_element(
     // > 1. If element's explicitly set attr-element is not null: if it is a descendant of any of
     // >    element's shadow-including ancestors, return it; otherwise return null.
     let explicitly_set = element
-        .ensure_rare_data()
+        .ensure_rare_data(cx.no_gc())
         .explicitly_set_popover_target_element
         .get();
     if let Some(explicitly_set) = explicitly_set {
@@ -1166,7 +1170,7 @@ pub(crate) fn set_popover_target_element(
         // >    run this's delete the content attribute; return.
         None => {
             element
-                .ensure_rare_data()
+                .ensure_rare_data(cx.no_gc())
                 .explicitly_set_popover_target_element
                 .set(None);
             element.remove_attribute(cx, &ns!(), &local_name!("popovertarget"));
@@ -1176,7 +1180,7 @@ pub(crate) fn set_popover_target_element(
         Some(value) => {
             element.set_string_attribute(cx, &local_name!("popovertarget"), DOMString::new());
             element
-                .ensure_rare_data()
+                .ensure_rare_data(cx.no_gc())
                 .explicitly_set_popover_target_element
                 .set(Some(value));
         },

@@ -111,11 +111,11 @@ class CreateOrUpdateBranchForPRStep(Step):
             # TODO: If we could cleverly parse and manipulate the full commit diff
             # we could avoid cloning the servo repository altogether and only
             # have to fetch the commit diffs from GitHub.
-            # NB: The output of git show might include binary files or non-UTF8 text,
+            # NB: The output of git might include binary files or non-UTF8 text,
             # so store the content of the diff as a `bytes`.
-            # Omit the commit message so non-WPT commits produce no output,
-            # rather than a message body or a newline on newer Git versions.
-            diff = local_servo_repo.run_without_encoding("show", "--binary", "--format=", sha, "--", UPSTREAMABLE_PATH)
+            diff = local_servo_repo.run_without_encoding(
+                "diff-tree", "--binary", "--no-commit-id", "-p", sha, "--", UPSTREAMABLE_PATH
+            )
 
             # Retrieve the diff of any changes to files that are relevant
             if diff:

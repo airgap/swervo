@@ -5,14 +5,17 @@
 use std::sync::Arc;
 
 use log::debug;
-use malloc_size_of::MallocSizeOfOps;
+use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use malloc_size_of_derive::MallocSizeOf;
 use paint_api::CrossProcessPaintApi;
 use pixels::{CorsStatus, ImageMetadata, RasterImage};
 use profile_traits::mem::Report;
+use resvg::usvg::{Font, fontdb};
 use serde::{Deserialize, Serialize};
+use servo_base::cross_process_instant::CrossProcessInstant;
 use servo_base::id::{PipelineId, WebViewId};
 use servo_url::{ImmutableOrigin, ServoUrl};
+use uuid::Uuid;
 use webrender_api::ImageKey;
 use webrender_api::units::DeviceIntSize;
 
@@ -22,6 +25,21 @@ use crate::request::CorsSettings;
 // ======================================================================
 // Aux structs and enums.
 // ======================================================================
+
+/// An interface for resolving font families and styles for SVG images.
+pub trait FontResolver: Sync + Send + MallocSizeOf {
+    /// Attempt to resolve a font reference using the provided database of fonts.
+    /// Adding new fonts to the database is allowed. Return an index into the database
+    /// if the font resolves to an entry, otherwise return None.
+    fn resolve(&self, font: &Font, database: &mut Arc<fontdb::Database>) -> Option<fontdb::ID>;
+    /// Backup resolve. Find a font that can represent `char` and is not in `excluded`.
+    fn resolve_fallback(
+        &self,
+        char: char,
+        excluded: &[fontdb::ID],
+        database: &mut Arc<fontdb::Database>,
+    ) -> Option<fontdb::ID>;
+}
 
 pub type VectorImageId = PendingImageId;
 
@@ -37,9 +55,10 @@ pub enum Image {
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct VectorImage {
     pub id: VectorImageId,
-    pub svg_id: Option<String>,
+    pub svg_id: Option<Uuid>,
     pub metadata: ImageMetadata,
     pub cors_status: CorsStatus,
+    pub load_time: Option<CrossProcessInstant>,
 }
 
 /// What embedding an SVG image in another SVG document needs from it.
@@ -72,6 +91,13 @@ impl Image {
         match self {
             Image::Raster(image) => Some(image.clone()),
             Image::Vector(..) => None,
+        }
+    }
+
+    pub fn load_time(&self) -> Option<CrossProcessInstant> {
+        match self {
+            Image::Raster(image) => image.load_time,
+            Image::Vector(image) => image.load_time,
         }
     }
 }
@@ -180,6 +206,7 @@ pub trait ImageCacheFactory: Sync + Send {
         webview_id: WebViewId,
         pipeline_id: PipelineId,
         paint_api: &CrossProcessPaintApi,
+        font_resolver: Arc<dyn FontResolver>,
     ) -> Arc<dyn ImageCache>;
 }
 
@@ -229,7 +256,7 @@ pub trait ImageCache: Sync + Send {
         &self,
         image_id: VectorImageId,
         size: DeviceIntSize,
-        svg_id: Option<String>,
+        svg_id: Option<Uuid>,
         for_mask: bool,
     ) -> Option<RasterImage>;
 
@@ -250,7 +277,7 @@ pub trait ImageCache: Sync + Send {
     );
 
     /// Removes the rasterized image from the image_cache, identified by the id of the SVG
-    fn evict_rasterized_image(&self, svg_id: &str);
+    fn evict_rasterized_image(&self, svg_id: &Uuid);
 
     /// Removes the completed image from the image_cache, identified by url, origin, and cors
     fn evict_completed_image(

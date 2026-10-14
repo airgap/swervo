@@ -7,6 +7,7 @@ use std::process::{Child, ExitStatus};
 use crossbeam_channel::{Receiver, Select};
 use log::{debug, error, warn};
 use profile_traits::mem::{ProfilerChan, ProfilerMsg};
+use servo_base::generic_channel::SendError;
 use servo_base::id::ScriptEventLoopId;
 
 pub enum Process {
@@ -40,7 +41,7 @@ impl Process {
     }
 }
 
-type ProcessReceiver = Receiver<Result<(), ipc_channel::IpcError>>;
+type ProcessReceiver = Receiver<Result<(), SendError>>;
 
 /// A process that was reaped after its lifeline closed.
 pub(crate) struct ExitedProcess {

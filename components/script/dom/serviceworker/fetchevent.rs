@@ -14,12 +14,12 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use dom_struct::dom_struct;
-use ipc_channel::ipc::IpcSender;
 use js::context::JSContext;
 use js::rust::HandleObject;
 use net_traits::CustomResponse;
 use script_bindings::cell::DomRefCell;
-use script_bindings::reflector::reflect_dom_object_with_proto_and_cx;
+use script_bindings::reflector::reflect_dom_object_with_proto;
+use servo_base::generic_channel::GenericCallback;
 use stylo_atoms::Atom;
 
 use crate::dom::bindings::codegen::Bindings::EventBinding::EventMethods;
@@ -38,14 +38,14 @@ use crate::dom::request::Request;
 use crate::dom::response::Response;
 use crate::dom::serviceworker::extendableevent::ExtendableEvent;
 use crate::dom::serviceworker::serviceworkerglobalscope::ServiceWorkerGlobalScope;
+use crate::dom::{RootedPromise, TracedPromise};
 
 #[dom_struct]
 pub(crate) struct FetchEvent {
     extendableevent: ExtendableEvent,
     request: Dom<Request>,
     /// The promise passed to `respondWith`, if the worker called it.
-    #[ignore_malloc_size_of = "Rc"]
-    respond_with: DomRefCell<Option<Rc<Promise>>>,
+    respond_with: DomRefCell<Option<TracedPromise>>,
     /// Whether `respondWith` has been called (it may only be called once).
     responded: Cell<bool>,
 }
@@ -78,11 +78,11 @@ impl FetchEvent {
         bubbles: bool,
         cancelable: bool,
     ) -> DomRoot<FetchEvent> {
-        let ev = reflect_dom_object_with_proto_and_cx(
+        let ev = reflect_dom_object_with_proto(
+            cx,
             Box::new(FetchEvent::new_inherited(request)),
             worker,
             proto,
-            cx,
         );
         {
             let event = ev.upcast::<Event>();
@@ -93,8 +93,11 @@ impl FetchEvent {
 
     /// The promise the worker passed to `respondWith`, if any — taken once by the dispatch site
     /// after the event has been fired.
-    pub(crate) fn take_respond_with(&self) -> Option<Rc<Promise>> {
-        self.respond_with.borrow_mut().take()
+    pub(crate) fn take_respond_with(&self, cx: &JSContext) -> Option<RootedPromise> {
+        self.respond_with
+            .borrow_mut()
+            .take()
+            .map(|promise| promise.root(cx))
     }
 }
 
@@ -127,10 +130,12 @@ impl FetchEventMethods<crate::DomTypeHolder> for FetchEvent {
     fn RespondWith(&self, cx: &mut JSContext, r: &Promise) -> ErrorResult {
         // Step 2: respondWith may only be called once.
         if self.responded.get() {
-            return Err(Error::InvalidState(None));
+            return Err(Error::InvalidState(Some(
+                "respondWith() has already been called".to_owned(),
+            )));
         }
         self.responded.set(true);
-        *self.respond_with.borrow_mut() = Some(r.duplicate(cx));
+        *self.respond_with.borrow_mut() = Some(r.duplicate(cx).to_traced());
         Ok(())
     }
 
@@ -145,9 +150,9 @@ impl FetchEventMethods<crate::DomTypeHolder> for FetchEvent {
 fn ship_response_to_network(
     cx: &mut JSContext,
     response: &Response,
-    chan: IpcSender<Option<CustomResponse>>,
+    chan: GenericCallback<Option<CustomResponse>>,
 ) {
-    use crate::body::BodyMixin;
+    use crate::fetch::body::BodyMixin;
 
     if response.is_disturbed() || response.is_locked() {
         let _ = chan.send(None);
@@ -212,11 +217,11 @@ fn ship_response_to_network(
 pub(crate) struct RespondWithFulfill {
     #[ignore_malloc_size_of = "channels"]
     #[no_trace]
-    chan: RefCell<Option<IpcSender<Option<CustomResponse>>>>,
+    chan: RefCell<Option<GenericCallback<Option<CustomResponse>>>>,
 }
 
 impl RespondWithFulfill {
-    pub(crate) fn new(chan: IpcSender<Option<CustomResponse>>) -> Self {
+    pub(crate) fn new(chan: GenericCallback<Option<CustomResponse>>) -> Self {
         Self {
             chan: RefCell::new(Some(chan)),
         }
@@ -243,11 +248,11 @@ impl Callback for RespondWithFulfill {
 pub(crate) struct RespondWithReject {
     #[ignore_malloc_size_of = "channels"]
     #[no_trace]
-    chan: RefCell<Option<IpcSender<Option<CustomResponse>>>>,
+    chan: RefCell<Option<GenericCallback<Option<CustomResponse>>>>,
 }
 
 impl RespondWithReject {
-    pub(crate) fn new(chan: IpcSender<Option<CustomResponse>>) -> Self {
+    pub(crate) fn new(chan: GenericCallback<Option<CustomResponse>>) -> Self {
         Self {
             chan: RefCell::new(Some(chan)),
         }

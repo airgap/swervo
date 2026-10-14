@@ -2,12 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::rc::Rc;
-
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use js::realm::CurrentRealm;
-use script_bindings::reflector::reflect_dom_object_with_cx;
+use script_bindings::domstring::TracedDOMString;
+use script_bindings::reflector::reflect_dom_object;
 use servo_bluetooth_traits::{BluetoothResponse, GATTType};
 
 use crate::dom::bindings::codegen::Bindings::BluetoothRemoteGATTServerBinding::BluetoothRemoteGATTServerMethods;
@@ -20,14 +19,14 @@ use crate::dom::bluetoothdevice::BluetoothDevice;
 use crate::dom::bluetoothuuid::{BluetoothCharacteristicUUID, BluetoothServiceUUID, BluetoothUUID};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
-use crate::dom::promise::Promise;
+use crate::dom::promise::RootedPromise;
 
 // https://webbluetoothcg.github.io/web-bluetooth/#bluetoothremotegattservice
 #[dom_struct]
 pub(crate) struct BluetoothRemoteGATTService {
     eventtarget: EventTarget,
     device: Dom<BluetoothDevice>,
-    uuid: DOMString,
+    uuid: TracedDOMString,
     is_primary: bool,
     instance_id: String,
 }
@@ -42,7 +41,7 @@ impl BluetoothRemoteGATTService {
         BluetoothRemoteGATTService {
             eventtarget: EventTarget::new_inherited(),
             device: Dom::from_ref(device),
-            uuid,
+            uuid: uuid.traced(),
             is_primary,
             instance_id,
         }
@@ -57,12 +56,12 @@ impl BluetoothRemoteGATTService {
         isPrimary: bool,
         instanceID: String,
     ) -> DomRoot<BluetoothRemoteGATTService> {
-        reflect_dom_object_with_cx(
+        reflect_dom_object(
+            cx,
             Box::new(BluetoothRemoteGATTService::new_inherited(
                 device, uuid, isPrimary, instanceID,
             )),
             global,
-            cx,
         )
     }
 
@@ -84,7 +83,7 @@ impl BluetoothRemoteGATTServiceMethods<crate::DomTypeHolder> for BluetoothRemote
 
     /// <https://webbluetoothcg.github.io/web-bluetooth/#dom-bluetoothremotegattservice-uuid>
     fn Uuid(&self) -> DOMString {
-        self.uuid.clone()
+        self.uuid.clone().root()
     }
 
     /// <https://webbluetoothcg.github.io/web-bluetooth/#dom-bluetoothremotegattservice-getcharacteristic>
@@ -92,7 +91,7 @@ impl BluetoothRemoteGATTServiceMethods<crate::DomTypeHolder> for BluetoothRemote
         &self,
         cx: &mut CurrentRealm,
         characteristic: BluetoothCharacteristicUUID,
-    ) -> Rc<Promise> {
+    ) -> RootedPromise {
         let is_connected = self.Device().get_gatt(cx).Connected();
         get_gatt_children(
             cx,
@@ -111,7 +110,7 @@ impl BluetoothRemoteGATTServiceMethods<crate::DomTypeHolder> for BluetoothRemote
         &self,
         cx: &mut CurrentRealm,
         characteristic: Option<BluetoothCharacteristicUUID>,
-    ) -> Rc<Promise> {
+    ) -> RootedPromise {
         let is_connected = self.Device().get_gatt(cx).Connected();
         get_gatt_children(
             cx,
@@ -130,7 +129,7 @@ impl BluetoothRemoteGATTServiceMethods<crate::DomTypeHolder> for BluetoothRemote
         &self,
         cx: &mut CurrentRealm,
         service: BluetoothServiceUUID,
-    ) -> Rc<Promise> {
+    ) -> RootedPromise {
         let is_connected = self.Device().get_gatt(cx).Connected();
         get_gatt_children(
             cx,
@@ -149,7 +148,7 @@ impl BluetoothRemoteGATTServiceMethods<crate::DomTypeHolder> for BluetoothRemote
         &self,
         cx: &mut CurrentRealm,
         service: Option<BluetoothServiceUUID>,
-    ) -> Rc<Promise> {
+    ) -> RootedPromise {
         let is_connected = self.Device().get_gatt(cx).Connected();
         get_gatt_children(
             cx,
@@ -178,7 +177,7 @@ impl AsyncBluetoothListener for BluetoothRemoteGATTService {
         &self,
         cx: &mut JSContext,
         response: BluetoothResponse,
-        promise: &Rc<Promise>,
+        promise: &RootedPromise,
     ) {
         let device = self.Device();
         match response {

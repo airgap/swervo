@@ -5,6 +5,7 @@
 //! Media Source Extensions `SourceBufferList` — Phase 1 scaffold.
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_dom_object;
 use stylo_atoms::Atom;
@@ -17,7 +18,6 @@ use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::media::sourcebuffer::SourceBuffer;
-use crate::script_runtime::CanGc;
 
 #[dom_struct]
 pub(crate) struct SourceBufferList {
@@ -33,8 +33,8 @@ impl SourceBufferList {
         }
     }
 
-    pub(crate) fn new(global: &GlobalScope, can_gc: CanGc) -> DomRoot<SourceBufferList> {
-        reflect_dom_object(Box::new(SourceBufferList::new_inherited()), global, can_gc)
+    pub(crate) fn new(cx: &mut JSContext, global: &GlobalScope) -> DomRoot<SourceBufferList> {
+        reflect_dom_object(cx, Box::new(SourceBufferList::new_inherited()), global)
     }
 
     /// Append a SourceBuffer to the list (used by `MediaSource.addSourceBuffer`) and queue the

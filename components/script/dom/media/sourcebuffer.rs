@@ -28,7 +28,6 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::media::mediasegmentparser::MediaSegmentParser;
 use crate::dom::media::mediasource::MediaSource;
 use crate::dom::timeranges::{TimeRanges, TimeRangesContainer};
-use crate::script_runtime::CanGc;
 
 #[dom_struct]
 pub(crate) struct SourceBuffer {
@@ -62,15 +61,15 @@ impl SourceBuffer {
     }
 
     pub(crate) fn new(
+        cx: &mut JSContext,
         global: &GlobalScope,
         media_source: &MediaSource,
         stream: usize,
-        can_gc: CanGc,
     ) -> DomRoot<SourceBuffer> {
         reflect_dom_object(
+            cx,
             Box::new(SourceBuffer::new_inherited(media_source, stream)),
             global,
-            can_gc,
         )
     }
 
@@ -124,12 +123,18 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
     fn AppendBuffer(&self, data: ArrayBufferViewOrArrayBuffer) -> ErrorResult {
         // Steps 1-2. Throw InvalidStateError if updating, or the parent MediaSource is not "open".
         if self.updating.get() || !self.media_source.is_open() {
-            return Err(Error::InvalidState(None));
+            return Err(Error::InvalidState(Some(
+                "SourceBuffer is updating or its MediaSource is not open".to_owned(),
+            )));
         }
         // Copy out the bytes to append.
         let bytes = match data {
-            ArrayBufferViewOrArrayBuffer::ArrayBufferView(view) => view.to_vec(),
-            ArrayBufferViewOrArrayBuffer::ArrayBuffer(buffer) => buffer.to_vec(),
+            ArrayBufferViewOrArrayBuffer::ArrayBufferView(view) => {
+                view.to_vec().unwrap_or_default()
+            },
+            ArrayBufferViewOrArrayBuffer::ArrayBuffer(buffer) => {
+                buffer.to_vec().unwrap_or_default()
+            },
         };
         // Step 5. Set updating to true and run the append asynchronously.
         self.updating.set(true);
@@ -147,7 +152,9 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
     fn Abort(&self) -> ErrorResult {
         // If the parent MediaSource is not "open", throw InvalidStateError.
         if !self.media_source.is_open() {
-            return Err(Error::InvalidState(None));
+            return Err(Error::InvalidState(Some(
+                "The parent MediaSource is not open".to_owned(),
+            )));
         }
         // Abort any in-progress append: reset updating and fire abort + updateend.
         self.segments.borrow_mut().reset_partial();
@@ -166,7 +173,9 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
     fn Remove(&self, start: f64, end: f64) -> ErrorResult {
         // If not "open" or currently updating, throw InvalidStateError.
         if !self.media_source.is_open() || self.updating.get() {
-            return Err(Error::InvalidState(None));
+            return Err(Error::InvalidState(Some(
+                "SourceBuffer is updating or its MediaSource is not open".to_owned(),
+            )));
         }
         // The range must be ordered and valid: 0 <= start < end. Reject NaN explicitly.
         if start.is_nan() || end.is_nan() || start < 0.0 || start >= end {

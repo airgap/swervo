@@ -6,14 +6,14 @@ use std::ptr;
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
-use js::jsapi::{Heap, JSObject};
+use js::jsapi::JSObject;
 use js::typedarray::{ArrayBufferU8, HeapArrayBuffer};
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_dom_object_with_proto;
 use script_bindings::trace::RootedTraceableBox;
 use stylo_atoms::Atom;
 
-use crate::dom::bindings::buffer_source::{BufferSource, HeapBufferSource, create_buffer_source};
+use crate::dom::bindings::buffer_source::{HeapBufferSource, create_buffer_source};
 use crate::dom::bindings::codegen::Bindings::EventBinding::EventMethods;
 use crate::dom::bindings::codegen::Bindings::MediaKeyMessageEventBinding::MediaKeyMessageEventMethods;
 use crate::dom::bindings::codegen::Bindings::MediaKeySystemAccessBinding::MediaKeyMessageType;
@@ -21,7 +21,6 @@ use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::event::Event;
 use crate::dom::globalscope::GlobalScope;
-use crate::script_runtime::CanGc;
 
 /// <https://w3c.github.io/encrypted-media/#mediakeymessageevent>
 #[dom_struct]
@@ -40,7 +39,6 @@ impl MediaKeyMessageEvent {
         type_: Atom,
         message_type: MediaKeyMessageType,
         message: &[u8],
-        can_gc: CanGc,
     ) -> DomRoot<MediaKeyMessageEvent> {
         rooted!(&in(cx) let mut array = ptr::null_mut::<JSObject>());
         let buffer_source = RootedTraceableBox::new(if message.is_empty() {
@@ -48,12 +46,11 @@ impl MediaKeyMessageEvent {
         } else {
             create_buffer_source::<ArrayBufferU8>(cx, message, array.handle_mut())
                 .expect("Creating an ArrayBuffer from the license message should never fail");
-            HeapBufferSource::<ArrayBufferU8>::new(BufferSource::ArrayBuffer(Heap::boxed(
-                *array.handle(),
-            )))
+            HeapBufferSource::<ArrayBufferU8>::new(array.handle())
         });
 
         let ev = reflect_dom_object_with_proto(
+            cx,
             Box::new(MediaKeyMessageEvent {
                 event: Event::new_inherited(),
                 message_type,
@@ -61,7 +58,6 @@ impl MediaKeyMessageEvent {
             }),
             global,
             None,
-            can_gc,
         );
         ev.upcast::<Event>().init_event(type_, false, false);
         ev

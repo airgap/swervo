@@ -10,7 +10,7 @@ use std::marker::Sized;
 use std::ops::{Deref, DerefMut};
 
 use indexmap::IndexMap;
-use js::context::{JSContext, RawJSContext};
+use js::context::JSContext;
 use js::conversions::{ConversionResult, FromJSValConvertible, ToJSValConvertible};
 use js::jsapi::{
     JSITER_HIDDEN, JSITER_OWNONLY, JSITER_SYMBOLS, JSPROP_ENUMERATE, PropertyDescriptor,
@@ -55,7 +55,7 @@ impl RecordKey for USVString {
         rooted!(&in(cx) let mut jsid_value = UndefinedValue());
         unsafe { JS_IdToValue(cx, *id.as_ref(cx), jsid_value.handle_mut()) };
 
-        USVString::safe_from_jsval(cx, jsid_value.handle(), ())
+        USVString::from_jsval(cx, jsid_value.handle(), ())
     }
 }
 
@@ -68,7 +68,7 @@ impl RecordKey for ByteString {
         rooted!(&in(cx) let mut jsid_value = UndefinedValue());
         unsafe { JS_IdToValue(cx, *id.as_ref(cx), jsid_value.handle_mut()) };
 
-        ByteString::safe_from_jsval(cx, jsid_value.handle(), ())
+        ByteString::from_jsval(cx, jsid_value.handle(), ())
     }
 }
 
@@ -110,7 +110,7 @@ where
 {
     type Config = C;
 
-    fn safe_from_jsval(
+    fn from_jsval(
         cx: &mut JSContext,
         value: HandleValue,
         config: C,
@@ -122,7 +122,7 @@ where
         }
 
         rooted!(&in(cx) let object = value.to_object());
-        let mut ids = unsafe { IdVector::new(cx.raw_cx()) };
+        let mut ids = IdVector::new(cx);
         if unsafe {
             !GetPropertyKeys(
                 cx,
@@ -170,7 +170,7 @@ where
                 return Err(());
             }
 
-            let property = match V::safe_from_jsval(cx, property.handle(), config.clone())? {
+            let property = match V::from_jsval(cx, property.handle(), config.clone())? {
                 ConversionResult::Success(property) => property,
                 ConversionResult::Failure(message) => {
                     return Ok(ConversionResult::Failure(message));
@@ -189,21 +189,14 @@ where
     V: ToJSValConvertible,
 {
     #[inline]
-    unsafe fn to_jsval(&self, _cx: *mut RawJSContext, rval: MutableHandleValue) {
-        // TODO: https://github.com/servo/mozjs/issues/764
-        // This is needed until the `RawJSContext` version is removed from the trait.
-        let mut cx = unsafe { crate::script_runtime::temp_cx() };
-        ToJSValConvertible::safe_to_jsval(self, &mut cx, rval);
-    }
-
-    fn safe_to_jsval(&self, cx: &mut JSContext, mut rval: MutableHandleValue) {
+    fn to_jsval(&self, cx: &mut JSContext, mut rval: MutableHandleValue) {
         rooted!(&in(cx) let js_object = unsafe { JS_NewPlainObject(cx) });
         assert!(!js_object.handle().is_null());
 
         rooted!(&in(cx) let mut js_value = UndefinedValue());
         for (key, value) in &self.map {
             let key = key.to_utf16_vec();
-            value.safe_to_jsval(cx, js_value.handle_mut());
+            value.to_jsval(cx, js_value.handle_mut());
 
             assert!(unsafe {
                 JS_DefineUCProperty2(

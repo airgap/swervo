@@ -13,6 +13,7 @@ use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::document::Document;
 use crate::dom::element::Element;
 use crate::dom::node::Node;
+use crate::dom::node::virtualmethods::VirtualMethods;
 use crate::dom::svg::svganimatedstring::SVGAnimatedString;
 use crate::dom::svg::svggraphicselement::SVGGraphicsElement;
 
@@ -63,5 +64,11 @@ impl SVGAElementMethods<crate::DomTypeHolder> for SVGAElement {
     fn Href(&self, cx: &mut JSContext) -> DomRoot<SVGAnimatedString> {
         self.href
             .or_init(|| SVGAnimatedString::new(cx, self.upcast::<Element>(), local_name!("href")))
+    }
+}
+
+impl VirtualMethods for SVGAElement {
+    fn super_type(&self) -> Option<&dyn VirtualMethods> {
+        Some(self.upcast::<SVGGraphicsElement>() as &dyn VirtualMethods)
     }
 }

@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::ffi::CString;
 use std::fs::File;
 
 use app_units::Au;
@@ -21,7 +20,7 @@ use read_fonts::{FontRef, ReadError, TableProvider};
 use servo_arc::Arc;
 use skrifa::attribute::Weight;
 use style::Zero;
-use webrender_api::{FontInstanceFlags, FontVariation};
+use webrender_api::{FontInstanceFlags, FontInstancePlatformOptions, FontVariation};
 
 use super::library_handle::FreeTypeLibraryHandle;
 use crate::FontData;
@@ -29,7 +28,9 @@ use crate::font::{
     FontMetrics, FontTableMethods, FractionalPixel, GlyphRaster, PlatformFontMethods,
 };
 use crate::glyph::GlyphId;
-use crate::platform::freetype::freetype_face::FreeTypeFace;
+use crate::platform::freetype::freetype_face::{
+    FALLBACK_HINTING_STYLE, FontBackingStore, FreeTypeFace,
+};
 
 const SEMI_BOLD_U16: u16 = Weight::SEMI_BOLD.value() as u16;
 
@@ -71,14 +72,11 @@ impl PlatformFontMethods for PlatformFont {
         _font_identifier: FontIdentifier,
         font_data: &FontData,
         requested_size: Option<Au>,
-        variations: &[FontVariation],
         synthetic_bold: bool,
     ) -> Result<PlatformFont, &'static str> {
         let library = FreeTypeLibraryHandle::get().lock();
-        let data: &[u8] = font_data.as_ref();
-        let face = FreeTypeFace::new_from_memory(&library, data)?;
-
-        let normalized_variations = face.set_variations_for_font(variations, &library)?;
+        let data = FontBackingStore::Web(font_data.clone());
+        let face = FreeTypeFace::new_from_memory(&library, data, 0)?;
 
         let (requested_face_size, actual_face_size) = match requested_size {
             Some(requested_size) => (requested_size, face.set_size(requested_size)?),
@@ -94,7 +92,7 @@ impl PlatformFontMethods for PlatformFont {
             requested_face_size,
             actual_face_size,
             table_provider_data,
-            variations: normalized_variations,
+            variations: vec![],
             synthetic_bold,
         })
     }
@@ -102,37 +100,31 @@ impl PlatformFontMethods for PlatformFont {
     fn new_from_local_font_identifier(
         font_identifier: LocalFontIdentifier,
         requested_size: Option<Au>,
-        variations: &[FontVariation],
         synthetic_bold: bool,
     ) -> Result<PlatformFont, &'static str> {
         let library = FreeTypeLibraryHandle::get().lock();
-        let Ok(filename) = CString::new(&*font_identifier.path) else {
-            return Err("filename contains null byte!");
+
+        let Ok(memory_mapped_font_data) = File::open(&*font_identifier.path)
+            .and_then(|file| unsafe { Mmap::map(&file) })
+            .map(Arc::new)
+        else {
+            return Err("Could not memory map font");
         };
 
-        let face = FreeTypeFace::new_from_file(
+        let face_index = font_identifier.face_index_for_freetype();
+        let face = FreeTypeFace::new_from_memory(
             &library,
-            &filename,
-            font_identifier.face_index_for_freetype(),
+            FontBackingStore::Local(memory_mapped_font_data.clone()),
+            face_index,
         )?;
-
-        let normalized_variations = face.set_variations_for_font(variations, &library)?;
 
         let (requested_face_size, actual_face_size) = match requested_size {
             Some(requested_size) => (requested_size, face.set_size(requested_size)?),
             None => (Au::zero(), Au::zero()),
         };
 
-        let Ok(memory_mapped_font_data) =
-            File::open(&*font_identifier.path).and_then(|file| unsafe { Mmap::map(&file) })
-        else {
-            return Err("Could not memory map");
-        };
-
-        let table_provider_data = FreeTypeFaceTableProviderData::Local(
-            Arc::new(memory_mapped_font_data),
-            font_identifier.index(),
-        );
+        let table_provider_data =
+            FreeTypeFaceTableProviderData::Local(memory_mapped_font_data, font_identifier.index());
 
         let synthetic_bold = table_provider_data.should_apply_synthetic_bold(synthetic_bold);
 
@@ -141,9 +133,22 @@ impl PlatformFontMethods for PlatformFont {
             requested_face_size,
             actual_face_size,
             table_provider_data,
-            variations: normalized_variations,
+            variations: vec![],
             synthetic_bold,
         })
+    }
+
+    fn copy_with_variations(
+        mut self,
+        _: &FontIdentifier,
+        variations: &[FontVariation],
+    ) -> Result<Self, &'static str> {
+        let library = FreeTypeLibraryHandle::get().lock();
+        self.variations = self
+            .face
+            .lock()
+            .set_variations_for_font(variations, &library)?;
+        Ok(self)
     }
 
     fn descriptor(&self) -> FontTemplateDescriptor {
@@ -329,7 +334,7 @@ impl PlatformFontMethods for PlatformFont {
             // that the result may be interpreted as pixels in 26.6 fixed point format.
             //
             // This converts the value to a float without losing precision.
-            y_scale = freetype_metrics.y_scale as f64 / 65535.0 / 64.0;
+            y_scale = freetype_metrics.y_scale as f64 / 65536.0 / 64.0;
 
             // The bounding box width, which is what Skia reports as the max char width (and what
             // macOS's CTFont gives here). Chrome sizes text fields by it; hhea's advanceWidthMax
@@ -421,7 +426,7 @@ impl PlatformFontMethods for PlatformFont {
             average_advance = self
                 .glyph_index('0')
                 .and_then(|idx| self.glyph_h_advance(idx))
-                .map_or(max_advance, |advance| advance * y_scale);
+                .unwrap_or(max_advance);
         }
 
         let zero_horizontal_advance = self
@@ -503,6 +508,15 @@ impl PlatformFontMethods for PlatformFont {
         }
 
         flags
+    }
+
+    fn webrender_font_instance_platform_options(&self) -> FontInstancePlatformOptions {
+        FontInstancePlatformOptions {
+            // TODO: We should eventually read the hinting style from the system when
+            // possible such as from Fontconfig.
+            hinting: FALLBACK_HINTING_STYLE,
+            ..Default::default()
+        }
     }
 
     fn variations(&self) -> &[FontVariation] {

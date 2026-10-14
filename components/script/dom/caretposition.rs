@@ -6,7 +6,7 @@ use app_units::Au;
 use dom_struct::dom_struct;
 use euclid::Rect;
 use js::context::JSContext;
-use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
+use script_bindings::reflector::{Reflector, reflect_dom_object};
 use style_traits::CSSPixel;
 
 use crate::dom::bindings::codegen::Bindings::CaretPositionBinding::CaretPositionMethods;
@@ -36,7 +36,8 @@ impl CaretPosition {
         offset: u32,
         client_rect: Option<Rect<Au, CSSPixel>>,
     ) -> DomRoot<CaretPosition> {
-        reflect_dom_object_with_cx(
+        reflect_dom_object(
+            cx,
             Box::new(CaretPosition {
                 reflector_: Reflector::new(),
                 offset_node: Dom::from_ref(offset_node),
@@ -44,7 +45,6 @@ impl CaretPosition {
                 client_rect,
             }),
             window.upcast::<GlobalScope>(),
-            cx,
         )
     }
 }

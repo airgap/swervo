@@ -2,7 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+#![cfg_attr(crown, allow(crown::jscontext_first_arg))]
+
 use std::cell::Cell;
+use std::rc::Rc;
 
 use js::context::JSContext;
 use js::jsapi::{AddAssociatedMemory, Heap, JSObject, MemoryUse, RemoveAssociatedMemory};
@@ -12,8 +15,8 @@ use malloc_size_of_derive::MallocSizeOf;
 use crate::conversions::DerivedFrom;
 use crate::interfaces::GlobalScopeHelpers;
 use crate::iterable::{Iterable, IterableIterator};
+use crate::realms::enter_auto_realm;
 use crate::root::{Dom, DomRoot, Root};
-use crate::script_runtime::{CanGc, temp_cx};
 use crate::{DomTypes, JSTraceable};
 
 pub trait AssociatedMemorySize: Default {
@@ -49,7 +52,11 @@ pub struct Reflector<T = ()> {
 }
 
 unsafe impl<T> js::gc::Traceable for Reflector<T> {
-    unsafe fn trace(&self, _: *mut js::jsapi::JSTracer) {}
+    unsafe fn trace(&self, tracer: *mut js::jsapi::JSTracer) {
+        unsafe {
+            self.object.trace(tracer);
+        }
+    }
 }
 
 impl<T> PartialEq for Reflector<T> {
@@ -222,6 +229,19 @@ pub trait DomGlobalGeneric<D: DomTypes>: DomObject {
     where
         Self: Sized,
     {
+        // SAFETY: We only use this `cx` to enter a realm. That does not
+        // incur a GC and hence is safe to perform. We do not want to
+        // pass a `cx` as parameter to this function, as this used in
+        // loads of places. At the same time, it also isn't necessary in
+        // nearly all cases to enter realm, since we are already in the
+        // correct realm.
+        //
+        // However, there are cases where it is difficult to ensure that
+        // we are in the correct realm. Hence we always enter a realm here
+        // even if that is unnecessary at times.
+        let cx = unsafe { JSContext::get_from_thread() };
+        let cx = &mut cx.expect("JS runtime has shut down");
+        let _realm = enter_auto_realm::<D>(cx, self);
         D::GlobalScope::from_reflector(self)
     }
 }
@@ -240,6 +260,20 @@ pub trait DomObjectWrap<D: DomTypes>: Sized + DomObject + DomGlobalGeneric<D> {
     ) -> Root<Dom<Self>>;
 }
 
+/// A trait to provide a function pointer to wrap function for DOM objects.
+pub trait WeakReferenceableDomObjectWrap<D: DomTypes>:
+    Sized + DomObject + DomGlobalGeneric<D>
+{
+    /// Function pointer to the general wrap function type
+    #[expect(clippy::type_complexity)]
+    const WRAP: unsafe fn(
+        &mut JSContext,
+        &D::GlobalScope,
+        Option<HandleObject>,
+        Rc<Self>,
+    ) -> Root<Dom<Self>>;
+}
+
 /// A trait to provide a function pointer to wrap function for
 /// DOM iterator interfaces.
 pub trait DomObjectIteratorWrap<D: DomTypes>: DomObjectWrap<D> + JSTraceable + Iterable {
@@ -255,40 +289,7 @@ pub trait DomObjectIteratorWrap<D: DomTypes>: DomObjectWrap<D> + JSTraceable + I
 
 /// Create the reflector for a new DOM object and yield ownership to the
 /// reflector.
-pub fn reflect_dom_object<D, T, U>(obj: Box<T>, global: &U, _can_gc: CanGc) -> DomRoot<T>
-where
-    D: DomTypes,
-    T: DomObject + DomObjectWrap<D>,
-    U: DerivedFrom<D::GlobalScope>,
-{
-    let global_scope = global.upcast();
-    let mut cx = unsafe { temp_cx() };
-    unsafe { T::WRAP(&mut cx, global_scope, None, obj) }
-}
-
-pub fn reflect_dom_object_with_proto<D, T, U>(
-    obj: Box<T>,
-    global: &U,
-    proto: Option<HandleObject>,
-    _can_gc: CanGc,
-) -> DomRoot<T>
-where
-    D: DomTypes,
-    T: DomObject + DomObjectWrap<D>,
-    U: DerivedFrom<D::GlobalScope>,
-{
-    let global_scope = global.upcast();
-    let mut cx = unsafe { temp_cx() };
-    unsafe { T::WRAP(&mut cx, global_scope, proto, obj) }
-}
-
-/// Create the reflector for a new DOM object and yield ownership to the
-/// reflector.
-pub fn reflect_dom_object_with_cx<D, T, U>(
-    obj: Box<T>,
-    global: &U,
-    cx: &mut JSContext,
-) -> DomRoot<T>
+pub fn reflect_dom_object<D, T, U>(cx: &mut JSContext, obj: Box<T>, global: &U) -> DomRoot<T>
 where
     D: DomTypes,
     T: DomObject + DomObjectWrap<D>,
@@ -298,13 +299,11 @@ where
     unsafe { T::WRAP(cx, global_scope, None, obj) }
 }
 
-/// Create the reflector for a new DOM object and yield ownership to the
-/// reflector.
-pub fn reflect_dom_object_with_proto_and_cx<D, T, U>(
+pub fn reflect_dom_object_with_proto<D, T, U>(
+    cx: &mut JSContext,
     obj: Box<T>,
     global: &U,
     proto: Option<HandleObject>,
-    cx: &mut JSContext,
 ) -> DomRoot<T>
 where
     D: DomTypes,
@@ -313,4 +312,107 @@ where
 {
     let global_scope = global.upcast();
     unsafe { T::WRAP(cx, global_scope, proto, obj) }
+}
+
+/// Create the reflector for a new DOM object and yield ownership to the
+/// reflector.
+pub fn reflect_weak_referenceable_dom_object<D, T, U>(
+    cx: &mut JSContext,
+    obj: Rc<T>,
+    global: &U,
+) -> DomRoot<T>
+where
+    D: DomTypes,
+    T: DomObject + WeakReferenceableDomObjectWrap<D>,
+    U: DerivedFrom<D::GlobalScope>,
+{
+    let global_scope = global.upcast();
+    unsafe { T::WRAP(cx, global_scope, None, obj) }
+}
+
+pub fn reflect_weak_referenceable_dom_object_with_proto<D, T, U>(
+    cx: &mut JSContext,
+    obj: Rc<T>,
+    global: &U,
+    proto: Option<HandleObject>,
+) -> DomRoot<T>
+where
+    D: DomTypes,
+    T: DomObject + WeakReferenceableDomObjectWrap<D>,
+    U: DerivedFrom<D::GlobalScope>,
+{
+    let global_scope = global.upcast();
+    unsafe { T::WRAP(cx, global_scope, proto, obj) }
+}
+
+type WrapFn<D, AbstractType> = unsafe fn(
+    &mut JSContext,
+    &<D as DomTypes>::GlobalScope,
+    Option<HandleObject>,
+    Box<AbstractType>,
+) -> DomRoot<AbstractType>;
+
+/// Create the reflector for a new DOM object and yield ownership to the
+/// reflector.
+pub fn reflect_dom_object_with_proto_and_wrap<D, AbstractType, GlobalType>(
+    cx: &mut JSContext,
+    obj: Box<AbstractType>,
+    global: &GlobalType,
+    proto: Option<HandleObject>,
+    wrap: WrapFn<D, AbstractType>,
+) -> DomRoot<AbstractType>
+where
+    D: DomTypes,
+    AbstractType: DomObject,
+    GlobalType: DerivedFrom<D::GlobalScope>,
+    Box<AbstractType>: From<Box<AbstractType>>,
+    DomRoot<AbstractType>: From<DomRoot<AbstractType>>,
+{
+    let global_scope = global.upcast();
+    unsafe { wrap(cx, global_scope, proto, obj) }
+}
+
+/// Create the reflector for a new DOM object and yield ownership to the
+/// reflector.
+pub fn reflect_dom_object_with_wrap<D, AbstractType, GlobalType>(
+    cx: &mut JSContext,
+    obj: Box<AbstractType>,
+    global: &GlobalType,
+    wrap: WrapFn<D, AbstractType>,
+) -> DomRoot<AbstractType>
+where
+    D: DomTypes,
+    AbstractType: DomObject,
+    GlobalType: DerivedFrom<D::GlobalScope>,
+    Box<AbstractType>: From<Box<AbstractType>>,
+    DomRoot<AbstractType>: From<DomRoot<AbstractType>>,
+{
+    let global_scope = global.upcast();
+    unsafe { wrap(cx, global_scope, None, obj) }
+}
+
+type WrapFnRc<D, AbstractType> = unsafe fn(
+    &mut JSContext,
+    &<D as DomTypes>::GlobalScope,
+    Option<HandleObject>,
+    Rc<AbstractType>,
+) -> DomRoot<AbstractType>;
+
+/// Create the reflector for a new DOM object and yield ownership to the
+/// reflector.
+pub fn reflect_weak_referenceable_dom_object_with_wrap<D, AbstractType, GlobalType>(
+    cx: &mut JSContext,
+    obj: Rc<AbstractType>,
+    global: &GlobalType,
+    wrap: WrapFnRc<D, AbstractType>,
+) -> DomRoot<AbstractType>
+where
+    D: DomTypes,
+    AbstractType: DomObject,
+    GlobalType: DerivedFrom<D::GlobalScope>,
+    Rc<AbstractType>: From<Rc<AbstractType>>,
+    DomRoot<AbstractType>: From<DomRoot<AbstractType>>,
+{
+    let global_scope = global.upcast();
+    unsafe { wrap(cx, global_scope, None, obj) }
 }

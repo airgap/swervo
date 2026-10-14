@@ -16,6 +16,7 @@ use crate::dom::customelementregistry::{
 use crate::dom::document::Document;
 use crate::dom::element::{CustomElementCreationMode, Element, ElementCreator};
 use crate::dom::globalscope::GlobalScope;
+use crate::dom::html::form_controls::htmlinputelement::HTMLInputElement;
 use crate::dom::html::htmlanchorelement::HTMLAnchorElement;
 use crate::dom::html::htmlareaelement::HTMLAreaElement;
 use crate::dom::html::htmlaudioelement::HTMLAudioElement;
@@ -84,7 +85,6 @@ use crate::dom::html::htmltrackelement::HTMLTrackElement;
 use crate::dom::html::htmlulistelement::HTMLUListElement;
 use crate::dom::html::htmlunknownelement::HTMLUnknownElement;
 use crate::dom::html::htmlvideoelement::HTMLVideoElement;
-use crate::dom::html::input_element::HTMLInputElement;
 use crate::dom::htmlmarqueeelement::HTMLMarqueeElement;
 use crate::dom::svg::svgaelement::SVGAElement;
 use crate::dom::svg::svgcircleelement::SVGCircleElement;
@@ -117,8 +117,8 @@ use crate::dom::svg::svgtextpathelement::SVGTextPathElement;
 use crate::dom::svg::svgtitleelement::SVGTitleElement;
 use crate::dom::svg::svgtspanelement::SVGTSpanElement;
 use crate::dom::svg::svguseelement::SVGUseElement;
+use crate::event_loop::script_thread::ScriptThread;
 use crate::realms::enter_auto_realm;
-use crate::script_thread::ScriptThread;
 
 fn create_svg_element(
     cx: &mut JSContext,
@@ -191,8 +191,13 @@ fn create_html_element(
     let registry = CustomElementRegistry::lookup_a_custom_element_registry(document.upcast());
 
     // Step 3. Let definition be the result of looking up a custom element
-    // definition given document, namespace, localName, and is.
-    let definition = document.lookup_custom_element_definition(&name.ns, &name.local, is.as_ref());
+    // definition given registry, namespace, localName, and is.
+    let definition = CustomElementRegistry::lookup_custom_element_definition(
+        registry.as_deref(),
+        &name.ns,
+        &name.local,
+        is.as_ref(),
+    );
 
     // Step 4. If definition is non-null...
     if let Some(definition) = definition {
@@ -204,8 +209,8 @@ fn create_html_element(
             // interface, localName, the HTML namespace, prefix, "undefined", is, and registry.
             let element = create_native_html_element(cx, name, prefix, document, creator, proto);
             element.set_is(definition.name.clone());
-            element.set_custom_element_state(CustomElementState::Undefined);
-            element.set_custom_element_registry(registry.as_deref());
+            element.set_custom_element_state(CustomElementState::Undefined, cx.no_gc());
+            element.set_custom_element_registry(registry.as_deref(), cx.no_gc());
 
             match mode {
                 // Step 4.3. If synchronousCustomElements is true, then run this step while catching any exceptions:
@@ -236,7 +241,7 @@ fn create_html_element(
                         registry.as_deref(),
                     ) {
                         Ok(element) => {
-                            element.set_custom_element_definition(definition.clone());
+                            element.set_custom_element_definition(definition.clone(), cx.no_gc());
                             element
                         },
                         Err(error) => {
@@ -257,8 +262,9 @@ fn create_html_element(
                             let element = DomRoot::upcast::<Element>(HTMLUnknownElement::new(
                                 cx, local_name, prefix, document, proto,
                             ));
-                            element.set_custom_element_state(CustomElementState::Failed);
-                            element.set_custom_element_registry(registry.as_deref());
+                            element
+                                .set_custom_element_state(CustomElementState::Failed, cx.no_gc());
+                            element.set_custom_element_registry(registry.as_deref(), cx.no_gc());
                             element
                         },
                     };
@@ -273,8 +279,8 @@ fn create_html_element(
                     let result = DomRoot::upcast::<Element>(HTMLElement::new(
                         cx, name.local, prefix, document, proto,
                     ));
-                    result.set_custom_element_state(CustomElementState::Undefined);
-                    result.set_custom_element_registry(registry.as_deref());
+                    result.set_custom_element_state(CustomElementState::Undefined, cx.no_gc());
+                    result.set_custom_element_registry(registry.as_deref(), cx.no_gc());
                     // Step 4.2.2. Enqueue a custom element upgrade reaction given result and definition.
                     ScriptThread::enqueue_upgrade_reaction(cx, &result, definition);
                     return result;
@@ -295,13 +301,13 @@ fn create_html_element(
     match is {
         Some(is) => {
             result.set_is(is);
-            result.set_custom_element_state(CustomElementState::Undefined);
-            result.set_custom_element_registry(registry.as_deref());
+            result.set_custom_element_state(CustomElementState::Undefined, cx.no_gc());
+            result.set_custom_element_registry(registry.as_deref(), cx.no_gc());
         },
         None => {
             if is_valid_custom_element_name(&name.local) {
-                result.set_custom_element_state(CustomElementState::Undefined);
-                result.set_custom_element_registry(registry.as_deref());
+                result.set_custom_element_state(CustomElementState::Undefined, cx.no_gc());
+                result.set_custom_element_registry(registry.as_deref(), cx.no_gc());
             } else {
                 // Note: This is a performance optimization. See the doc comment of the method for
                 // more information.
@@ -474,7 +480,7 @@ pub(crate) fn create_native_html_element(
         // https://html.spec.whatwg.org/multipage/#the-thead-element:concept-element-dom
         local_name!("thead") => make!(HTMLTableSectionElement),
         local_name!("time") => make!(HTMLTimeElement),
-        local_name!("title") => make!(HTMLTitleElement),
+        local_name!("title") => make!(HTMLTitleElement, creator),
         local_name!("tr") => make!(HTMLTableRowElement),
         local_name!("tt") => make!(HTMLElement),
         local_name!("track") => make!(HTMLTrackElement),

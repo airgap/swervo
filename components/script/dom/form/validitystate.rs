@@ -10,7 +10,9 @@ use dom_struct::dom_struct;
 use itertools::Itertools;
 use js::context::JSContext;
 use script_bindings::cell::{DomRefCell, Ref};
-use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
+use script_bindings::dom::UnrootedDom;
+use script_bindings::domstring::TracedDOMString;
+use script_bindings::reflector::{Reflector, reflect_dom_object};
 use stylo_dom::ElementState;
 
 use crate::dom::bindings::codegen::Bindings::ElementInternalsBinding::ValidityStateFlags;
@@ -19,9 +21,9 @@ use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::element::Element;
+use crate::dom::html::form_controls::htmlinputelement::HTMLInputElement;
 use crate::dom::html::htmlfieldsetelement::HTMLFieldSetElement;
 use crate::dom::html::htmlformelement::FormControlElementHelpers;
-use crate::dom::html::input_element::HTMLInputElement;
 use crate::dom::node::Node;
 use crate::dom::window::Window;
 
@@ -73,12 +75,12 @@ impl fmt::Display for ValidationFlags {
     }
 }
 
-// https://html.spec.whatwg.org/multipage/#validitystate
+/// <https://html.spec.whatwg.org/multipage/#validitystate>
 #[dom_struct]
 pub(crate) struct ValidityState {
     reflector_: Reflector,
     element: Dom<Element>,
-    custom_error_message: DomRefCell<DOMString>,
+    custom_error_message: DomRefCell<TracedDOMString>,
     invalid_flags: Cell<ValidationFlags>,
     /// <https://html.spec.whatwg.org/multipage/#user-validity>
     user_validity: Cell<bool>,
@@ -89,7 +91,7 @@ impl ValidityState {
         ValidityState {
             reflector_: Reflector::new(),
             element: Dom::from_ref(element),
-            custom_error_message: DomRefCell::new(DOMString::new()),
+            custom_error_message: DomRefCell::new(DOMString::new().traced()),
             invalid_flags: Cell::new(ValidationFlags::empty()),
             user_validity: Cell::new(false),
         }
@@ -100,17 +102,17 @@ impl ValidityState {
         window: &Window,
         element: &Element,
     ) -> DomRoot<ValidityState> {
-        reflect_dom_object_with_cx(Box::new(ValidityState::new_inherited(element)), window, cx)
+        reflect_dom_object(cx, Box::new(ValidityState::new_inherited(element)), window)
     }
 
-    // https://html.spec.whatwg.org/multipage/#custom-validity-error-message
-    pub(crate) fn custom_error_message(&self) -> Ref<'_, DOMString> {
+    /// <https://html.spec.whatwg.org/multipage/#custom-validity-error-message>
+    pub(crate) fn custom_error_message(&self) -> Ref<'_, TracedDOMString> {
         self.custom_error_message.borrow()
     }
 
-    // https://html.spec.whatwg.org/multipage/#custom-validity-error-message
+    /// <https://html.spec.whatwg.org/multipage/#custom-validity-error-message>
     pub(crate) fn set_custom_error_message(&self, cx: &mut JSContext, error: DOMString) {
-        *self.custom_error_message.borrow_mut() = error;
+        *self.custom_error_message.borrow_mut() = error.traced();
         self.perform_validation_and_update(cx, ValidationFlags::CUSTOM_ERROR);
     }
 
@@ -160,7 +162,7 @@ impl ValidityState {
 
     pub(crate) fn update_pseudo_classes(&self, cx: &mut JSContext) {
         let invalid_flags = self.invalid_flags.get();
-        let is_candidate = self.element.is_instance_validatable();
+        let is_candidate = self.element.is_instance_validatable(cx.no_gc());
         let is_valid = invalid_flags.is_empty();
         self.element
             .set_state(ElementState::VALID, is_candidate && is_valid);
@@ -200,8 +202,9 @@ impl ValidityState {
         if let Some(fieldset) = self
             .element
             .upcast::<Node>()
-            .ancestors()
-            .find_map(DomRoot::downcast::<HTMLFieldSetElement>)
+            .ancestors_unrooted(cx.no_gc())
+            .find_map(UnrootedDom::downcast::<HTMLFieldSetElement>)
+            .map(|node| node.as_rooted())
         {
             fieldset.update_validity(cx);
         }

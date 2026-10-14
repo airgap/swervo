@@ -7,7 +7,7 @@ use embedder_traits::Cursor;
 use euclid::Point2D;
 use js::context::JSContext;
 use js::rust::HandleObject;
-use script_bindings::reflector::reflect_dom_object_with_proto_and_cx;
+use script_bindings::reflector::reflect_dom_object_with_proto;
 use style::Atom;
 use style_traits::CSSPixel;
 
@@ -18,6 +18,7 @@ use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::datatransfer::DataTransfer;
 use crate::dom::node::Node;
+use crate::dom::selection_range::RootedSelectionBoundary;
 use crate::dom::staticrange::StaticRange;
 use crate::dom::uievent::UIEvent;
 use crate::dom::window::Window;
@@ -45,7 +46,8 @@ impl InputEvent {
         is_composing: bool,
         input_type: DOMString,
     ) -> DomRoot<InputEvent> {
-        let event = reflect_dom_object_with_proto_and_cx(
+        let event = reflect_dom_object_with_proto(
+            cx,
             Box::new(InputEvent {
                 uievent: UIEvent::new_inherited(),
                 data,
@@ -54,7 +56,6 @@ impl InputEvent {
             }),
             window,
             proto,
-            cx,
         );
         event
             .uievent
@@ -125,6 +126,7 @@ impl InputEventMethods<crate::DomTypeHolder> for InputEvent {
 /// `PaintHitTestResult` against our current layout.
 pub(crate) struct HitTestResult {
     pub node: DomRoot<Node>,
+    pub dom_position_for_selection: Option<RootedSelectionBoundary>,
     pub cursor: Cursor,
     pub point_in_node: Point2D<f32, CSSPixel>,
     pub point_in_frame: Point2D<f32, CSSPixel>,

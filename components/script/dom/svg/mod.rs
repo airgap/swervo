@@ -4,15 +4,35 @@
 
 pub(crate) mod svgaelement;
 pub(crate) mod svganimatedstring;
+pub(crate) mod svgcircleelement;
+pub(crate) mod svgdefselement;
 pub(crate) mod svgelement;
+pub(crate) mod svgellipseelement;
+pub(crate) mod svggelement;
+pub(crate) mod svggeometryelement;
+pub(crate) mod svggradientelement;
 pub(crate) mod svggraphicselement;
 pub(crate) mod svgimageelement;
+pub(crate) mod svglineargradientelement;
+pub(crate) mod svglineelement;
+pub(crate) mod svgpathelement;
+pub(crate) mod svgpatternelement;
+pub(crate) mod svgpolygonelement;
+pub(crate) mod svgpolylineelement;
+pub(crate) mod svgradialgradientelement;
+pub(crate) mod svgrectelement;
+pub(crate) mod svgstopelement;
 pub(crate) mod svgsvgelement;
+pub(crate) mod svgsymbolelement;
+pub(crate) mod svgtextcontentelement;
+pub(crate) mod svgtextelement;
+pub(crate) mod svgtextpositioningelement;
+pub(crate) mod svgtspanelement;
 pub(crate) mod svguseelement;
 
 /// Defines a module per SVG element interface that has no members implemented beyond its
 /// inheritance chain. Creating the element still has to produce the right interface: pages
-/// branch on `instanceof SVGAElement` and friends (crates.io's router, NYT), and a
+/// branch on `instanceof SVGForeignObjectElement` and friends (crates.io's router, NYT), and a
 /// `ReferenceError` on an unknown interface name aborts the whole script.
 macro_rules! svg_element_interfaces {
     ($($kind:ident $module:ident::$name:ident : $parent_module:ident::$parent:ident;)*) => {
@@ -68,32 +88,12 @@ macro_rules! svg_element_interfaces {
 }
 
 svg_element_interfaces! {
-    abstract_interface svggeometryelement::SVGGeometryElement : svggraphicselement::SVGGraphicsElement;
-    interface svggelement::SVGGElement : svggraphicselement::SVGGraphicsElement;
-    interface svgdefselement::SVGDefsElement : svggraphicselement::SVGGraphicsElement;
-    interface svgsymbolelement::SVGSymbolElement : svggraphicselement::SVGGraphicsElement;
     interface svgswitchelement::SVGSwitchElement : svggraphicselement::SVGGraphicsElement;
     interface svgforeignobjectelement::SVGForeignObjectElement : svggraphicselement::SVGGraphicsElement;
     interface svgdescelement::SVGDescElement : svgelement::SVGElement;
     interface svgtitleelement::SVGTitleElement : svgelement::SVGElement;
     interface svgmetadataelement::SVGMetadataElement : svgelement::SVGElement;
-    interface svgpathelement::SVGPathElement : svggeometryelement::SVGGeometryElement;
-    interface svgrectelement::SVGRectElement : svggeometryelement::SVGGeometryElement;
-    interface svgcircleelement::SVGCircleElement : svggeometryelement::SVGGeometryElement;
-    interface svgellipseelement::SVGEllipseElement : svggeometryelement::SVGGeometryElement;
-    interface svglineelement::SVGLineElement : svggeometryelement::SVGGeometryElement;
-    interface svgpolylineelement::SVGPolylineElement : svggeometryelement::SVGGeometryElement;
-    interface svgpolygonelement::SVGPolygonElement : svggeometryelement::SVGGeometryElement;
-    abstract_interface svgtextcontentelement::SVGTextContentElement : svggraphicselement::SVGGraphicsElement;
-    abstract_interface svgtextpositioningelement::SVGTextPositioningElement : svgtextcontentelement::SVGTextContentElement;
-    interface svgtextelement::SVGTextElement : svgtextpositioningelement::SVGTextPositioningElement;
-    interface svgtspanelement::SVGTSpanElement : svgtextpositioningelement::SVGTextPositioningElement;
     interface svgtextpathelement::SVGTextPathElement : svgtextcontentelement::SVGTextContentElement;
-    abstract_interface svggradientelement::SVGGradientElement : svgelement::SVGElement;
-    interface svglineargradientelement::SVGLinearGradientElement : svggradientelement::SVGGradientElement;
-    interface svgradialgradientelement::SVGRadialGradientElement : svggradientelement::SVGGradientElement;
-    interface svgstopelement::SVGStopElement : svgelement::SVGElement;
-    interface svgpatternelement::SVGPatternElement : svgelement::SVGElement;
     interface svgmarkerelement::SVGMarkerElement : svgelement::SVGElement;
     interface svgclippathelement::SVGClipPathElement : svgelement::SVGElement;
     interface svgmaskelement::SVGMaskElement : svgelement::SVGElement;
