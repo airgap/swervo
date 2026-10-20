@@ -597,7 +597,7 @@ impl WorkerGlobalScope {
         // Step 4. Obtain the network worker's own response policy; unlike local
         // workers, it must not inherit COEP from its creator.
         self.policy_container.borrow_mut().embedder_policy = EmbedderPolicy::from_headers(
-            metadata.headers.as_ref().map(|headers| &**headers),
+            metadata.headers.as_deref(),
             self.upcast::<GlobalScope>().is_secure_context(),
         );
         // Step 5. Set result's referrer policy to the result of parsing the `Referrer-Policy`

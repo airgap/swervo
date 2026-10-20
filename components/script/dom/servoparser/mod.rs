@@ -1068,7 +1068,7 @@ impl ParserContext {
             // check (including ancestors) runs in initialize_document_object, once
             // the destination Window exists and before any document scripts run.
             embedder_policy: EmbedderPolicy::from_headers(
-                metadata.headers.as_ref().map(|headers| &**headers),
+                metadata.headers.as_deref(),
                 metadata.final_url.is_potentially_trustworthy(),
             ),
             // Step 5. Set result's referrer policy to the result of parsing the `Referrer-Policy` header given response. [REFERRERPOLICY]
