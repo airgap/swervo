@@ -219,12 +219,12 @@ sea-query-rusqlite = "=0.8.0-rc.15"
 selectors = { git = "https://github.com/servo/stylo", rev = "bc25ec938fa224410eebf21a8963074bc8d8126d" }
 seq-macro = "0.3.6"
 serde = "1.0.228"
-sfv = "0.16.0"
 serde_bytes = "0.11"
 serde_core = "1.0.226"
 serde_json = "1.0"
 serde_test = "1.0"
 servo_arc = { git = "https://github.com/servo/stylo", rev = "bc25ec938fa224410eebf21a8963074bc8d8126d" }
+sfv = "0.16.0"
 sha1 = "0.11"
 sha2 = "0.11"
 sha3 = "0.12"
