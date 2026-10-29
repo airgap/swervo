@@ -59,7 +59,7 @@ use crate::dom::workerglobalscope::WorkerGlobalScope;
 use crate::messaging::{CommonScriptMsg, ScriptEventLoopReceiver, ScriptEventLoopSender};
 use crate::script_module::fetch_a_module_worker_script_graph;
 use crate::script_runtime::ScriptThreadEventCategory::WorkerEvent;
-use crate::script_runtime::{CanGc, Runtime};
+use crate::script_runtime::{CanGc, Runtime, ThreadSafeJSContext};
 use crate::task_queue::{QueuedTask, QueuedTaskConversion, TaskQueue};
 use crate::task_source::TaskSourceName;
 
@@ -374,7 +374,7 @@ impl SharedWorkerGlobalScope {
         image_cache: Arc<dyn ImageCache>,
         #[cfg(feature = "webgpu")] gpu_id_hub: Arc<IdentityHub>,
         control_receiver: Receiver<SharedWorkerControlMsg>,
-        setup_sender: Sender<bool>,
+        setup_sender: Sender<(bool, ThreadSafeJSContext)>,
         registration_receiver: Receiver<()>,
         registration_id: Uuid,
         credentials: CredentialsMode,
@@ -430,6 +430,7 @@ impl SharedWorkerGlobalScope {
                 // still create their own JS runtime in that thread; this avoids child
                 // runtime lifetime coupling with the embedding script thread.
                 let runtime = Runtime::new(Some(event_loop_sender.clone()));
+                let context_for_interrupt = runtime.thread_safe_js_context();
                 // SAFETY: We are in a new thread, so this first cx.
                 // It is OK to have it separated of runtime here,
                 // because it will never outlive it (runtime destruction happens at the end of this function)
@@ -509,7 +510,10 @@ impl SharedWorkerGlobalScope {
                     );
                 }
 
-                if setup_sender.send(worker_is_secure_context).is_err() {
+                if setup_sender
+                    .send((worker_is_secure_context, context_for_interrupt))
+                    .is_err()
+                {
                     scope.clear_js_runtime();
                     return;
                 }
