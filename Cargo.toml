@@ -39,7 +39,9 @@ app_units = "0.7"
 arboard = "3"
 argon2 = { version = "0.6", features = ["alloc"] }
 arrayvec = "0.7"
-async-compression = { version = "0.4.12", default-features = false }
+# Cargo.lock keeps compression-codecs at 0.4.44 to share Brotli 8 with script;
+# later codecs require Brotli 9 and trip the duplicate-package ban.
+async-compression = { version = "0.4.49", default-features = false }
 async-recursion = "1.1"
 async-tungstenite = { version = "0.34", features = ["tokio-rustls-webpki-roots"] }
 atomic_refcell = "0.1.14"
@@ -67,7 +69,7 @@ content-security-policy = { version = "0.8.0", features = ["serde"] }
 cookie = { package = "cookie", version = "0.18" }
 criterion = "0.8"
 crossbeam-channel = "0.5"
-crypto-bigint = "0.7"
+crypto-bigint = "0.7.6"
 cshake = "0.2"
 cssparser = { version = "0.37", features = ["serde"] }
 ctr = { version = "0.10", features = ["zeroize"] }
@@ -211,7 +213,7 @@ rsa = "=0.10.0-rc.18"
 rusqlite = "0.37"
 rustc-demangle = "0.1"
 rustc-hash = "2.1.2"
-rustls = { version = "0.23.45", default-features = false, features = ["logging", "std", "tls12"] }
+rustls = { version = "0.23.46", default-features = false, features = ["logging", "std", "tls12"] }
 rustls-pki-types = "1.14"
 rustls-platform-verifier = "0.7.0"
 sea-query = { version = "=1.0.0-rc.31", default-features = false, features = ["backend-sqlite", "derive"] }
@@ -275,7 +277,7 @@ vello_cpu = "0.0.9"
 warp = "0.4.2"
 web_atoms = "0.2.4"
 webdriver = { version = "0.53.0", default-features = false }
-webpki-roots = "1.0"
+webpki-roots = "1.0.10"
 webrender = { version = "0.69", features = ["capture"] }
 webrender_api = "0.69"
 wgpu-core = "29"

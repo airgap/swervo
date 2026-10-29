@@ -68,7 +68,7 @@ impl EmbedderPolicy {
     /// Obtain the supported enforcing embedder policy from a response. COEP is a
     /// structured-field *item*, not a comma-separated list or a quoted string.
     ///
-    /// <https://html.spec.whatwg.org/multipage/browsers.html#obtain-an-embedder-policy>
+    /// <https://html.spec.whatwg.org/multipage/#obtain-an-embedder-policy>
     ///
     /// Reporting and credentialless are not implemented yet. This does not grant
     /// cross-origin isolation: COOP, navigation checks and agent-cluster isolation
