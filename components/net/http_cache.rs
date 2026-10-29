@@ -20,6 +20,7 @@ use log::{debug, error};
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use malloc_size_of_derive::MallocSizeOf;
 use net_traits::http_status::HttpStatus;
+use net_traits::partition_key::NetworkPartitionKey;
 use net_traits::request::Request;
 use net_traits::response::{Response, ResponseBody};
 use net_traits::{CacheEntryDescriptor, FetchMetadata, Metadata, ResourceFetchTiming};
@@ -39,6 +40,7 @@ use crate::fetch::methods::{Data, DoneChannel};
 #[derive(Clone, Eq, Hash, MallocSizeOf, PartialEq)]
 pub struct CacheKey {
     url: ServoUrl,
+    partition_key: Option<NetworkPartitionKey>,
 }
 
 impl CacheKey {
@@ -46,12 +48,13 @@ impl CacheKey {
     pub fn new(request: &Request) -> CacheKey {
         CacheKey {
             url: request.current_url(),
+            partition_key: request.network_partition_key(),
         }
     }
 
     /// Create a cache-key from a resolved URL.
-    pub fn from_url(url: ServoUrl) -> CacheKey {
-        CacheKey { url }
+    pub fn from_url(url: ServoUrl, partition_key: Option<NetworkPartitionKey>) -> CacheKey {
+        CacheKey { url, partition_key }
     }
 }
 
@@ -156,6 +159,8 @@ struct PersistedCache {
 #[derive(Deserialize, Serialize)]
 struct PersistedEntry {
     url: String,
+    #[serde(default)]
+    partition_key: Option<NetworkPartitionKey>,
     resources: Vec<PersistedResource>,
 }
 
@@ -221,6 +226,11 @@ impl HttpCache {
         let b64 = base64::engine::general_purpose::STANDARD;
 
         for entry in persisted.entries {
+            // Old origin-only cache files have no trustworthy embedding context.
+            // Treat them as misses rather than importing them into every partition.
+            let Some(partition_key) = entry.partition_key else {
+                continue;
+            };
             let Ok(url) = ServoUrl::parse(&entry.url) else {
                 continue;
             };
@@ -268,7 +278,7 @@ impl HttpCache {
             }
             if !resources.is_empty() {
                 cache.entries.insert(
-                    CacheKey::from_url(url),
+                    CacheKey::from_url(url, Some(partition_key)),
                     std::sync::Arc::new(TokioRwLock::new(resources)),
                 );
             }
@@ -339,6 +349,7 @@ impl HttpCache {
             if !out.is_empty() {
                 persisted.entries.push(PersistedEntry {
                     url: key.url.to_string(),
+                    partition_key: key.partition_key.clone(),
                     resources: out,
                 });
             }
@@ -1019,7 +1030,7 @@ impl HttpCache {
         for header_name in &[header::LOCATION, header::CONTENT_LOCATION] {
             if let Some(location_url) = resolve_location_url(request, response, header_name.clone())
             {
-                let location_key = CacheKey::from_url(location_url);
+                let location_key = CacheKey::from_url(location_url, skip_key.partition_key.clone());
                 if &location_key != skip_key {
                     self.invalidate_entry(&location_key).await;
                 }
@@ -1037,6 +1048,9 @@ impl HttpCache {
     /// If the value exist in the cache, return it. If the value does not exist, return a guard you can use to insert values in the cache.
     /// If the guard is alive, all other accesses to this function will block.
     pub async fn get_or_guard(&self, entry_key: CacheKey) -> CachedResourcesOrGuard<'_> {
+        if entry_key.partition_key.is_none() {
+            return CachedResourcesOrGuard::Disabled;
+        }
         match self.entries.get_value_or_guard_async(&entry_key).await {
             Ok(val) => CachedResourcesOrGuard::Value(val.write_owned().await),
             Err(guard) => CachedResourcesOrGuard::Guard(guard),
@@ -1047,6 +1061,8 @@ impl HttpCache {
 /// Returns an writeable entry into the cache or a guard for insertint an entry
 /// The guard will block other queries to the cache entry in both cases.
 pub enum CachedResourcesOrGuard<'a> {
+    /// No trustworthy top-level site is available; do not read or populate a cache.
+    Disabled,
     /// The value of the resource in the cache.
     Value(OwnedRwLockWriteGuard<Vec<CachedResource>>),
     /// A guard that blocks requests to the cache entry this guard is for.
@@ -1056,7 +1072,7 @@ pub enum CachedResourcesOrGuard<'a> {
 impl<'a> CachedResourcesOrGuard<'a> {
     /// Insert into the cache according to http spec
     pub fn insert(self, request: &Request, response: &Response) {
-        if pref!(network_http_cache_disabled) {
+        if matches!(self, Self::Disabled) || pref!(network_http_cache_disabled) {
             return;
         }
 
@@ -1106,6 +1122,7 @@ impl<'a> CachedResourcesOrGuard<'a> {
         };
 
         match self {
+            CachedResourcesOrGuard::Disabled => {},
             CachedResourcesOrGuard::Value(mut owned_rw_lock_write_guard) => {
                 owned_rw_lock_write_guard.push(entry_resource);
             },
@@ -1126,7 +1143,7 @@ impl<'a> CachedResourcesOrGuard<'a> {
             CachedResourcesOrGuard::Value(owned_rw_lock_write_guard) => {
                 Some(owned_rw_lock_write_guard.as_mut())
             },
-            CachedResourcesOrGuard::Guard(_) => None,
+            CachedResourcesOrGuard::Guard(_) | CachedResourcesOrGuard::Disabled => None,
         }
     }
 }

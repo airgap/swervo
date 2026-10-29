@@ -1062,7 +1062,11 @@ where
             .get(&webview_id)
             .and_then(|webview| webview.user_content_manager_id);
 
+        let top_level_origin = parent_pipeline_id
+            .and_then(|id| self.pipelines.get(&id))
+            .and_then(|parent| parent.top_level_origin.clone());
         let new_pipeline_info = NewPipelineInfo {
+            top_level_origin,
             parent_info: parent_pipeline_id,
             new_pipeline_id,
             browsing_context_id,
@@ -1916,10 +1920,14 @@ where
                 self.handle_activate_document_msg(source_pipeline_id);
             },
             // Update pipeline url after redirections
-            ScriptToConstellationMessage::SetFinalUrl(final_url) => {
+            ScriptToConstellationMessage::SetFinalUrl(final_url, origin) => {
                 // The script may have finished loading after we already started shutting down.
                 if let Some(ref mut pipeline) = self.pipelines.get_mut(&source_pipeline_id) {
                     pipeline.url = final_url;
+                    if pipeline.browsing_context_id == BrowsingContextId::from(pipeline.webview_id)
+                    {
+                        pipeline.top_level_origin = Some(origin);
+                    }
                 } else {
                     warn!("constellation got set final url message for dead pipeline");
                 }
@@ -3811,6 +3819,9 @@ where
             self.paint_proxy.clone(),
             is_parent_throttled,
             load_info.load_data,
+            self.pipelines
+                .get(&parent_pipeline_id)
+                .and_then(|parent| parent.top_level_origin.clone()),
         );
 
         assert!(!self.pipelines.contains_key(&new_pipeline_id));
@@ -3893,6 +3904,7 @@ where
             self.paint_proxy.clone(),
             is_opener_throttled,
             load_data,
+            None,
         );
         let _ = response_sender.send(Some(AuxiliaryWebViewCreationResponse {
             new_webview_id,

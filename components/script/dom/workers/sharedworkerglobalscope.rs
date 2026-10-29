@@ -392,6 +392,7 @@ impl SharedWorkerGlobalScope {
         let origin = current_global.origin().immutable().clone();
         let referrer = current_global.get_referrer();
         let is_secure_context = current_global.is_secure_context();
+        let top_level_origin = current_global.top_level_origin();
         let current_global_ancestor_trustworthy = current_global.has_trustworthy_ancestor_origin();
         let is_nested_browsing_context = current_global.is_nested_browsing_context();
         let worker_name = worker_name.to_string();
@@ -414,6 +415,7 @@ impl SharedWorkerGlobalScope {
                 let referrer = referrer_url.map(Referrer::ReferrerUrl).unwrap_or(referrer);
 
                 let request_client = RequestClient {
+                    top_level_origin,
                     preloaded_resources: PreloadedResources::default(),
                     policy_container: policy_container.clone(),
                     origin: Origin::Origin(origin.clone()),

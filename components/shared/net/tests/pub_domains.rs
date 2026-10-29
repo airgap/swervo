@@ -121,3 +121,13 @@ fn test_weirdness() {
     );
     assert!(!is_pub_domain(pub_suffix("city.yokohama.jp")));
 }
+
+#[test]
+fn registrable_domains_preserve_root_dots_without_merging_unrelated_sites() {
+    assert_eq!(reg_suffix("a.example.com."), "example.com.");
+    assert_eq!(reg_suffix("b.attacker.com."), "attacker.com.");
+    assert_eq!(reg_suffix("a.example.co.uk."), "example.co.uk.");
+    assert_eq!(reg_suffix("b.attacker.co.uk."), "attacker.co.uk.");
+    assert_eq!(reg_suffix("foo.city.kawasaki.jp."), "city.kawasaki.jp.");
+    assert_eq!(reg_suffix("a.example.com.."), "a.example.com..");
+}

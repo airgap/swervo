@@ -248,6 +248,10 @@ impl ServiceWorkerGlobalScope {
         font_context: Arc<FontContext>,
         worker_id: ServiceWorkerId,
     ) -> ServiceWorkerGlobalScope {
+        // Registrations are not yet partitioned. A reused service worker must not
+        // borrow the first registering page's network-cache partition.
+        let mut init = init;
+        init.top_level_origin = None;
         ServiceWorkerGlobalScope {
             workerglobalscope: WorkerGlobalScope::new_inherited(
                 init,

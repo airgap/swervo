@@ -221,6 +221,7 @@ fn create_http_states(
 
     let override_manager = CertificateErrorOverrideManager::new();
     let http_state = HttpState {
+        cors_cache: CorsCache::default(),
         hsts_list: RwLock::new(hsts_list),
         cookie_jar: RwLock::new(cookie_jar),
         auth_cache: RwLock::new(auth_cache),
@@ -238,6 +239,7 @@ fn create_http_states(
 
     let override_manager = CertificateErrorOverrideManager::new();
     let private_http_state = HttpState {
+        cors_cache: CorsCache::default(),
         hsts_list: RwLock::new(HstsList::default()),
         cookie_jar: RwLock::new(CookieStorage::new(150)),
         auth_cache: RwLock::new(AuthCache::default()),
@@ -650,6 +652,7 @@ impl ResourceChannelManager {
             },
             CoreResourceMsg::ClearCache(sender) => {
                 http_state.http_cache.clear();
+                http_state.cors_cache.clear();
                 if let Some(sender) = sender {
                     sender.send_or_ignore(());
                 }
@@ -863,7 +866,7 @@ impl CoreResourceManager {
                         AutoRequestBodyStreamCloser::new(fetch_params.request.body.as_ref());
                     let response = http_redirect_fetch(
                         &mut fetch_params,
-                        &mut CorsCache::default(),
+                        &mut context.state.cors_cache.clone(),
                         response,
                         true,
                         &mut sender,

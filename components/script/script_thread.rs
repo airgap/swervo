@@ -3442,8 +3442,10 @@ impl ScriptThread {
         };
 
         let final_url = metadata.final_url.clone();
-        let _ = script_to_constellation_chan
-            .send(ScriptToConstellationMessage::SetFinalUrl(final_url.clone()));
+        let _ = script_to_constellation_chan.send(ScriptToConstellationMessage::SetFinalUrl(
+            final_url.clone(),
+            origin.immutable().clone(),
+        ));
 
         debug!(
             "ScriptThread: loading {} on pipeline {:?}",
@@ -3517,6 +3519,7 @@ impl ScriptThread {
             incomplete.viewport_details,
             origin.clone(),
             final_url.clone(),
+            incomplete.top_level_origin.clone(),
             // TODO(37417): Set correct top-level URL here. Currently, we only specify the
             // url of the current window. However, in case this is an iframe, we should
             // pass in the URL from the frame that includes the iframe (which potentially

@@ -103,6 +103,7 @@ pub(crate) fn prepare_workerscope_init(
     webgl_chan: Option<WebGLChan>,
 ) -> WorkerGlobalScopeInit {
     WorkerGlobalScopeInit {
+        top_level_origin: global.top_level_origin(),
         resource_threads: global.resource_threads().clone(),
         storage_threads: global.storage_threads().clone(),
         mem_profiler_chan: global.mem_profiler_chan().clone(),
@@ -382,6 +383,7 @@ impl WorkerGlobalScope {
                 init.storage_threads,
                 worker_url.clone(),
                 None,
+                init.top_level_origin,
                 #[cfg(feature = "webgpu")]
                 gpu_id_hub,
                 init.inherited_secure_context,

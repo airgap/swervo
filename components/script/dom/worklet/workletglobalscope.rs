@@ -114,6 +114,7 @@ impl WorkletGlobalScope {
                 init.storage_threads.clone(),
                 base_url.clone(),
                 None,
+                None,
                 #[cfg(feature = "webgpu")]
                 init.gpu_id_hub.clone(),
                 inherited_secure_context,

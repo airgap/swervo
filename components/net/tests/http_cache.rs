@@ -28,6 +28,7 @@ async fn test_refreshing_resource_sets_done_chan_the_appropriate_value() {
     )
     .pipeline_id(Some(TEST_PIPELINE_ID))
     .origin(url.origin())
+    .client(crate::network_partition::client(url.origin()))
     .build();
     let timing = ResourceFetchTiming::new(ResourceTimingType::Navigation);
     let mut response = Response::new(url.clone(), timing);
@@ -83,6 +84,7 @@ async fn test_skip_incomplete_cache_for_range_request_with_no_end_bound() {
     )
     .pipeline_id(Some(TEST_PIPELINE_ID))
     .origin(url.origin())
+    .client(crate::network_partition::client(url.origin()))
     .headers(headers)
     .build();
 

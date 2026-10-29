@@ -20,6 +20,7 @@ mod hsts;
 mod http_cache;
 mod http_loader;
 mod image_cache;
+mod network_partition;
 mod resource_thread;
 mod subresource_integrity;
 mod svg_text;
@@ -112,6 +113,7 @@ fn create_http_state(fc: Option<GenericEmbedderProxy<NetToEmbedderMsg>>) -> Http
 
     let override_manager = net::connector::CertificateErrorOverrideManager::new();
     HttpState {
+        cors_cache: CorsCache::default(),
         hsts_list: RwLock::new(net::hsts::HstsList::default()),
         cookie_jar: RwLock::new(net::cookie_storage::CookieStorage::new(150)),
         auth_cache: RwLock::new(net::resource_thread::AuthCache::default()),

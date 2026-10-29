@@ -4218,6 +4218,7 @@ impl Window {
         viewport_details: ViewportDetails,
         origin: MutableOrigin,
         creation_url: ServoUrl,
+        inherited_top_level_origin: Option<ImmutableOrigin>,
         top_level_creation_url: ServoUrl,
         navigation_start: CrossProcessInstant,
         webgl_chan: Option<WebGLChan>,
@@ -4250,6 +4251,11 @@ impl Window {
                 storage_threads,
                 creation_url,
                 Some(top_level_creation_url),
+                if parent_info.is_none() {
+                    Some(origin.immutable().clone())
+                } else {
+                    inherited_top_level_origin
+                },
                 #[cfg(feature = "webgpu")]
                 gpu_id_hub,
                 inherited_secure_context,
