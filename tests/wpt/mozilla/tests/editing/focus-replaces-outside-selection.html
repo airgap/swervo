@@ -21,4 +21,29 @@ test(() => {
               "switching hosts must not retain the previous range");
   assert_equals(selection.rangeCount, 1);
 }, "An old range cannot prevent editing in the newly focused contenteditable host");
+test(() => {
+  const selection = getSelection();
+  first.focus();
+  selection.collapse(first.firstChild, 5);
+  first.blur();
+  first.focus();
+  assert_equals(selection.anchorNode, first.firstChild);
+  assert_equals(selection.anchorOffset, 5);
+  assert_true(selection.isCollapsed);
+}, "Refocusing preserves a nonzero caret created by Selection.collapse");
+test(() => {
+  const selection = getSelection();
+  first.focus();
+  const range = document.createRange();
+  range.setStart(first.firstChild, 1);
+  range.setEnd(first.firstChild, 6);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  first.blur();
+  first.focus();
+  assert_equals(selection.anchorNode, first.firstChild);
+  assert_equals(selection.anchorOffset, 1);
+  assert_equals(selection.focusNode, first.firstChild);
+  assert_equals(selection.focusOffset, 6);
+}, "Refocusing preserves an existing selected range inside the host");
 </script>
