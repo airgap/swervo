@@ -181,21 +181,18 @@ impl HTMLElement {
         let Some(selection) = document.GetSelection(cx) else {
             return;
         };
+        let node = self.upcast::<Node>();
+        // Selection.collapse and page scripts can create a different Range inside
+        // this host. Preserve its boundary points when focus is lost and regained.
+        if selection.active_range().is_some_and(|active| {
+            node.is_inclusive_ancestor_of(&active.start_container()) &&
+                node.is_inclusive_ancestor_of(&active.end_container())
+        }) {
+            return;
+        }
         let range = self
             .upcast::<Element>()
             .ensure_contenteditable_selection_range(cx, &document);
-        // If the current range is already associated with this contenteditable
-        // element, then we shouldn't do anything. This is important when focus
-        // is lost and regained, but selection was changed beforehand. In that
-        // case, we should maintain the selection as it were, by not creating
-        // a new range.
-        if selection
-            .active_range()
-            .is_some_and(|active| active == range)
-        {
-            return;
-        }
-        let node = self.upcast::<Node>();
         let mut selected_node = DomRoot::from_ref(node);
         let mut previous_eligible_node = DomRoot::from_ref(node);
         let mut previous_node = DomRoot::from_ref(node);
@@ -263,6 +260,9 @@ impl HTMLElement {
         }
         range.set_start(&selected_node, selected_offset);
         range.set_end(&selected_node, selected_offset);
+        // AddRange ignores a new range while another remains selected. Focus moved
+        // to this editing host, so retire the previous host's selection first.
+        selection.RemoveAllRanges();
         selection.AddRange(&range);
     }
 }
