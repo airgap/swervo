@@ -220,7 +220,12 @@ enum SharedWorkerClaimResult {
 fn prune_closed_shared_workers(workers: &mut Vec<SharedWorkerRegistryEntry>) {
     workers.retain(|entry| match &entry.state {
         SharedWorkerRegistryState::Creating { .. } => true,
-        SharedWorkerRegistryState::Created(worker) => !worker.closing.load(Ordering::SeqCst),
+        SharedWorkerRegistryState::Created(worker) => worker
+            .thread
+            .lock()
+            .expect("SharedWorker join handle poisoned")
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished()),
         SharedWorkerRegistryState::Failed { waiters } => *waiters > 0,
     });
 }
@@ -230,12 +235,16 @@ fn find_matching_shared_worker(
     key: &SharedWorkerKey,
 ) -> Option<usize> {
     workers.iter().position(|entry| {
-        entry.key.matches(
-            &key.storage_key,
-            &key.constructor_origin,
-            &key.constructor_url,
-            &key.name,
-        )
+        // A closing worker is unavailable for new connections, but its handle
+        // remains owned until it exits so engine shutdown can still interrupt it.
+        !matches!(&entry.state, SharedWorkerRegistryState::Created(worker)
+            if worker.closing.load(Ordering::SeqCst)) &&
+            entry.key.matches(
+                &key.storage_key,
+                &key.constructor_origin,
+                &key.constructor_url,
+                &key.name,
+            )
     })
 }
 
