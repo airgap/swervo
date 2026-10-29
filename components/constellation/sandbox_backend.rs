@@ -178,7 +178,11 @@ pub fn apply_sandbox(policy: &Policy) -> SandboxOutcome {
     // before IPC/runtime helper threads are started; future threads inherit the
     // domain. Refuse a late call rather than leave sibling threads unconfined.
     let single_threaded = std::fs::read_dir("/proc/self/task")
-        .map(|threads| threads.count() == 1)
+        .map(|threads| {
+            threads
+                .collect::<Result<Vec<_>, _>>()
+                .is_ok_and(|threads| threads.len() == 1)
+        })
         .unwrap_or(false);
     if !single_threaded {
         return SandboxOutcome {
