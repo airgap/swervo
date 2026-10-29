@@ -263,6 +263,9 @@ impl HTMLElement {
         }
         range.set_start(&selected_node, selected_offset);
         range.set_end(&selected_node, selected_offset);
+        // AddRange ignores a new range while another remains selected. Focus moved
+        // to this editing host, so retire the previous host's selection first.
+        selection.RemoveAllRanges();
         selection.AddRange(&range);
     }
 }

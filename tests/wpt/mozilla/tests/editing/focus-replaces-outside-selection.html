@@ -1,0 +1,24 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Focusing an editing host replaces a selection outside it</title>
+<script src="/resources/testharness.js"></script>
+<script src="/resources/testharnessreport.js"></script>
+<p id="outside">Previously selected text</p>
+<div id="first" contenteditable="true">First editor</div>
+<div id="second" contenteditable="true">Second editor</div>
+<script>
+test(() => {
+  const selection = getSelection();
+  selection.removeAllRanges();
+  const range = document.createRange();
+  range.selectNodeContents(outside);
+  selection.addRange(range);
+  first.focus();
+  assert_true(first === selection.anchorNode || first.contains(selection.anchorNode),
+              "the caret must enter the newly focused host");
+  second.focus();
+  assert_true(second === selection.anchorNode || second.contains(selection.anchorNode),
+              "switching hosts must not retain the previous range");
+  assert_equals(selection.rangeCount, 1);
+}, "An old range cannot prevent editing in the newly focused contenteditable host");
+</script>

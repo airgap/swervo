@@ -13167,6 +13167,15 @@
      ]
     ]
    },
+   "editing": {
+    "focus-replaces-outside-selection.html": [
+     "ece653c9da67399e44870be909f134a894584933",
+     [
+      null,
+      {}
+     ]
+    ]
+   },
    "incremental-layout": {
     "basic-fragment-tree-layout.html": [
      "8ca5549a672cbc8356307a0c50a33ac0b0542693",
