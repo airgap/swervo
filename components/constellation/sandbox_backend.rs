@@ -102,8 +102,8 @@ pub fn content_process_policy() -> Policy {
 
     // The running binary's own directory: re-exec of self + dlopen of co-located
     // `.so`s. Needs execute.
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
+    if let Ok(exe) = std::env::current_exe() &&
+        let Some(dir) = exe.parent()
     {
         fs_exec.push(dir.to_path_buf());
     }
