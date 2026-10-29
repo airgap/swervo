@@ -193,7 +193,7 @@ pub fn apply_sandbox(policy: &Policy) -> SandboxOutcome {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn apply_landlock(policy: &Policy) -> (Option<LandlockStatus>, bool) {
     use landlock::{
-        ABI, AccessFs, AccessNet, CompatLevel, Compatible, Ruleset, RulesetAttr,
+        ABI, Access, AccessFs, AccessNet, CompatLevel, Compatible, Ruleset, RulesetAttr,
         RulesetCreatedAttr, RulesetStatus,
     };
 
