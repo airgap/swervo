@@ -113,14 +113,12 @@ pub(crate) struct SharedWorkerStorageKey {
 
 impl SharedWorkerStorageKey {
     /// <https://storage.spec.whatwg.org/#storage-key>
-    fn for_window(global: &GlobalScope, window: &Window) -> Self {
+    fn for_window(global: &GlobalScope) -> Self {
         // A storage key is a tuple consisting of an origin (an origin).
         // This is expected to change; see Client-Side Storage Partitioning.
         let origin = global.obtain_storage_key_for_non_storage_purposes();
 
-        let top_level_site = window
-            .top_level_document_if_local()
-            .map(|document| SharedWorkerSite::from_origin(document.origin().immutable().clone()));
+        let top_level_site = global.top_level_origin().map(SharedWorkerSite::from_origin);
 
         SharedWorkerStorageKey {
             origin,
@@ -453,7 +451,7 @@ impl SharedWorkerMethods<crate::DomTypeHolder> for SharedWorker {
         let caller_is_secure_context = global.is_secure_context();
         // Step 9. Let outsideStorageKey be the result of running obtain a storage
         // key for non-storage purposes given outsideSettings.
-        let outside_storage_key = SharedWorkerStorageKey::for_window(global, window);
+        let outside_storage_key = SharedWorkerStorageKey::for_window(global);
 
         let worker_name_string = worker_name.to_string();
         let (control_sender, control_receiver) = unbounded();

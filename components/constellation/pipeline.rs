@@ -15,7 +15,7 @@ use script_traits::{
 use servo_base::generic_channel::SendError;
 use servo_base::id::{BrowsingContextId, HistoryStateId, PipelineId, WebViewId};
 use servo_constellation_traits::{LoadData, ServiceWorkerManagerFactory};
-use servo_url::ServoUrl;
+use servo_url::{ImmutableOrigin, ServoUrl};
 
 use crate::Constellation;
 use crate::event_loop::EventLoop;
@@ -23,6 +23,8 @@ use crate::event_loop::EventLoop;
 /// A `Pipeline` is the constellation's view of a `Window`. Each pipeline has an event loop
 /// (executed by a script thread). A script thread may be responsible for many pipelines.
 pub struct Pipeline {
+    /// Actual top-level origin, preserved across cross-process child creation.
+    pub top_level_origin: Option<ImmutableOrigin>,
     /// The ID of the pipeline.
     pub id: PipelineId,
 
@@ -94,6 +96,7 @@ impl Pipeline {
             constellation.paint_proxy.clone(),
             throttled,
             new_pipeline_info.load_data,
+            new_pipeline_info.top_level_origin,
         ))
     }
 
@@ -108,8 +111,10 @@ impl Pipeline {
         paint_proxy: PaintProxy,
         throttled: bool,
         load_data: LoadData,
+        top_level_origin: Option<ImmutableOrigin>,
     ) -> Self {
         let pipeline = Self {
+            top_level_origin,
             id,
             browsing_context_id,
             webview_id,

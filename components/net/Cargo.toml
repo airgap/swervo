@@ -88,6 +88,8 @@ webpki-roots = { workspace = true }
 webrender_api = { workspace = true }
 
 [dev-dependencies]
+serde_json = { workspace = true }
+tempfile = { workspace = true }
 flate2 = { workspace = true }
 fst = { workspace = true }
 hyper = { workspace = true, features = ["full"] }

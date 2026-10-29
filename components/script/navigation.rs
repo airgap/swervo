@@ -140,6 +140,8 @@ impl NavigationListener {
 /// data will be updated according to future resize events, viewport changes, etc.)
 #[derive(JSTraceable)]
 pub(crate) struct InProgressLoad {
+    #[no_trace]
+    pub(crate) top_level_origin: Option<ImmutableOrigin>,
     /// The pipeline which requested this load.
     #[no_trace]
     pub(crate) pipeline_id: PipelineId,
@@ -193,6 +195,7 @@ impl InProgressLoad {
     pub(crate) fn new(new_pipeline_info: NewPipelineInfo) -> InProgressLoad {
         let url = new_pipeline_info.load_data.url.clone();
         InProgressLoad {
+            top_level_origin: new_pipeline_info.top_level_origin,
             pipeline_id: new_pipeline_info.new_pipeline_id,
             browsing_context_id: new_pipeline_info.browsing_context_id,
             webview_id: new_pipeline_info.webview_id,
@@ -227,6 +230,7 @@ impl InProgressLoad {
             .unwrap_or(InsecureRequestsPolicy::DoNotUpgrade);
 
         let request_client = RequestClient {
+            top_level_origin: self.top_level_origin.clone(),
             preloaded_resources: PreloadedResources::default(),
             policy_container: self.load_data.policy_container.clone().unwrap_or_default(),
             origin: Origin::Origin(client_origin),

@@ -516,6 +516,8 @@ pub struct IFrameLoadInfoWithData {
 /// Resources required by workerglobalscopes
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct WorkerGlobalScopeInit {
+    /// Top-level context inherited from the creating global, including nested workers.
+    pub top_level_origin: Option<ImmutableOrigin>,
     /// Chan to a resource thread
     pub resource_threads: ResourceThreads,
     /// Chan to a storage thread
@@ -764,7 +766,7 @@ pub enum ScriptToConstellationMessage {
     /// Set the document state for a pipeline (used by screenshot / reftests)
     SetDocumentState(DocumentState),
     /// Update the pipeline Url, which can change after redirections.
-    SetFinalUrl(ServoUrl),
+    SetFinalUrl(ServoUrl, ImmutableOrigin),
     /// A log entry, with the top-level browsing context id and thread name
     LogEntry(Option<ScriptEventLoopId>, Option<String>, LogEntry),
     /// Discard the document.

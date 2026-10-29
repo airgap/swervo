@@ -364,6 +364,7 @@ impl WindowProxy {
         let response = response_receiver.recv().unwrap()?;
         let new_browsing_context_id = BrowsingContextId::from(response.new_webview_id);
         let new_pipeline_info = NewPipelineInfo {
+            top_level_origin: None,
             parent_info: None,
             new_pipeline_id: response.new_pipeline_id,
             browsing_context_id: new_browsing_context_id,

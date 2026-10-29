@@ -112,6 +112,7 @@ pub struct HttpState {
     pub hsts_list: RwLock<HstsList>,
     pub cookie_jar: RwLock<CookieStorage>,
     pub http_cache: HttpCache,
+    pub cors_cache: CorsCache,
     pub auth_cache: RwLock<AuthCache>,
     pub history_states: RwLock<FxHashMap<HistoryStateId, Vec<u8>>>,
     pub client: ServoClient,
@@ -1906,12 +1907,11 @@ async fn block_for_cache_ready<'a>(
     let guard_result = context.state.http_cache.get_or_guard(entry_key).await;
 
     match guard_result {
-        CachedResourcesOrGuard::Guard(_) => {
+        CachedResourcesOrGuard::Guard(_) | CachedResourcesOrGuard::Disabled => {
             *done_chan = None;
         },
         CachedResourcesOrGuard::Value(ref cached_resources) => {
-            // TODO(#33616): Step 8.23 Set httpCache to the result of determining the
-            // HTTP cache partition, given httpRequest.
+            // Step 8.23: the entry key includes the top-level network partition.
             // Step 8.25.1 Set storedResponse to the result of selecting a response from the httpCache,
             //              possibly needing validation, as per the "Constructing Responses from Caches"
             //              chapter of HTTP Caching, if any.
@@ -2504,6 +2504,8 @@ async fn cors_preflight_fetch(
             .collect(),
     )
     .build();
+
+    preflight.client = request.client.clone();
 
     // Step 2. Append (`Accept`, `*/*`) to preflight’s header list.
     preflight

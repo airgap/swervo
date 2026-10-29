@@ -213,6 +213,9 @@ pub type PreloadedResources = FxHashMap<PreloadKey, PreloadId>;
 /// <https://fetch.spec.whatwg.org/#concept-request-client>
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct RequestClient {
+    /// The actual top-level document origin, inherited by frames and workers.
+    /// Missing context disables network cache reuse.
+    pub top_level_origin: Option<ImmutableOrigin>,
     /// <https://html.spec.whatwg.org/multipage/#map-of-preloaded-resources>
     pub preloaded_resources: PreloadedResources,
     /// <https://html.spec.whatwg.org/multipage/#concept-settings-object-policy-container>
@@ -1029,6 +1032,19 @@ impl Request {
         total_request_length += self.body.body_length();
         // Step 5. Return totalRequestLength.
         total_request_length
+    }
+
+    /// <https://fetch.spec.whatwg.org/#determine-the-network-partition-key>
+    pub fn network_partition_key(&self) -> Option<crate::partition_key::NetworkPartitionKey> {
+        let client = self.client.as_ref()?;
+        // A new top-level navigation belongs to its destination, including after
+        // redirects, rather than the document that initiated it.
+        let origin = if self.mode == RequestMode::Navigate && !client.is_nested_browsing_context {
+            self.current_url().origin()
+        } else {
+            client.top_level_origin.clone()?
+        };
+        crate::partition_key::NetworkPartitionKey::from_origin(&origin)
     }
 
     /// <https://fetch.spec.whatwg.org/#concept-request-tainted-origin>

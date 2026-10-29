@@ -305,6 +305,10 @@ pub(crate) struct GlobalScope {
     #[no_trace]
     top_level_creation_url: Option<ServoUrl>,
 
+    /// Network isolation context; never inferred from an embedded resource URL.
+    #[no_trace]
+    top_level_origin: Option<ImmutableOrigin>,
+
     /// A map for storing the previous permission state read results.
     permission_state_invocation_results: DomRefCell<HashMap<PermissionName, PermissionState>>,
 
@@ -796,6 +800,7 @@ impl GlobalScope {
         storage_threads: StorageThreads,
         creation_url: ServoUrl,
         top_level_creation_url: Option<ServoUrl>,
+        top_level_origin: Option<ImmutableOrigin>,
         #[cfg(feature = "webgpu")] gpu_id_hub: Arc<IdentityHub>,
         inherited_secure_context: Option<bool>,
         unminify_js: bool,
@@ -824,6 +829,7 @@ impl GlobalScope {
             storage_threads,
             creation_url: DomRefCell::new(creation_url),
             top_level_creation_url,
+            top_level_origin,
             permission_state_invocation_results: Default::default(),
             list_auto_close_worker: Default::default(),
             event_source_tracker: DOMTracker::new(),
@@ -2603,6 +2609,10 @@ impl GlobalScope {
         *self.creation_url.borrow_mut() = creation_url;
     }
 
+    pub(crate) fn top_level_origin(&self) -> Option<ImmutableOrigin> {
+        self.top_level_origin.clone()
+    }
+
     /// Get the top_level_creation_url for this global scope
     pub(crate) fn top_level_creation_url(&self) -> &Option<ServoUrl> {
         &self.top_level_creation_url
@@ -2679,6 +2689,7 @@ impl GlobalScope {
             .unwrap_or_default();
         let is_nested_browsing_context = window.is_some_and(|window| !window.is_top_level());
         RequestClient {
+            top_level_origin: self.top_level_origin(),
             preloaded_resources,
             policy_container: self.policy_container(),
             origin: RequestOrigin::Origin(self.origin().immutable().clone()),

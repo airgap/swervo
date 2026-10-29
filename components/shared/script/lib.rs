@@ -60,6 +60,8 @@ use webrender_api::units::DevicePixel;
 /// The initial data required to create a new `Pipeline` attached to an existing `ScriptThread`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct NewPipelineInfo {
+    /// Top-level origin inherited from the parent; roots resolve their actual document origin.
+    pub top_level_origin: Option<ImmutableOrigin>,
     /// The ID of the parent pipeline and frame type, if any.
     /// If `None`, this is a root pipeline.
     pub parent_info: Option<PipelineId>,

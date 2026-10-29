@@ -433,6 +433,7 @@ fn test_cors_preflight_cache_fetch() {
     let (server, url) = make_server(handler);
 
     let mut request = RequestBuilder::new(Some(TEST_WEBVIEW_ID), url, Referrer::NoReferrer)
+        .client(crate::network_partition::client(mock_origin()))
         .policy_container(Default::default())
         .origin(mock_origin())
         .build();
@@ -1297,6 +1298,7 @@ fn test_response_cache_status_is_local() {
 
     let request = RequestBuilder::new(Some(TEST_WEBVIEW_ID), url.clone(), Referrer::NoReferrer)
         .origin(url.origin())
+        .client(crate::network_partition::client(url.origin()))
         .policy_container(Default::default())
         .build();
 
@@ -1338,6 +1340,7 @@ fn test_response_cache_status_is_validated() {
 
     let request = RequestBuilder::new(Some(TEST_WEBVIEW_ID), url.clone(), Referrer::NoReferrer)
         .origin(url.origin())
+        .client(crate::network_partition::client(url.origin()))
         .policy_container(Default::default())
         .build();
 

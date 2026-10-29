@@ -88,8 +88,17 @@ impl PubDomainRules {
         public
     }
     pub fn registrable_suffix<'a>(&self, domain: &'a str) -> &'a str {
-        let (_, registrable) = self.suffix_pair(domain);
-        registrable
+        // PSL rules have no root dot. Keep that dot in the returned site, as
+        // required by the URL registrable-domain algorithm, but not in matching.
+        let without_root_dot = domain.strip_suffix('.').unwrap_or(domain);
+        if without_root_dot.ends_with('.') {
+            // Multiple empty terminal labels must not collapse unrelated hosts
+            // into one cache/cookie site if the URL parser accepts them.
+            return domain;
+        }
+        let (_, registrable) = self.suffix_pair(without_root_dot);
+        let length = registrable.len() + usize::from(domain.ends_with('.'));
+        &domain[domain.len() - length..]
     }
     pub fn is_public_suffix(&self, domain: &str) -> bool {
         // Speeded-up version of

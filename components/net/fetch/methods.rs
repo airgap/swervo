@@ -190,7 +190,13 @@ pub async fn fetch(request: Request, target: Target<'_>, context: &FetchContext)
         ResourceAttribute::FetchStart,
         ResourceAttribute::StartTime(ResourceTimeValue::FetchStart),
     ]);
-    fetch_with_cors_cache(request, &mut CorsCache::default(), target, context).await
+    fetch_with_cors_cache(
+        request,
+        &mut context.state.cors_cache.clone(),
+        target,
+        context,
+    )
+    .await
 }
 
 /// Continuation of fetch from step 8.
@@ -633,7 +639,7 @@ pub async fn main_fetch(
                 .await;
                 // Substep 3.
                 if response.is_network_error() {
-                    // TODO clear cache entries using request
+                    cache.clear_request(&fetch_params.request);
                 }
                 // Substep 4.
                 response

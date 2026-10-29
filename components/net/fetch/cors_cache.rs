@@ -2,48 +2,33 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-//! An implementation of the [CORS preflight cache](https://fetch.spec.whatwg.org/#cors-preflight-cache)
-//! For now this library is XHR-specific.
-//! For stuff involving `<img>`, `<iframe>`, `<form>`, etc please check what
-//! the request mode should be and compare with the fetch spec
-//! This library will eventually become the core of the Fetch crate
-//! with CORSRequest being expanded into FetchRequest (etc)
+//! A partitioned, profile-local CORS preflight cache shared by concurrent fetches.
+//! <https://fetch.spec.whatwg.org/#cors-preflight-cache>
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use http::Method;
 use http::header::HeaderName;
+use net_traits::partition_key::NetworkPartitionKey;
 use net_traits::request::{CredentialsMode, Origin, Request};
+use parking_lot::Mutex;
 use servo_url::ServoUrl;
 
-/// Union type for CORS cache entries
-///
-/// Each entry might pertain to a header or method
-#[derive(Clone, Debug)]
+const MAX_ENTRIES: usize = 1024;
+const MAX_AGE: Duration = Duration::from_secs(600);
+
+/// The method or header authorized by a successful preflight.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HeaderOrMethod {
     HeaderData(HeaderName),
     MethodData(Method),
 }
 
-impl HeaderOrMethod {
-    fn match_header(&self, header_name: &HeaderName) -> bool {
-        match *self {
-            HeaderOrMethod::HeaderData(ref n) => n == header_name,
-            _ => false,
-        }
-    }
-
-    fn match_method(&self, method: &Method) -> bool {
-        match *self {
-            HeaderOrMethod::MethodData(ref m) => m == method,
-            _ => false,
-        }
-    }
-}
-
-/// An entry in the CORS cache
+/// An entry in the CORS cache.
 #[derive(Clone, Debug)]
 pub struct CorsCacheEntry {
+    pub partition_key: NetworkPartitionKey,
     pub origin: Origin,
     pub url: ServoUrl,
     pub max_age: Duration,
@@ -52,141 +37,141 @@ pub struct CorsCacheEntry {
     created: Instant,
 }
 
-impl CorsCacheEntry {
-    fn new(
-        origin: Origin,
-        url: ServoUrl,
-        max_age: Duration,
-        credentials: bool,
-        header_or_method: HeaderOrMethod,
-    ) -> CorsCacheEntry {
-        CorsCacheEntry {
-            origin,
-            url,
-            max_age,
-            credentials,
-            header_or_method,
-            created: Instant::now(),
-        }
+fn matches_request(
+    entry: &CorsCacheEntry,
+    request: &Request,
+    key: &NetworkPartitionKey,
+    url: &ServoUrl,
+) -> bool {
+    entry.partition_key == *key &&
+        entry.origin == request.origin &&
+        entry.url == *url &&
+        (entry.credentials || request.credentials_mode != CredentialsMode::Include)
+}
+
+fn cleanup(entries: &mut Vec<CorsCacheEntry>) {
+    let now = Instant::now();
+    entries.retain(|entry| now.duration_since(entry.created) < entry.max_age);
+}
+
+fn insert(entries: &mut Vec<CorsCacheEntry>, mut entry: CorsCacheEntry) {
+    entry.max_age = entry.max_age.min(MAX_AGE);
+    if entry.max_age.is_zero() {
+        return;
     }
+    if entries.len() >= MAX_ENTRIES {
+        entries.remove(0);
+    }
+    entries.push(entry);
 }
 
-fn match_headers(cors_cache: &CorsCacheEntry, cors_req: &Request) -> bool {
-    cors_cache.origin == cors_req.origin &&
-        cors_cache.url == cors_req.current_url() &&
-        (cors_cache.credentials || cors_req.credentials_mode != CredentialsMode::Include)
-}
-
-/// A simple, vector-based CORS Cache
+/// Clones share state within one profile. Locks are held only for cache operations,
+/// never while a preflight or response is awaited.
 #[derive(Clone, Default)]
-pub struct CorsCache(Vec<CorsCacheEntry>);
+pub struct CorsCache(Arc<Mutex<Vec<CorsCacheEntry>>>);
 
 impl CorsCache {
-    fn find_entry_by_header<'a>(
-        &'a mut self,
+    fn lookup(
+        &mut self,
         request: &Request,
-        header_name: &HeaderName,
-    ) -> Option<&'a mut CorsCacheEntry> {
-        self.cleanup();
-        self.0
-            .iter_mut()
-            .find(|e| match_headers(e, request) && e.header_or_method.match_header(header_name))
+        query: HeaderOrMethod,
+        new_max_age: Option<Duration>,
+    ) -> bool {
+        let Some(partition_key) = request.network_partition_key() else {
+            return false;
+        };
+        let url = request.current_url();
+        let mut entries = self.0.lock();
+        cleanup(&mut entries);
+        if let Some(entry) = entries.iter_mut().find(|entry| {
+            matches_request(entry, request, &partition_key, &url) && entry.header_or_method == query
+        }) {
+            if let Some(age) = new_max_age {
+                // An anonymous refresh must not restart an older credentialed grant's lifetime.
+                entry.max_age = age.min(MAX_AGE);
+            }
+            return true;
+        }
+        if let Some(age) = new_max_age {
+            insert(
+                &mut entries,
+                CorsCacheEntry {
+                    partition_key,
+                    origin: request.origin.clone(),
+                    url,
+                    max_age: age,
+                    credentials: request.credentials_mode == CredentialsMode::Include,
+                    header_or_method: query,
+                    created: Instant::now(),
+                },
+            );
+        }
+        false
     }
 
-    fn find_entry_by_method<'a>(
-        &'a mut self,
-        request: &Request,
-        method: Method,
-    ) -> Option<&'a mut CorsCacheEntry> {
-        // we can take the method from CorSRequest itself
-        self.cleanup();
-        self.0
-            .iter_mut()
-            .find(|e| match_headers(e, request) && e.header_or_method.match_method(&method))
-    }
-
-    /// Remove old entries
+    /// Remove expired authorizations.
     pub fn cleanup(&mut self) {
-        let CorsCache(buf) = self.clone();
-        let now = Instant::now();
-        let new_buf: Vec<CorsCacheEntry> = buf
-            .into_iter()
-            .filter(|e| now < e.created + e.max_age)
-            .collect();
-        *self = CorsCache(new_buf);
+        cleanup(&mut self.0.lock());
     }
 
-    /// Returns true if an entry with a
-    /// [matching header](https://fetch.spec.whatwg.org/#concept-cache-match-header) is found
+    /// Clear authorizations in all fetches sharing this profile's cache.
+    pub fn clear(&self) {
+        self.0.lock().clear();
+    }
+
+    /// A failed preflight invalidates this request's grants, including credentialed
+    /// entries, while preserving authorizations in other top-level partitions.
+    pub fn clear_request(&self, request: &Request) {
+        let Some(key) = request.network_partition_key() else {
+            return;
+        };
+        let url = request.current_url();
+        self.0.lock().retain(|entry| {
+            entry.partition_key != key || entry.origin != request.origin || entry.url != url
+        });
+    }
+
     pub fn match_header(&mut self, request: &Request, header_name: &HeaderName) -> bool {
-        self.find_entry_by_header(request, header_name).is_some()
+        self.lookup(
+            request,
+            HeaderOrMethod::HeaderData(header_name.clone()),
+            None,
+        )
     }
 
-    /// Updates max age if an entry for a
-    /// [matching header](https://fetch.spec.whatwg.org/#concept-cache-match-header) is found.
-    ///
-    /// If not, it will insert an equivalent entry
     pub fn match_header_and_update(
         &mut self,
         request: &Request,
         header_name: &HeaderName,
         new_max_age: Duration,
     ) -> bool {
-        match self
-            .find_entry_by_header(request, header_name)
-            .map(|e| e.max_age = new_max_age)
-        {
-            Some(_) => true,
-            None => {
-                self.insert(CorsCacheEntry::new(
-                    request.origin.clone(),
-                    request.current_url(),
-                    new_max_age,
-                    request.credentials_mode == CredentialsMode::Include,
-                    HeaderOrMethod::HeaderData(header_name.clone()),
-                ));
-                false
-            },
-        }
+        self.lookup(
+            request,
+            HeaderOrMethod::HeaderData(header_name.clone()),
+            Some(new_max_age),
+        )
     }
 
-    /// Returns true if an entry with a
-    /// [matching method](https://fetch.spec.whatwg.org/#concept-cache-match-method) is found
     pub fn match_method(&mut self, request: &Request, method: Method) -> bool {
-        self.find_entry_by_method(request, method).is_some()
+        self.lookup(request, HeaderOrMethod::MethodData(method), None)
     }
 
-    /// Updates max age if an entry for
-    /// [a matching method](https://fetch.spec.whatwg.org/#concept-cache-match-method) is found.
-    ///
-    /// If not, it will insert an equivalent entry
     pub fn match_method_and_update(
         &mut self,
         request: &Request,
         method: Method,
         new_max_age: Duration,
     ) -> bool {
-        match self
-            .find_entry_by_method(request, method.clone())
-            .map(|e| e.max_age = new_max_age)
-        {
-            Some(_) => true,
-            None => {
-                self.insert(CorsCacheEntry::new(
-                    request.origin.clone(),
-                    request.current_url(),
-                    new_max_age,
-                    request.credentials_mode == CredentialsMode::Include,
-                    HeaderOrMethod::MethodData(method),
-                ));
-                false
-            },
-        }
+        self.lookup(
+            request,
+            HeaderOrMethod::MethodData(method),
+            Some(new_max_age),
+        )
     }
 
-    /// Insert an entry
     pub fn insert(&mut self, entry: CorsCacheEntry) {
-        self.cleanup();
-        self.0.push(entry);
+        let mut entries = self.0.lock();
+        cleanup(&mut entries);
+        insert(&mut entries, entry);
     }
 }
