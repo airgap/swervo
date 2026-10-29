@@ -587,14 +587,10 @@ impl GStreamerPlayer {
         }
 
         let is_media_source = self.stream_type == StreamType::MediaSource;
-        // FIXME(#282): The progressive downloading breaks playback on Windows and Android.
-        if is_media_source || !cfg!(any(target_os = "windows", target_os = "android")) {
-            // Set player to perform progressive downloading. This will make the
-            // player store the downloaded media in a local temporary file for
-            // faster playback of already-downloaded chunks.
-            // MSE data is already in memory and arrives at the page's pace instead: no
-            // download buffering, and no byte-level buffering either. An open-ended appsrc never
-            // reads as fully buffered, so GstPlay would pause on each dip and stay paused.
+        // Renderer confinement denies filesystem writes. Keep progressive media in the
+        // bounded memory queue instead of GStreamer's user-cache download file. MSE
+        // appsrc also disables byte buffering: it arrives at the page's own pace.
+        {
             let flags = pipeline.property_value("flags");
             let flags_class = match glib::FlagsClass::with_type(flags.type_()) {
                 Some(flags) => flags,
@@ -612,12 +608,11 @@ impl GStreamerPlayer {
                     ));
                 },
             };
+            let flags_class = flags_class.unset_by_nick("download");
             let flags_class = if is_media_source {
-                flags_class
-                    .unset_by_nick("download")
-                    .unset_by_nick("buffering")
+                flags_class.unset_by_nick("buffering")
             } else {
-                flags_class.set_by_nick("download")
+                flags_class
             };
             let Some(flags) = flags_class.build() else {
                 return Err(PlayerError::Backend(

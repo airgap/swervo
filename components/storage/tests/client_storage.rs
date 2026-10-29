@@ -65,6 +65,52 @@ fn test_exit() {
 }
 
 #[test]
+fn test_temporary_registry_lifetime() {
+    install_test_namespace();
+    let handle: ClientStorageThreadHandle = ClientStorageThreadFactory::new(None, false);
+    let origin = ServoUrl::parse("https://temporary-storage.example")
+        .unwrap()
+        .origin();
+    let map = obtain_bottle_map(
+        &handle,
+        StorageType::Local,
+        Some(WebViewId::new(servo_base::id::TEST_PAINTER_ID)),
+        StorageIdentifier::IndexedDB,
+        origin,
+    );
+    let (path, created) = handle
+        .create_database(map.bottle_id, "temporary-lifetime".into())
+        .recv()
+        .unwrap()
+        .unwrap();
+    assert!(created);
+    assert!(
+        path.is_absolute(),
+        "temporary IndexedDB must never fall back to cwd"
+    );
+    assert!(path.is_dir());
+    let storage = path
+        .ancestors()
+        .find(|p| p.file_name().is_some_and(|n| n == "clientstorage"))
+        .unwrap();
+    let root = storage.parent().unwrap().to_path_buf();
+    assert!(storage.join("default_v1/reg.sqlite").is_file());
+    let (sender, receiver) = generic_channel::channel().unwrap();
+    handle
+        .send(ClientStorageThreadMessage::Exit(sender))
+        .unwrap();
+    receiver.recv().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while root.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        !root.exists(),
+        "temporary storage must be removed when its owner exits"
+    );
+}
+
+#[test]
 fn test_workflow() {
     install_test_namespace();
     let tmp_dir = tempfile::tempdir().unwrap();

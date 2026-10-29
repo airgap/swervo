@@ -68,12 +68,12 @@ impl SqliteEngine {
         })
     }
 
-    fn memory() -> rusqlite::Result<Self> {
+    fn memory(base_dir: PathBuf) -> rusqlite::Result<Self> {
         let connection = Connection::open_in_memory()?;
         Self::init(&connection)?;
         Ok(SqliteEngine {
             connection,
-            base_dir: PathBuf::new(),
+            base_dir,
         })
     }
 
@@ -691,10 +691,12 @@ impl ClientStorageThreadFactory for ClientStorageThreadHandle {
             .name("ClientStorageThread".to_owned())
             .spawn(move || {
                 // Keep temp_dir alive while the thread runs.
-                let _ = temp_dir;
-                let engine = SqliteEngine::new(storage_dir).unwrap_or_else(|error| {
+                let _temporary_directory = temp_dir;
+                let engine = SqliteEngine::new(storage_dir.clone()).unwrap_or_else(|error| {
                     warn!("Failed to initialize ClientStorage engine into storage dir: {error:?}");
-                    SqliteEngine::memory().unwrap()
+                    // Even a memory-only registry must retain its owned storage
+                    // directory. An empty base would put IndexedDB bottles in cwd.
+                    SqliteEngine::memory(storage_dir).unwrap()
                 });
                 ClientStorageThread::new(sender_clone, generic_receiver, engine).start();
             })
