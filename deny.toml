@@ -45,6 +45,14 @@ ignore = [
     #
     # We must use this version of quick-xml until `winit` upgrades `sctk`.
     "RUSTSEC-2026-0195",
+    # These standalone crates were merged into zbus 6; these are maintenance
+    # notices, not vulnerability exceptions. Our AccessKit/AT-SPI dependency
+    # chain still uses zbus 5. Follow AccessKit's own scoped exceptions until
+    # that chain migrates to zbus 6, then remove all three entries:
+    # https://github.com/AccessKit/accesskit/blob/main/deny.toml
+    "RUSTSEC-2026-0370", # zvariant
+    "RUSTSEC-2026-0371", # zbus_names
+    "RUSTSEC-2026-0372", # zvariant_derive
 ]
 
 # This section is considered when running `cargo deny check licenses`

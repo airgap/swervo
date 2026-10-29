@@ -24,7 +24,7 @@ use js::context::JSContext;
 use markup5ever::TokenizerResult;
 use mime::{self, Mime};
 use net_traits::mime_classifier::{ApacheBugFlag, MediaType, MimeClassifier, NoSniffFlag};
-use net_traits::policy_container::PolicyContainer;
+use net_traits::policy_container::{EmbedderPolicy, PolicyContainer};
 use net_traits::request::RequestId;
 use net_traits::{
     FetchMetadata, LoadContext, Metadata, NetworkError, ReferrerPolicy, ResourceFetchTiming,
@@ -1064,10 +1064,13 @@ impl ParserContext {
         PolicyContainer {
             // Step 3. Set result's CSP list to the result of parsing a response's Content Security Policies given response.
             csp_list: parse_csp_list_from_metadata(&metadata.headers),
-            // TODO Step 4. If environment is non-null, then set result's embedder policy to the
-            // result of obtaining an embedder policy given response and environment.
-            // Otherwise, set it to "unsafe-none".
-            embedder_policy: Default::default(),
+            // Step 4. Parse the response policy. The full environment secure-context
+            // check (including ancestors) runs in initialize_document_object, once
+            // the destination Window exists and before any document scripts run.
+            embedder_policy: EmbedderPolicy::from_headers(
+                metadata.headers.as_deref(),
+                metadata.final_url.is_potentially_trustworthy(),
+            ),
             // Step 5. Set result's referrer policy to the result of parsing the `Referrer-Policy` header given response. [REFERRERPOLICY]
             referrer_policy: ReferrerPolicy::parse_header_for_response(&metadata.headers),
         }
@@ -1076,7 +1079,11 @@ impl ParserContext {
     /// <https://html.spec.whatwg.org/multipage/#initialise-the-document-object>
     fn initialize_document_object(&self, document: &Document) {
         // Step 9. Let document be a new Document, with
-        document.set_policy_container(self.navigation_params.policy_container.clone());
+        let mut policy_container = self.navigation_params.policy_container.clone();
+        if !document.window().as_global_scope().is_secure_context() {
+            policy_container.embedder_policy = EmbedderPolicy::default();
+        }
+        document.set_policy_container(policy_container);
         document.set_active_sandboxing_flag_set(self.navigation_params.final_sandboxing_flag_set);
         document.set_about_base_url(self.navigation_params.about_base_url.clone());
         // Step 17. Process link headers given document, navigationParams's response, and "pre-media".

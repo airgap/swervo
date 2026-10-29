@@ -21,7 +21,7 @@ use js::realm::CurrentRealm;
 use js::rust::{HandleValue, MutableHandleValue, ParentRuntime};
 use mime::Mime;
 use net_traits::blob_url_store::UrlWithBlobClaim;
-use net_traits::policy_container::PolicyContainer;
+use net_traits::policy_container::{EmbedderPolicy, PolicyContainer};
 use net_traits::request::{
     CredentialsMode, Destination, InsecureRequestsPolicy, ParserMetadata, RequestBuilder, RequestId,
 };
@@ -589,12 +589,17 @@ impl WorkerGlobalScope {
             //
             // Step 1. If response's URL's scheme is "blob", then return a clone of response's URL's
             // blob URL entry's environment's policy container.
-            self.set_csp_list(parent_policy_container.csp_list.clone());
-            self.set_referrer_policy(parent_policy_container.get_referrer_policy());
+            *self.policy_container.borrow_mut() = parent_policy_container.clone();
             return;
         }
         // Step 3. Set result's CSP list to the result of parsing a response's Content Security Policies given response.
         self.set_csp_list(parse_csp_list_from_metadata(&metadata.headers));
+        // Step 4. Obtain the network worker's own response policy; unlike local
+        // workers, it must not inherit COEP from its creator.
+        self.policy_container.borrow_mut().embedder_policy = EmbedderPolicy::from_headers(
+            metadata.headers.as_deref(),
+            self.upcast::<GlobalScope>().is_secure_context(),
+        );
         // Step 5. Set result's referrer policy to the result of parsing the `Referrer-Policy`
         // header given response. [REFERRERPOLICY]
         let referrer_policy = metadata

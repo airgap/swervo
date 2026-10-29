@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use content_security_policy::CspList;
+use http::HeaderMap;
 use malloc_size_of_derive::MallocSizeOf;
 use serde::{Deserialize, Serialize};
 
@@ -61,6 +62,43 @@ impl PolicyContainer {
 pub struct EmbedderPolicy {
     /// <https://html.spec.whatwg.org/multipage/#embedder-policy-value-2>
     pub value: EmbedderPolicyValue,
+}
+
+impl EmbedderPolicy {
+    /// Obtain the supported enforcing embedder policy from a response. COEP is a
+    /// structured-field *item*, not a comma-separated list or a quoted string.
+    ///
+    /// <https://html.spec.whatwg.org/multipage/#obtain-an-embedder-policy>
+    ///
+    /// Reporting and credentialless are not implemented yet. This does not grant
+    /// cross-origin isolation: COOP, navigation checks and agent-cluster isolation
+    /// are separate prerequisites before shared memory can be enabled (GATO-42).
+    pub fn from_headers(headers: Option<&HeaderMap>, is_secure_context: bool) -> Self {
+        if !is_secure_context {
+            return Self::default();
+        }
+        let Some(headers) = headers else {
+            return Self::default();
+        };
+        let mut values = headers.get_all("cross-origin-embedder-policy").iter();
+        let Some(value) = values.next() else {
+            return Self::default();
+        };
+        // Repeated fields combine with a comma and cannot form a valid sf-item.
+        if values.next().is_some() {
+            return Self::default();
+        }
+        let Ok(item) = sfv::Parser::new(value.as_bytes()).parse::<sfv::Item>() else {
+            return Self::default();
+        };
+        let value = match item.bare_item {
+            sfv::BareItem::Token(token) if token.as_str() == "require-corp" => {
+                EmbedderPolicyValue::RequireCorp
+            },
+            _ => EmbedderPolicyValue::UnsafeNone,
+        };
+        Self { value }
+    }
 }
 
 /// <https://html.spec.whatwg.org/multipage/#embedder-policy-value>
