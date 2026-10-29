@@ -1328,6 +1328,8 @@ fn set_logger(script_to_constellation_sender: ScriptToConstellationSender) {
 
 /// Content process entry point.
 pub fn run_content_process(token: String) {
+    #[cfg(unix)]
+    let browser_pid = std::os::unix::process::parent_id();
     let (unprivileged_content_sender, unprivileged_content_receiver) =
         ipc::channel::<UnprivilegedContent>().unwrap();
     let connection_bootstrap: IpcSender<IpcSender<UnprivilegedContent>> =
@@ -1344,6 +1346,23 @@ pub fn run_content_process(token: String) {
     if opts::get().sandbox {
         create_sandbox();
     }
+
+    // Start the lifetime watchdog after confinement so it inherits the renderer's
+    // filesystem policy. Starting it in the embedder before this hook leaves an
+    // unconfined thread in the same address space. Parent identity also covers a
+    // browser crash/SIGKILL, when normal IPC shutdown cannot reap the renderer.
+    #[cfg(unix)]
+    std::thread::Builder::new()
+        .name("ParentWatch".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+                if std::os::unix::process::parent_id() != browser_pid {
+                    std::process::exit(0);
+                }
+            }
+        })
+        .expect("Failed to spawn the parent watchdog thread");
 
     let _js_engine_setup = script::init();
 
@@ -1428,15 +1447,15 @@ fn create_sandbox() {
     not(target_env = "ohos"),
 ))]
 fn create_sandbox() {
-    // Landlock + seccomp self-applied in this content process. Never panics on
-    // failure: a sandbox that can't be fully applied degrades gracefully so the
-    // browser keeps running (the anti-gaol requirement). The outcome is logged
-    // for the --sandbox-selftest / soak telemetry.
+    // Requested confinement is mandatory. A process that cannot install the
+    // complete policy must exit before initializing JavaScript or loading content.
+    // stderr is intentional: content logging is initialized later in startup.
     let outcome = apply_sandbox(&content_process_policy());
     if outcome.degraded {
-        warn!("Content process sandbox applied with degradation: {outcome:?}");
+        eprintln!("Content process sandbox enforcement failed: {outcome:?}");
+        std::process::exit(78);
     } else {
-        debug!("Content process sandbox applied: {outcome:?}");
+        eprintln!("Content process sandbox enforced: {outcome:?}");
     }
 }
 

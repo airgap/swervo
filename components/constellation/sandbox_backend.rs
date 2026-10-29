@@ -9,7 +9,9 @@
 //! chroot, nor `capset` (so the AppArmor mediation that EPERM-panics gaol is
 //! never on the code path):
 //!
-//! * **Landlock** (rust-landlock 0.4.5) in enforce mode: filesystem READ rules
+//! * **Landlock** (rust-landlock 0.4.5) in enforce mode: deny filesystem access
+//!   by default, granting only the required read/execute paths. Handling write
+//!   rights is essential: rights omitted from a Landlock ruleset remain allowed.
 //!   plus `AccessNet::{BindTcp, ConnectTcp}` *handled with no allow rules*, which
 //!   denies all TCP bind/connect (content does no sockets; net is brokered to the
 //!   parent). `CompatLevel::BestEffort` means old kernels silently downgrade
@@ -100,8 +102,8 @@ pub fn content_process_policy() -> Policy {
 
     // The running binary's own directory: re-exec of self + dlopen of co-located
     // `.so`s. Needs execute.
-    if let Ok(exe) = std::env::current_exe() &&
-        let Some(dir) = exe.parent()
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
     {
         fs_exec.push(dir.to_path_buf());
     }
@@ -198,7 +200,7 @@ fn apply_landlock(policy: &Policy) -> (Option<LandlockStatus>, bool) {
     // Request the highest ABI we know about; BestEffort downgrades on older
     // kernels (e.g. AccessNet is dropped below v4 / kernel 6.7).
     let abi = ABI::V4;
-    let read_access = AccessFs::from_read(abi); // Execute | ReadFile | ReadDir
+    let read_access = AccessFs::ReadFile | AccessFs::ReadDir;
 
     let mut degraded = false;
 
@@ -206,7 +208,7 @@ fn apply_landlock(policy: &Policy) -> (Option<LandlockStatus>, bool) {
     //    NO net allow-rules added below, all TCP bind/connect is denied.
     let ruleset = match Ruleset::default()
         .set_compatibility(CompatLevel::BestEffort)
-        .handle_access(read_access)
+        .handle_access(AccessFs::from_all(abi))
         .and_then(|r| r.handle_access(AccessNet::BindTcp | AccessNet::ConnectTcp))
     {
         Ok(r) => r,
@@ -225,7 +227,7 @@ fn apply_landlock(policy: &Policy) -> (Option<LandlockStatus>, bool) {
         },
     };
 
-    // 3. Read-only rules. Use `path_beneath_rules`, which masks each path's access
+    // 3. Read-only rules, without execute or write. `path_beneath_rules` masks each path's access
     //    by ACCESS_FILE (keeping ReadFile, dropping ReadDir on regular files; the
     //    full set on dirs), so every rule yields CompatResult::Full and the host
     //    reaches FullyEnforced. (Adding a *file* like /dev/urandom or the literal
@@ -549,7 +551,10 @@ fn apply_seccomp() -> bool {
     };
 
     // apply_filter sets PR_SET_NO_NEW_PRIVS then seccomp(SECCOMP_SET_MODE_FILTER).
-    match seccompiler::apply_filter(&program) {
+    // IPC bootstrap can have created helper threads before this hook. Synchronize
+    // the syscall policy to all of them instead of leaving an unfiltered thread
+    // in the renderer's address space.
+    match seccompiler::apply_filter_all_threads(&program) {
         Ok(()) => {
             log::info!("seccomp: filter installed (Errno(EPERM) enforce; socket()=AF_UNIX-only)");
             true
