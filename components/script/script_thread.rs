@@ -3324,6 +3324,9 @@ impl ScriptThread {
 
         // If we're in multiprocess mode, shut-down the IPC router for this process.
         if opts::get().multiprocess {
+            // This is the process's sole script event loop. Worker cleanup needs
+            // IPC while its ports and runtime handles are still being released.
+            crate::dom::sharedworker::shutdown_shared_workers();
             debug!("Exiting IPC router thread in script thread.");
             ROUTER.shutdown();
         }

@@ -1097,6 +1097,9 @@ impl Default for JSEngineSetup {
 
 impl Drop for JSEngineSetup {
     fn drop(&mut self) {
+        // Single-process embedders can share workers across script event loops.
+        // Only whole-engine teardown may stop all of those shared owners.
+        crate::dom::sharedworker::shutdown_shared_workers();
         *JS_ENGINE.lock().unwrap() = None;
 
         while !self.0.can_shutdown() {

@@ -44,6 +44,7 @@ use crate::dom::sharedworkerglobalscope::{
 use crate::dom::trustedtypes::trustedscripturl::TrustedScriptURL;
 use crate::dom::window::Window;
 use crate::dom::workerglobalscope::prepare_workerscope_init;
+use crate::script_runtime::ThreadSafeJSContext;
 use crate::task::TaskOnce;
 use crate::url::ensure_blob_referenced_by_url_is_kept_alive;
 
@@ -148,7 +149,9 @@ struct SharedWorkerRegistration {
     worker_is_secure_context: bool,
     closing: Arc<AtomicBool>,
     sender: Sender<SharedWorkerScriptMsg>,
-    _control_sender: Sender<SharedWorkerControlMsg>,
+    control_sender: Sender<SharedWorkerControlMsg>,
+    context: ThreadSafeJSContext,
+    thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
 
 // A user agent has an associated shared worker manager which is the result of starting a new parallel queue.
@@ -158,6 +161,52 @@ struct SharedWorkerRegistration {
 // likely constellation-owned.
 static SHARED_WORKERS: LazyLock<(Mutex<Vec<SharedWorkerRegistryEntry>>, Condvar)> =
     LazyLock::new(|| (Mutex::new(Vec::new()), Condvar::new()));
+
+/// Only called when this process's script engine is shutting down. Closing an
+/// individual document must leave workers shared by other documents alive.
+pub(crate) fn shutdown_shared_workers() {
+    let registrations: Vec<_> = {
+        let (workers, ready) = &*SHARED_WORKERS;
+        let mut workers = workers.lock().expect("SharedWorker registry poisoned");
+        let entries = std::mem::take(&mut *workers);
+        ready.notify_all();
+        entries
+            .into_iter()
+            .filter_map(|entry| match entry.state {
+                SharedWorkerRegistryState::Created(registration) => Some(registration),
+                _ => None,
+            })
+            .collect()
+    };
+    for registration in &registrations {
+        registration.closing.store(true, Ordering::SeqCst);
+        if registration
+            .control_sender
+            .send(SharedWorkerControlMsg::Exit)
+            .is_err()
+        {
+            warn!(
+                "SharedWorker {} already disconnected during shutdown",
+                registration.id
+            );
+        }
+        registration.context.request_interrupt_callback();
+    }
+    // Worker cleanup unregisters itself, so joining under the registry lock
+    // would deadlock. Interrupt every worker before waiting for any one of them.
+    for registration in registrations {
+        let handle = registration
+            .thread
+            .lock()
+            .expect("SharedWorker join handle poisoned")
+            .take();
+        if let Some(handle) = handle &&
+            handle.join().is_err()
+        {
+            warn!("SharedWorker {} panicked during shutdown", registration.id);
+        }
+    }
+}
 
 // Servo-internal registry states used to serialize the SharedWorker constructor's
 // manager lookup/create work and avoid duplicate SharedWorker creation. These
@@ -171,7 +220,12 @@ enum SharedWorkerClaimResult {
 fn prune_closed_shared_workers(workers: &mut Vec<SharedWorkerRegistryEntry>) {
     workers.retain(|entry| match &entry.state {
         SharedWorkerRegistryState::Creating { .. } => true,
-        SharedWorkerRegistryState::Created(worker) => !worker.closing.load(Ordering::SeqCst),
+        SharedWorkerRegistryState::Created(worker) => worker
+            .thread
+            .lock()
+            .expect("SharedWorker join handle poisoned")
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished()),
         SharedWorkerRegistryState::Failed { waiters } => *waiters > 0,
     });
 }
@@ -181,12 +235,16 @@ fn find_matching_shared_worker(
     key: &SharedWorkerKey,
 ) -> Option<usize> {
     workers.iter().position(|entry| {
-        entry.key.matches(
-            &key.storage_key,
-            &key.constructor_origin,
-            &key.constructor_url,
-            &key.name,
-        )
+        // A closing worker is unavailable for new connections, but its handle
+        // remains owned until it exits so engine shutdown can still interrupt it.
+        !matches!(&entry.state, SharedWorkerRegistryState::Created(worker)
+            if worker.closing.load(Ordering::SeqCst)) &&
+            entry.key.matches(
+                &key.storage_key,
+                &key.constructor_origin,
+                &key.constructor_url,
+                &key.name,
+            )
     })
 }
 
@@ -593,7 +651,7 @@ impl SharedWorkerMethods<crate::DomTypeHolder> for SharedWorker {
         let (registered_sender, registered_receiver) = unbounded();
 
         // Step 11.6. Otherwise, in parallel, run a worker given worker, urlRecord, outsideSettings, outsidePort, and options.
-        let _join_handle = match SharedWorkerGlobalScope::run_shared_worker_scope(
+        let join_handle = match SharedWorkerGlobalScope::run_shared_worker_scope(
             init,
             window.webview_id(),
             Some(window.window_proxy().browsing_context_id()),
@@ -633,7 +691,7 @@ impl SharedWorkerMethods<crate::DomTypeHolder> for SharedWorker {
         };
 
         // Step 11.5.2. Let workerIsSecureContext be true if insideSettings is a secure context; otherwise, false.
-        let Ok(worker_is_secure_context) = setup_receiver.recv() else {
+        let Ok((worker_is_secure_context, context)) = setup_receiver.recv() else {
             remove_creating_shared_worker(&shared_worker_key);
             SharedWorker::queue_simple_error(global, worker_addr);
             return Ok(worker);
@@ -647,7 +705,9 @@ impl SharedWorkerMethods<crate::DomTypeHolder> for SharedWorker {
             worker_is_secure_context,
             closing,
             sender,
-            _control_sender: control_sender,
+            control_sender,
+            context,
+            thread: Arc::new(Mutex::new(Some(join_handle))),
         };
 
         if !transition_creating_to_created(&shared_worker_key, registration.clone()) {
