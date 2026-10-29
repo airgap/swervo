@@ -200,10 +200,10 @@ pub(crate) fn shutdown_shared_workers() {
             .lock()
             .expect("SharedWorker join handle poisoned")
             .take();
-        if let Some(handle) = handle {
-            if handle.join().is_err() {
-                warn!("SharedWorker {} panicked during shutdown", registration.id);
-            }
+        if let Some(handle) = handle &&
+            handle.join().is_err()
+        {
+            warn!("SharedWorker {} panicked during shutdown", registration.id);
         }
     }
 }
