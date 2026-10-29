@@ -1330,6 +1330,14 @@ fn set_logger(script_to_constellation_sender: ScriptToConstellationSender) {
 pub fn run_content_process(token: String) {
     #[cfg(unix)]
     let browser_pid = std::os::unix::process::parent_id();
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    let entered_early = {
+        let requested = std::env::var("SERVO_CONTENT_SANDBOX").as_deref() == Ok("1");
+        if requested {
+            create_sandbox();
+        }
+        requested
+    };
     let (unprivileged_content_sender, unprivileged_content_receiver) =
         ipc::channel::<UnprivilegedContent>().unwrap();
     let connection_bootstrap: IpcSender<IpcSender<UnprivilegedContent>> =
@@ -1342,7 +1350,13 @@ pub fn run_content_process(token: String) {
     opts::initialize_options(unprivileged_content.opts());
     prefs::set(unprivileged_content.prefs().clone());
 
-    // Enter the sandbox if necessary.
+    // Linux has already entered confinement before creating any helper threads.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    if entered_early != opts::get().sandbox {
+        eprintln!("Content process sandbox bootstrap/options mismatch");
+        std::process::exit(78);
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
     if opts::get().sandbox {
         create_sandbox();
     }

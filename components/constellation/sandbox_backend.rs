@@ -174,6 +174,19 @@ fn home_dir() -> Option<PathBuf> {
 /// `degraded` when confinement is not fully enforced.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub fn apply_sandbox(policy: &Policy) -> SandboxOutcome {
+    // Landlock domains are thread-local on the oldest supported kernels. Enter
+    // before IPC/runtime helper threads are started; future threads inherit the
+    // domain. Refuse a late call rather than leave sibling threads unconfined.
+    let single_threaded = std::fs::read_dir("/proc/self/task")
+        .map(|threads| threads.count() == 1)
+        .unwrap_or(false);
+    if !single_threaded {
+        return SandboxOutcome {
+            landlock: None,
+            seccomp_applied: false,
+            degraded: true,
+        };
+    }
     let (landlock, landlock_degraded) = apply_landlock(policy);
     let seccomp_applied = apply_seccomp();
 

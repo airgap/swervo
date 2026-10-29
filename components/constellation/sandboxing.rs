@@ -104,7 +104,7 @@ pub fn spawn_multiprocess(content: UnprivilegedContent) -> Result<Process, IpcEr
 
     let path_to_self = env::current_exe().expect("Failed to get current executor.");
     let mut child_process = process::Command::new(path_to_self);
-    setup_common(&mut child_process, token);
+    setup_common(&mut child_process, token, content.opts().sandbox);
 
     #[allow(clippy::zombie_processes)]
     let child = child_process
@@ -152,7 +152,7 @@ pub fn spawn_multiprocess(content: UnprivilegedContent) -> Result<Process, IpcEr
     // If there is a sandbox, use the `gaol` API to create the child process.
     let process = if content.opts().sandbox {
         let mut command = sandbox::Command::me().expect("Failed to get current sandbox.");
-        setup_common(&mut command, token);
+        setup_common(&mut command, token, content.opts().sandbox);
 
         let profile = content_process_sandbox_profile();
         Process::Sandboxed(
@@ -164,7 +164,7 @@ pub fn spawn_multiprocess(content: UnprivilegedContent) -> Result<Process, IpcEr
     } else {
         let path_to_self = env::current_exe().expect("Failed to get current executor.");
         let mut child_process = process::Command::new(path_to_self);
-        setup_common(&mut child_process, token);
+        setup_common(&mut child_process, token, content.opts().sandbox);
 
         Process::Unsandboxed(
             child_process
@@ -204,7 +204,7 @@ pub fn spawn_multiprocess(content: UnprivilegedContent) -> Result<Process, IpcEr
 
     let path_to_self = env::current_exe().expect("Failed to get current executor.");
     let mut child_process = process::Command::new(path_to_self);
-    setup_common(&mut child_process, token);
+    setup_common(&mut child_process, token, content.opts().sandbox);
 
     #[allow(clippy::zombie_processes)]
     let child = child_process
@@ -223,7 +223,15 @@ pub fn spawn_multiprocess(_content: UnprivilegedContent) -> Result<Process, Erro
     process::exit(1);
 }
 
-fn setup_common<C: CommandMethods>(command: &mut C, token: String) {
+fn setup_common<C: CommandMethods>(command: &mut C, token: String, sandbox: bool) {
+    // The Linux child must enter Landlock while it is still single-threaded,
+    // before IPC bootstrap can start helper threads. Confirm this request against
+    // the actual serialized options after the IPC handshake.
+    C::env(
+        command,
+        "SERVO_CONTENT_SANDBOX",
+        if sandbox { "1" } else { "0" },
+    );
     C::arg(command, "--content-process");
     C::arg(command, token);
 
