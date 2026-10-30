@@ -949,7 +949,10 @@ impl HTMLFormElement {
         match (&*scheme, method) {
             (_, FormMethod::Dialog) => unreachable!("Handled in step 11"),
             // https://html.spec.whatwg.org/multipage/#submit-mutate-action
-            ("http", FormMethod::Get) | ("https", FormMethod::Get) | ("data", FormMethod::Get) => {
+            ("http", FormMethod::Get) |
+            ("https", FormMethod::Get) |
+            ("data", FormMethod::Get) |
+            ("gator", FormMethod::Get) => {
                 load_data
                     .headers
                     .typed_insert(ContentType::from(mime::APPLICATION_WWW_FORM_URLENCODED));

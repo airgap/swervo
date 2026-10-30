@@ -23,7 +23,7 @@ use script_bindings::inheritance::Castable;
 use script_bindings::root::{Dom, DomRoot};
 use servo_base::Epoch;
 use servo_base::generic_channel::GenericSend;
-use servo_constellation_traits::{LoadData, NavigationHistoryBehavior};
+use servo_constellation_traits::NavigationHistoryBehavior;
 use servo_url::ServoUrl;
 use webrender_api::units::{DeviceIntRect, DevicePoint};
 
