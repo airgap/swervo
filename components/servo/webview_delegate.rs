@@ -10,9 +10,9 @@ use embedder_traits::{
     ConfirmResponse, ConsoleLogLevel, ContextMenuAction, ContextMenuElementInformation,
     ContextMenuItem, Cursor, EmbedderControlId, EmbedderControlResponse, FilePickerRequest,
     FilterPattern, InputEventId, InputEventResult, InputMethodType, LoadStatus, MediaSessionEvent,
-    NewWebViewDetails, Notification, PermissionFeature, PromptResponse, RgbColor, ScreenGeometry,
-    SelectElementOptionOrOptgroup, SelectElementRequest, SimpleDialogRequest, TraversalId,
-    WebResourceRequest, WebResourceResponse, WebResourceResponseMsg,
+    NewWebViewDetails, Notification, PermissionFeature, PromptResponse, RequestSource, RgbColor,
+    ScreenGeometry, SelectElementOptionOrOptgroup, SelectElementRequest, SimpleDialogRequest,
+    TraversalId, WebResourceRequest, WebResourceResponse, WebResourceResponseMsg,
 };
 use paint_api::rendering_context::RenderingContext;
 use servo_base::generic_channel::{GenericCallback, GenericSender, SendError};
@@ -30,6 +30,7 @@ use crate::{RegisterOrUnregister, Servo, WebView, WebViewBuilder};
 /// A request to navigate a [`WebView`] or one of its inner frames. This can be handled
 /// asynchronously. If not handled, the request will automatically be allowed.
 pub struct NavigationRequest {
+    pub source: RequestSource,
     pub url: Url,
     pub(crate) pipeline_id: PipelineId,
     pub(crate) constellation_proxy: ConstellationProxy,
@@ -1225,6 +1226,7 @@ mod test {
         use crate::responders::ServoErrorChannel;
 
         let web_resource_request = || WebResourceRequest {
+            source: RequestSource::Unknown,
             method: Method::GET,
             headers: HeaderMap::default(),
             url: Url::parse("https://example.com").expect("Guaranteed by argument"),

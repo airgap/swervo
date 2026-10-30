@@ -2670,6 +2670,19 @@ impl GlobalScope {
         receiver.recv().unwrap_or(u64::MAX)
     }
 
+    /// Snapshot the actual environment before referrer policy or URL redirection.
+    pub(crate) fn request_source(&self) -> embedder_traits::RequestSource {
+        let Some(window) = self.downcast::<Window>() else {
+            return embedder_traits::RequestSource::Worker;
+        };
+        embedder_traits::RequestSource::Document {
+            url: self.get_url(),
+            origin: self.origin().immutable().clone(),
+            is_top_level: window.is_top_level(),
+            has_user_activation: window.has_transient_activation(),
+        }
+    }
+
     /// Part of <https://fetch.spec.whatwg.org/#populate-request-from-client>
     pub(crate) fn request_client(&self, no_gc: Option<&NoGC>) -> RequestClient {
         // Step 1.2.2. If global is a Window object and global’s navigable is not null,
@@ -2689,6 +2702,7 @@ impl GlobalScope {
             .unwrap_or_default();
         let is_nested_browsing_context = window.is_some_and(|window| !window.is_top_level());
         RequestClient {
+            source: self.request_source(),
             top_level_origin: self.top_level_origin(),
             preloaded_resources,
             policy_container: self.policy_container(),

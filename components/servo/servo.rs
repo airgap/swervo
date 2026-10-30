@@ -35,7 +35,7 @@ use script::{JSEngineSetup, ServiceWorkerManager};
 use servo_background_hang_monitor::HangMonitorRegister;
 use servo_base::generic_channel::{GenericCallback, GenericSender, RoutedReceiver};
 pub use servo_base::id::WebViewId;
-use servo_base::id::{EMBEDDER_PIPELINE_NAMESPACE_ID, PipelineNamespace};
+use servo_base::id::{EMBEDDER_PIPELINE_NAMESPACE_ID, PipelineId, PipelineNamespace};
 #[cfg(feature = "bluetooth")]
 use servo_bluetooth::BluetoothThreadFactory;
 #[cfg(feature = "bluetooth")]
@@ -243,6 +243,50 @@ struct ServoInner {
     pending_handled_input_events: RefCell<Vec<PendingHandledInputEvent>>,
     /// An [`EventLoopWaker`] used to wake up the main embedder event loop.
     event_loop_waker: Box<dyn EventLoopWaker>,
+    /// Downloads whose bodies content processes stream here, keyed by the navigating pipeline.
+    /// Content processes are confined and cannot write to disk themselves.
+    downloads: RefCell<FxHashMap<PipelineId, ActiveDownload>>,
+}
+
+struct ActiveDownload {
+    file: std::fs::File,
+    path: String,
+    failed: bool,
+}
+
+/// Destination for a download under the user's `~/Downloads`, creating the directory and
+/// de-duplicating the name. The suggested name comes from a response header, so only its final
+/// path component is trusted.
+fn navgator_download_path(suggested: &str) -> Option<String> {
+    let mut filename = suggested
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if filename.is_empty() || filename == "." || filename == ".." || filename.contains('\0') {
+        filename = "download".to_string();
+    }
+    let home = std::env::var_os("HOME")?;
+    let dir = std::path::Path::new(&home).join("Downloads");
+    std::fs::create_dir_all(&dir).ok()?;
+    let stem = std::path::Path::new(&filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("download")
+        .to_string();
+    let ext = std::path::Path::new(&filename)
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|e| format!(".{e}"))
+        .unwrap_or_default();
+    let mut candidate = dir.join(&filename);
+    let mut n = 1;
+    while candidate.exists() {
+        candidate = dir.join(format!("{stem} ({n}){ext}"));
+        n += 1;
+    }
+    Some(candidate.to_string_lossy().into_owned())
 }
 
 impl ServoInner {
@@ -390,7 +434,7 @@ impl ServoInner {
                     webview_id.and_then(|webview_id| self.get_webview_handle(webview_id))
                 {
                     let web_resource_load = WebResourceLoad::new(
-                        web_resource_request,
+                        *web_resource_request,
                         response_sender,
                         self.servo_errors.sender(),
                     );
@@ -399,7 +443,7 @@ impl ServoInner {
                         .load_web_resource(webview, web_resource_load);
                 } else {
                     let web_resource_load = WebResourceLoad::new(
-                        web_resource_request,
+                        *web_resource_request,
                         response_sender,
                         self.servo_errors.sender(),
                     );
@@ -560,18 +604,58 @@ impl ServoInner {
                     webview.set_load_status(load_status);
                 }
             },
-            EmbedderMsg::DownloadStarted(webview_id, url, path) => {
+            EmbedderMsg::DownloadStarted(webview_id, pipeline_id, url, filename) => {
+                let Some(path) = navgator_download_path(&filename) else {
+                    warn!("Download of {url} dropped: no home directory for a destination");
+                    return;
+                };
+                let created = std::fs::File::create(&path);
                 if let Some(webview) = self.get_webview_handle(webview_id) {
-                    webview
-                        .delegate()
-                        .notify_download_started(webview, url, path);
+                    webview.delegate().notify_download_started(
+                        webview.clone(),
+                        url.clone(),
+                        path.clone(),
+                    );
+                    if created.is_err() {
+                        webview
+                            .delegate()
+                            .notify_download_completed(webview, path.clone(), false);
+                    }
+                }
+                match created {
+                    Ok(file) => {
+                        self.downloads.borrow_mut().insert(
+                            pipeline_id,
+                            ActiveDownload {
+                                file,
+                                path,
+                                failed: false,
+                            },
+                        );
+                    },
+                    Err(error) => warn!("Download of {url} to {path} failed to open: {error}"),
                 }
             },
-            EmbedderMsg::DownloadCompleted(webview_id, path, success) => {
+            EmbedderMsg::DownloadChunk(_, pipeline_id, bytes) => {
+                use std::io::Write;
+                if let Some(download) = self.downloads.borrow_mut().get_mut(&pipeline_id) &&
+                    !download.failed &&
+                    let Err(error) = download.file.write_all(&bytes)
+                {
+                    warn!("Download to {} failed to write: {error}", download.path);
+                    download.failed = true;
+                }
+            },
+            EmbedderMsg::DownloadCompleted(webview_id, pipeline_id, success) => {
+                let Some(download) = self.downloads.borrow_mut().remove(&pipeline_id) else {
+                    return;
+                };
+                let success = success && !download.failed && download.file.sync_all().is_ok();
+                drop(download.file);
                 if let Some(webview) = self.get_webview_handle(webview_id) {
                     webview
                         .delegate()
-                        .notify_download_completed(webview, path, success);
+                        .notify_download_completed(webview, download.path, success);
                 }
             },
             EmbedderMsg::NotifyFullscreenStateChanged(webview_id, fullscreen) => {
@@ -760,10 +844,12 @@ impl ServoInner {
                 webview_id,
                 pipeline_id,
                 servo_url,
+                source,
             ) => {
                 if let Some(webview) = self.get_webview_handle(webview_id) {
                     let request = NavigationRequest {
                         url: servo_url.into_url(),
+                        source,
                         pipeline_id,
                         constellation_proxy: self.constellation_proxy.clone(),
                         response_sent: false,
@@ -1047,6 +1133,7 @@ impl Servo {
             servo_errors: ServoErrorChannel::default(),
             _js_engine_setup: js_engine_setup,
             pending_handled_input_events: Default::default(),
+            downloads: Default::default(),
             event_loop_waker,
         }))
     }

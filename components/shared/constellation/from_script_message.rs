@@ -11,8 +11,8 @@ use devtools_traits::{DevtoolScriptControlMsg, ScriptToDevtoolsControlMsg, Worke
 use embedder_traits::user_contents::UserContentManagerId;
 use embedder_traits::{
     AnimationState, FocusSequenceNumber, JSValue, JavaScriptEvaluationError,
-    JavaScriptEvaluationId, MediaSessionEvent, ScriptToEmbedderChan, Theme, ViewportDetails,
-    WakeLockType,
+    JavaScriptEvaluationId, MediaSessionEvent, RequestSource, ScriptToEmbedderChan, Theme,
+    ViewportDetails, WakeLockType,
 };
 use encoding_rs::Encoding;
 use euclid::default::Size2D as UntypedSize2D;
@@ -79,7 +79,16 @@ pub enum LoadOrigin {
     /// A load originating in webdriver.
     WebDriver,
     /// A load originating in script.
-    Script(OriginSnapshot),
+    Script(OriginSnapshot, RequestSource),
+}
+
+impl LoadOrigin {
+    pub fn request_source(&self) -> RequestSource {
+        match self {
+            Self::Script(_, source) => source.clone(),
+            Self::Constellation | Self::WebDriver => RequestSource::Browser,
+        }
+    }
 }
 
 /// can be passed to `LoadUrl` to load a page with GET/POST

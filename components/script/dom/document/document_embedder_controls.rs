@@ -23,7 +23,7 @@ use script_bindings::inheritance::Castable;
 use script_bindings::root::{Dom, DomRoot};
 use servo_base::Epoch;
 use servo_base::generic_channel::GenericSend;
-use servo_constellation_traits::{LoadData, NavigationHistoryBehavior};
+use servo_constellation_traits::NavigationHistoryBehavior;
 use servo_url::ServoUrl;
 use webrender_api::units::{DeviceIntRect, DevicePoint};
 
@@ -440,7 +440,7 @@ impl ContextMenuNodes {
 
             let target_window = target_document.window();
             let target = Trusted::new(target_window);
-            let load_data = LoadData::new_for_new_unrelated_webview(url);
+            let load_data = window.load_data_for_document(url, window.pipeline_id());
             let task = task!(open_link_in_new_webview: move |cx| {
                 navigate(cx, &target.root(), NavigationHistoryBehavior::Replace, false, load_data);
             });

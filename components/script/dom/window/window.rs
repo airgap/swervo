@@ -3635,7 +3635,10 @@ impl Window {
             Some(self.IsSecureContext())
         };
         LoadData::new(
-            LoadOrigin::Script(self.origin().snapshot()),
+            LoadOrigin::Script(
+                self.origin().snapshot(),
+                self.as_global_scope().request_source(),
+            ),
             url,
             source_document.about_base_url(),
             Some(pipeline_id),

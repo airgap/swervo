@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use content_security_policy::{self as csp};
+use embedder_traits::RequestSource;
 use http::header::{AUTHORIZATION, HeaderName};
 use http::{HeaderMap, Method};
 use ipc_channel::ipc::{self, IpcReceiver, IpcSender};
@@ -213,6 +214,7 @@ pub type PreloadedResources = FxHashMap<PreloadKey, PreloadId>;
 /// <https://fetch.spec.whatwg.org/#concept-request-client>
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct RequestClient {
+    pub source: RequestSource,
     /// The actual top-level document origin, inherited by frames and workers.
     /// Missing context disables network cache reuse.
     pub top_level_origin: Option<ImmutableOrigin>,

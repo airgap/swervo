@@ -37,7 +37,7 @@ use servo_base::generic_channel::{
 };
 use servo_base::id::{PipelineId, WebViewId};
 use servo_geometry::{DeviceIndependentIntRect, DeviceIndependentIntSize};
-use servo_url::ServoUrl;
+use servo_url::{ImmutableOrigin, ServoUrl};
 use strum::{EnumMessage, IntoStaticStr};
 use style::queries::values::PrefersColorScheme;
 use style_traits::CSSPixel;
@@ -505,10 +505,14 @@ pub enum EmbedderMsg {
     NotifyFullscreenStateChanged(WebViewId, bool),
     /// The [`LoadStatus`] of the Given `WebView` has changed.
     NotifyLoadStatusChanged(WebViewId, LoadStatus),
-    /// A download started: (webview, source URL, destination file path).
-    DownloadStarted(WebViewId, String, String),
-    /// A download finished: (webview, destination file path, success).
-    DownloadCompleted(WebViewId, String, bool),
+    /// A download started: (webview, navigating pipeline, source URL, suggested file name).
+    /// Content processes are confined and cannot write to disk, so the body is streamed to the
+    /// embedder process, which owns the destination file.
+    DownloadStarted(WebViewId, PipelineId, String, String),
+    /// A chunk of a download body: (webview, navigating pipeline, bytes).
+    DownloadChunk(WebViewId, PipelineId, Vec<u8>),
+    /// A download body ended: (webview, navigating pipeline, fetch success).
+    DownloadCompleted(WebViewId, PipelineId, bool),
     /// Open dialog to select bluetooth device.
     GetSelectedBluetoothDevice(
         WebViewId,
@@ -676,8 +680,26 @@ pub enum GamepadHapticEffectType {
     DualRumble(DualRumbleEffectParams),
 }
 
+/// Engine-owned initiator context. Unlike referrers, these values are not controlled
+/// by request headers or referrer policy. Workers never acquire document privileges
+/// merely by loading a script from an embedder-owned scheme.
+#[derive(Clone, Debug, Default, Deserialize, Eq, MallocSizeOf, PartialEq, Serialize)]
+pub enum RequestSource {
+    Browser,
+    Document {
+        url: ServoUrl,
+        origin: ImmutableOrigin,
+        is_top_level: bool,
+        has_user_activation: bool,
+    },
+    Worker,
+    #[default]
+    Unknown,
+}
+
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct WebResourceRequest {
+    pub source: RequestSource,
     #[serde(
         deserialize_with = "::hyper_serde::deserialize",
         serialize_with = "::hyper_serde::serialize"

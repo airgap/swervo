@@ -144,7 +144,10 @@ impl Location {
         // Initiate navigation
         // TODO: rethrow exceptions, set exceptions enabled flag.
         let load_data = LoadData::new(
-            LoadOrigin::Script(load_origin),
+            LoadOrigin::Script(
+                load_origin,
+                navigation_origin_window.as_global_scope().request_source(),
+            ),
             url,
             source_document.about_base_url(),
             creator_pipeline_id,

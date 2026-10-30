@@ -339,7 +339,10 @@ impl WindowProxy {
 
         let blank_url = ServoUrl::parse("about:blank").ok().unwrap();
         let load_data = LoadData::new(
-            LoadOrigin::Script(document.origin().snapshot()),
+            LoadOrigin::Script(
+                document.origin().snapshot(),
+                document.global().request_source(),
+            ),
             blank_url,
             Some(document.base_url()),
             // This has the effect of ensuring that the new `about:blank` URL has the
@@ -578,7 +581,10 @@ impl WindowProxy {
             // with referrerPolicy set to referrerPolicy and exceptionsEnabled set to true.
             // FIXME: referrerPolicy may not be used properly here. exceptionsEnabled not used.
             let mut load_data = LoadData::new(
-                LoadOrigin::Script(existing_document.origin().snapshot()),
+                LoadOrigin::Script(
+                    existing_document.origin().snapshot(),
+                    existing_document.global().request_source(),
+                ),
                 url,
                 target_document.about_base_url(),
                 Some(target_window.pipeline_id()),

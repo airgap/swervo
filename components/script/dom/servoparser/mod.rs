@@ -940,13 +940,13 @@ pub(crate) struct ParserContext {
     parent_info: Option<PipelineId>,
     target_snapshot_params: TargetSnapshotParams,
     load_origin: LoadOrigin,
-    /// When this navigation is a download (Content-Disposition: attachment), the open
-    /// destination file + its path; the body is streamed here instead of being parsed.
-    download: Option<(std::fs::File, String)>,
+    /// When this navigation is a download (Content-Disposition: attachment), the body is
+    /// streamed to the embedder process instead of being parsed.
+    download: bool,
 }
 
-/// NavGator: detect a download (`Content-Disposition: attachment`) and return a destination
-/// path under the user's `~/Downloads`, creating the directory and de-duplicating the name.
+/// NavGator: detect a download (`Content-Disposition: attachment`) and return the suggested
+/// file name. The embedder process chooses the destination directory and de-duplicates.
 fn navgator_detect_download(metadata: Option<&Metadata>, url: &ServoUrl) -> Option<String> {
     let headers = metadata?.headers.as_ref()?;
     let cd = headers.get("content-disposition")?.to_str().ok()?;
@@ -977,26 +977,7 @@ fn navgator_detect_download(metadata: Option<&Metadata>, url: &ServoUrl) -> Opti
     if filename.is_empty() {
         filename = "download".to_string();
     }
-    let home = std::env::var_os("HOME")?;
-    let dir = std::path::Path::new(&home).join("Downloads");
-    std::fs::create_dir_all(&dir).ok()?;
-    let stem = std::path::Path::new(&filename)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("download")
-        .to_string();
-    let ext = std::path::Path::new(&filename)
-        .extension()
-        .and_then(|s| s.to_str())
-        .map(|e| format!(".{e}"))
-        .unwrap_or_default();
-    let mut candidate = dir.join(&filename);
-    let mut n = 1;
-    while candidate.exists() {
-        candidate = dir.join(format!("{stem} ({n}){ext}"));
-        n += 1;
-    }
-    Some(candidate.to_string_lossy().into_owned())
+    Some(filename)
 }
 
 impl ParserContext {
@@ -1028,7 +1009,7 @@ impl ParserContext {
             },
             target_snapshot_params,
             load_origin,
-            download: None,
+            download: false,
         }
     }
 
@@ -1405,7 +1386,7 @@ impl FetchResponseListener for ParserContext {
         // given response's URL, finalSandboxFlags, and entry's document state's
         // initiator origin.
         let source_origin = match self.load_origin {
-            LoadOrigin::Script(ref snapshot) => {
+            LoadOrigin::Script(ref snapshot, _) => {
                 Some(MutableOrigin::from_snapshot(snapshot.clone()))
             },
             _ => None,
@@ -1481,18 +1462,18 @@ impl FetchResponseListener for ParserContext {
             window.set_endpoints_list(endpoints);
         }
         self.parser = Some(Trusted::new(&*parser));
-        // NavGator: if this navigation is an attachment, stream it to disk as a download
-        // instead of rendering it. The (blank) document still completes; chunks go to the file.
+        // NavGator: if this navigation is an attachment, stream it to the embedder as a download
+        // instead of rendering it. The (blank) document still completes; chunks go to the embedder.
         if error.is_none() &&
-            let Some(path) = navgator_detect_download(metadata.as_ref(), &self.url) &&
-            let Ok(file) = std::fs::File::create(&path)
+            let Some(filename) = navgator_detect_download(metadata.as_ref(), &self.url)
         {
             window.send_to_embedder(EmbedderMsg::DownloadStarted(
                 self.webview_id,
+                self.pipeline_id,
                 self.url.to_string(),
-                path.clone(),
+                filename,
             ));
-            self.download = Some((file, path));
+            self.download = true;
         }
         self.navigation_params = NavigationParams {
             policy_container,
@@ -1578,9 +1559,17 @@ impl FetchResponseListener for ParserContext {
     }
 
     fn process_response_chunk(&mut self, cx: &mut JSContext, _: RequestId, payload: Vec<u8>) {
-        if let Some((file, _)) = self.download.as_mut() {
-            use std::io::Write;
-            let _ = file.write_all(&payload);
+        if self.download {
+            if let Some(parser) = self.parser.as_ref().map(|p| p.root()) {
+                parser
+                    .document
+                    .window()
+                    .send_to_embedder(EmbedderMsg::DownloadChunk(
+                        self.webview_id,
+                        self.pipeline_id,
+                        payload,
+                    ));
+            }
             return;
         }
         if self.is_synthesized_document {
@@ -1616,17 +1605,15 @@ impl FetchResponseListener for ParserContext {
         status: Result<(), NetworkError>,
         timing: ResourceFetchTiming,
     ) {
-        if let Some((file, path)) = self.download.take() {
-            drop(file); // flush + close
-            let success = status.is_ok();
+        if self.download {
             if let Some(parser) = self.parser.as_ref().map(|p| p.root()) {
                 parser
                     .document
                     .window()
                     .send_to_embedder(EmbedderMsg::DownloadCompleted(
                         self.webview_id,
-                        path,
-                        success,
+                        self.pipeline_id,
+                        status.is_ok(),
                     ));
             }
             return;

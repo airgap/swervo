@@ -123,6 +123,7 @@ fn response_policy_controls_cross_origin_no_cors_fetches() {
             .mode(RequestMode::NoCors)
             .policy_container(policy.clone())
             .client(RequestClient {
+                source: embedder_traits::RequestSource::Unknown,
                 top_level_origin: Some(origin.clone()),
                 preloaded_resources: Default::default(),
                 policy_container: policy,

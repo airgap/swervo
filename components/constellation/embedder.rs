@@ -4,7 +4,7 @@
 
 use embedder_traits::{
     InputEventOutcome, JSValue, JavaScriptEvaluationError, JavaScriptEvaluationId,
-    MediaSessionEvent, NewWebViewDetails, TraversalId,
+    MediaSessionEvent, NewWebViewDetails, RequestSource, TraversalId,
 };
 use servo_base::generic_channel::GenericSender;
 use servo_base::id::{PipelineId, WebViewId};
@@ -47,7 +47,7 @@ pub enum ConstellationToEmbedderMsg {
     /// Whether or not to allow script to open a new tab/browser
     AllowOpeningWebView(WebViewId, GenericSender<Option<NewWebViewDetails>>),
     /// Whether or not to allow a pipeline to load a url.
-    AllowNavigationRequest(WebViewId, PipelineId, ServoUrl),
+    AllowNavigationRequest(WebViewId, PipelineId, ServoUrl, RequestSource),
     /// The history state has changed.
     HistoryChanged(WebViewId, Vec<ServoUrl>, usize),
 }

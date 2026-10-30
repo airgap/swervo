@@ -26,6 +26,7 @@ use crate::{fetch_with_context, make_body, make_server, new_fetch_context};
 
 pub(crate) fn client(origin: ImmutableOrigin) -> RequestClient {
     RequestClient {
+        source: embedder_traits::RequestSource::Unknown,
         top_level_origin: Some(origin.clone()),
         origin: Origin::Origin(origin),
         preloaded_resources: Default::default(),

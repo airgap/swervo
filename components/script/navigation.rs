@@ -217,7 +217,7 @@ impl InProgressLoad {
 
     pub(crate) fn request_builder(&mut self) -> RequestBuilder {
         let client_origin = match self.load_data.load_origin {
-            LoadOrigin::Script(ref initiator_origin) => initiator_origin.immutable().clone(),
+            LoadOrigin::Script(ref initiator_origin, _) => initiator_origin.immutable().clone(),
             _ => ImmutableOrigin::new_opaque(),
         };
 
@@ -230,6 +230,7 @@ impl InProgressLoad {
             .unwrap_or(InsecureRequestsPolicy::DoNotUpgrade);
 
         let request_client = RequestClient {
+            source: self.load_data.load_origin.request_source(),
             top_level_origin: self.top_level_origin.clone(),
             preloaded_resources: PreloadedResources::default(),
             policy_container: self.load_data.policy_container.clone().unwrap_or_default(),
@@ -393,7 +394,7 @@ pub(crate) fn navigate(
         //
         // Note: `targetNavigable` is not actually defined in the spec, "active document" is
         // assumed to be the correct reference based on WPT results
-        if let LoadOrigin::Script(initiator_origin) = initiator_origin_snapshot {
+        if let LoadOrigin::Script(initiator_origin, _) = initiator_origin_snapshot {
             if load_data.url == doc.url() && initiator_origin.same_origin(&*doc.origin()) {
                 NavigationHistoryBehavior::Replace
             } else {

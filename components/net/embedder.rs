@@ -25,7 +25,7 @@ pub enum NetToEmbedderMsg {
     ),
     WebResourceRequested(
         Option<WebViewId>,
-        WebResourceRequest,
+        Box<WebResourceRequest>,
         TokioSender<WebResourceResponseMsg>,
     ),
     /// Request authentication for a load or navigation from the embedder.
