@@ -1226,6 +1226,7 @@ mod test {
         use crate::responders::ServoErrorChannel;
 
         let web_resource_request = || WebResourceRequest {
+            source: RequestSource::Unknown,
             method: Method::GET,
             headers: HeaderMap::default(),
             url: Url::parse("https://example.com").expect("Guaranteed by argument"),
