@@ -4053,7 +4053,8 @@ where
             ConstellationToEmbedderMsg::AllowNavigationRequest(
                 webview_id,
                 source_id,
-                load_data.url,
+                load_data.url.clone(),
+                load_data.load_origin.request_source(),
             ),
         );
     }

@@ -37,7 +37,7 @@ use servo_base::generic_channel::{
 };
 use servo_base::id::{PipelineId, WebViewId};
 use servo_geometry::{DeviceIndependentIntRect, DeviceIndependentIntSize};
-use servo_url::ServoUrl;
+use servo_url::{ImmutableOrigin, ServoUrl};
 use strum::{EnumMessage, IntoStaticStr};
 use style::queries::values::PrefersColorScheme;
 use style_traits::CSSPixel;
@@ -676,8 +676,26 @@ pub enum GamepadHapticEffectType {
     DualRumble(DualRumbleEffectParams),
 }
 
+/// Engine-owned initiator context. Unlike referrers, these values are not controlled
+/// by request headers or referrer policy. Workers never acquire document privileges
+/// merely by loading a script from an embedder-owned scheme.
+#[derive(Clone, Debug, Default, Deserialize, Eq, MallocSizeOf, PartialEq, Serialize)]
+pub enum RequestSource {
+    Browser,
+    Document {
+        url: ServoUrl,
+        origin: ImmutableOrigin,
+        is_top_level: bool,
+        has_user_activation: bool,
+    },
+    Worker,
+    #[default]
+    Unknown,
+}
+
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct WebResourceRequest {
+    pub source: RequestSource,
     #[serde(
         deserialize_with = "::hyper_serde::deserialize",
         serialize_with = "::hyper_serde::serialize"

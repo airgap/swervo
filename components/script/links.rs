@@ -483,7 +483,10 @@ pub(crate) fn follow_hyperlink(
         //          userInvolvement, and sourceElement set to subject.
         let secure = target_window.as_global_scope().is_secure_context();
         let load_data = LoadData::new(
-            LoadOrigin::Script(document.origin().snapshot()),
+            LoadOrigin::Script(
+                document.origin().snapshot(),
+                document.owner_global().request_source(),
+            ),
             url,
             document.about_base_url(),
             Some(window.pipeline_id()),

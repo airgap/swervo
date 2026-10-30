@@ -1405,7 +1405,7 @@ impl FetchResponseListener for ParserContext {
         // given response's URL, finalSandboxFlags, and entry's document state's
         // initiator origin.
         let source_origin = match self.load_origin {
-            LoadOrigin::Script(ref snapshot) => {
+            LoadOrigin::Script(ref snapshot, _) => {
                 Some(MutableOrigin::from_snapshot(snapshot.clone()))
             },
             _ => None,

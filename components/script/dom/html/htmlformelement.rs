@@ -931,7 +931,7 @@ impl HTMLFormElement {
 
         let target_window = target_document.window();
         let mut load_data = LoadData::new(
-            LoadOrigin::Script(doc.origin().snapshot()),
+            LoadOrigin::Script(doc.origin().snapshot(), doc.global().request_source()),
             action_components,
             target_document.about_base_url(),
             None,

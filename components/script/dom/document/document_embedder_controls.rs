@@ -440,7 +440,7 @@ impl ContextMenuNodes {
 
             let target_window = target_document.window();
             let target = Trusted::new(target_window);
-            let load_data = LoadData::new_for_new_unrelated_webview(url);
+            let load_data = window.load_data_for_document(url, window.pipeline_id());
             let task = task!(open_link_in_new_webview: move |cx| {
                 navigate(cx, &target.root(), NavigationHistoryBehavior::Replace, false, load_data);
             });

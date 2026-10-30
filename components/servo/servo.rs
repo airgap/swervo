@@ -390,7 +390,7 @@ impl ServoInner {
                     webview_id.and_then(|webview_id| self.get_webview_handle(webview_id))
                 {
                     let web_resource_load = WebResourceLoad::new(
-                        web_resource_request,
+                        *web_resource_request,
                         response_sender,
                         self.servo_errors.sender(),
                     );
@@ -399,7 +399,7 @@ impl ServoInner {
                         .load_web_resource(webview, web_resource_load);
                 } else {
                     let web_resource_load = WebResourceLoad::new(
-                        web_resource_request,
+                        *web_resource_request,
                         response_sender,
                         self.servo_errors.sender(),
                     );
@@ -760,10 +760,12 @@ impl ServoInner {
                 webview_id,
                 pipeline_id,
                 servo_url,
+                source,
             ) => {
                 if let Some(webview) = self.get_webview_handle(webview_id) {
                     let request = NavigationRequest {
                         url: servo_url.into_url(),
+                        source,
                         pipeline_id,
                         constellation_proxy: self.constellation_proxy.clone(),
                         response_sent: false,

@@ -415,6 +415,7 @@ impl SharedWorkerGlobalScope {
                 let referrer = referrer_url.map(Referrer::ReferrerUrl).unwrap_or(referrer);
 
                 let request_client = RequestClient {
+                    source: embedder_traits::RequestSource::Worker,
                     top_level_origin,
                     preloaded_resources: PreloadedResources::default(),
                     policy_container: policy_container.clone(),

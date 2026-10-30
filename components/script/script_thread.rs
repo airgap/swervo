@@ -620,7 +620,7 @@ impl ScriptThread {
                 // Always allow loads initiated by the constellation or webdriver.
                 true
             },
-            LoadOrigin::Script(source_origin) => source_origin.same_origin_domain(target),
+            LoadOrigin::Script(source_origin, _) => source_origin.same_origin_domain(target),
         }
     }
 

@@ -30,10 +30,21 @@ impl RequestInterceptor {
         context: &FetchContext,
     ) {
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let is_for_main_frame = matches!(request.destination, Destination::Document);
+        let is_for_main_frame = matches!(request.destination, Destination::Document) &&
+            matches!(request.mode, net_traits::request::RequestMode::Navigate) &&
+            !request
+                .client
+                .as_ref()
+                .is_some_and(|client| client.is_nested_browsing_context);
+        let source = request
+            .client
+            .as_ref()
+            .map(|client| client.source.clone())
+            .unwrap_or_default();
         let web_resource_request = WebResourceRequest {
+            source,
             method: request.method.clone(),
-            url: request.url().into_url(),
+            url: request.current_url().into_url(),
             headers: request.headers.clone(),
             destination: request.destination,
             referrer_url: request.referrer.to_url().map(|url| url.as_url().clone()),
@@ -44,7 +55,7 @@ impl RequestInterceptor {
         self.embedder_proxy
             .send(NetToEmbedderMsg::WebResourceRequested(
                 request.target_webview_id,
-                web_resource_request,
+                Box::new(web_resource_request),
                 sender,
             ));
 

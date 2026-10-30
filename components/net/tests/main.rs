@@ -21,6 +21,7 @@ mod http_cache;
 mod http_loader;
 mod image_cache;
 mod network_partition;
+mod request_provenance;
 mod resource_thread;
 mod subresource_integrity;
 mod svg_text;
